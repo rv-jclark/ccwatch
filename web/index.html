@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ccwatch</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%234ec9a5'/%3E%3C/svg%3E">
+<style>
+  /* Deliberately restrained. This is an instrument panel: it is read at a
+     glance, from across a room, while you are doing something else. Every
+     severity carries a WORD as well as a colour, matching the terminal
+     output exactly, so the two cannot tell you different things. */
+  :root {
+    --bg:#0f1115; --panel:#161a21; --line:#252b36; --ink:#e6e9ef; --dim:#8b93a3;
+    --ok:#4ec9a5; --warn:#e3b341; --bad:#f07171; --block:#c586e8; --info:#5fa8e8;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f7f8fa; --panel:#fff; --line:#e3e6ec; --ink:#1a1d23; --dim:#6b7280;
+            --ok:#0f8a63; --warn:#9a6b00; --bad:#c0392b; --block:#7c3aed; --info:#1f6fb2; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  header { display:flex; align-items:baseline; gap:1rem; flex-wrap:wrap;
+           padding:1rem 1.25rem; border-bottom:1px solid var(--line); }
+  h1 { font-size:15px; margin:0; letter-spacing:.02em; }
+  h1 span { color:var(--dim); font-weight:400; }
+  .gauges { display:flex; gap:1.25rem; margin-left:auto; align-items:baseline; flex-wrap:wrap; }
+  .g-label { color:var(--dim); }
+  .g-val { font-weight:600; }
+  .g-reset { color:var(--dim); font-size:12px; }
+  main { padding:1.25rem; display:grid; gap:1.25rem; max-width:1500px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:6px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim);
+       margin:0; padding:.75rem 1rem; border-bottom:1px solid var(--line); font-weight:600; }
+  table { width:100%; border-collapse:collapse; }
+  td, th { padding:.4rem 1rem; text-align:left; vertical-align:top; }
+  th { color:var(--dim); font-weight:600; font-size:12px; text-transform:uppercase;
+       letter-spacing:.06em; }
+  tbody tr { border-top:1px solid var(--line); }
+  tbody tr:first-child { border-top:0; }
+  .name { font-weight:600; }
+  .dim { color:var(--dim); }
+  .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .sev4 { color:var(--block); } .sev3 { color:var(--bad); }
+  .sev2 { color:var(--ok); }    .sev1 { color:var(--info); } .sev0 { color:var(--dim); }
+  .badge { display:inline-block; padding:0 .4rem; border-radius:3px; font-size:12px;
+           border:1px solid currentColor; }
+  .sub td { padding-top:0; color:var(--dim); font-size:13px; }
+  .sub .crash { color:var(--bad); }
+  .empty { padding:1rem; color:var(--dim); }
+  .err { padding:.6rem 1rem; color:var(--bad); border-top:1px solid var(--line); }
+  /* The peer graph. An adjacency list, not a force-directed blob: with a
+     handful of sessions a node-and-spring diagram is harder to read than the
+     list it is drawn from, and it moves every time you look at it. */
+  .edge { display:grid; grid-template-columns:1fr auto 1fr; gap:.6rem; align-items:center;
+          padding:.5rem 1rem; border-top:1px solid var(--line); }
+  .edge:first-of-type { border-top:0; }
+  .edge .to { text-align:left; }
+  .edge .from { text-align:right; }
+  .arrow { color:var(--info); white-space:nowrap; }
+  .edge .sample { grid-column:1/-1; color:var(--dim); font-size:12px;
+                  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  footer { padding:0 1.25rem 2rem; color:var(--dim); font-size:12px; }
+  .stale { color:var(--warn); }
+</style>
+</head>
+<body>
+<header>
+  <h1>ccwatch <span id="counts"></span></h1>
+  <div class="gauges" id="gauges"></div>
+</header>
+<main>
+  <section><h2>Sessions</h2><div id="sessions"></div></section>
+  <section><h2>Unfinished runs</h2><div id="unfinished"></div></section>
+  <section><h2>Deploys</h2><div id="deploys"></div></section>
+  <section><h2>Who is talking to whom</h2><div id="peers"></div></section>
+</main>
+<footer id="foot"></footer>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const dur = s => { if (s == null) return "-"; s = Math.max(0, s);
+  return s < 60 ? Math.floor(s)+"s" : s < 3600 ? Math.floor(s/60)+"m"
+       : s < 86400 ? Math.floor(s/3600)+"h" : Math.floor(s/86400)+"d"; };
+
+function gauges(u) {
+  if (!u) return '<span class="dim">usage not reporting — run <b>ccwatch install-statusline</b></span>';
+  const now = Date.now()/1000;
+  // Coloured by proximity to the limit, not decoratively.
+  const band = p => p >= 90 ? "var(--bad)" : p >= 70 ? "var(--warn)" : "var(--ink)";
+  const one = (nm, x) => !x ? "" :
+    `<span><span class="g-label">${nm}</span> <span class="g-val" style="color:${band(x.used_percentage)}">`
+    + `${Math.floor(x.used_percentage)}%</span>`
+    + (x.resets_at ? ` <span class="g-reset">resets ${dur(x.resets_at-now)}</span>` : "") + `</span>`;
+  return [one("5h",u.five_hour), one("7d",u.seven_day), one("7d opus",u.seven_day_opus)].join("")
+    + (u.age > 60 ? ` <span class="stale">[${dur(u.age)} old]</span>` : "");
+}
+
+function sessions(rows) {
+  if (!rows.length) return '<p class="empty">No live sessions. After a reboot, run <b>ccwatch resume</b>.</p>';
+  let h = '<table><thead><tr><th>Name</th><th>Project</th><th>Status</th><th class="num">Age</th>'
+        + '<th class="num">Ctx</th><th>Last</th></tr></thead><tbody>';
+  for (const r of rows) {
+    const sev = Math.max(r.sev, r.psev || 0);
+    const last = r.waited != null ? `${r.note} ${dur(r.waited)}`
+               : r.note === "quiet" ? `quiet ${dur(r.quiet)}`
+               : r.note ? r.note : r.quiet != null ? `${dur(r.quiet)} ago` : "-";
+    const ctx = r.context && r.context.used_percentage != null
+              ? Math.floor(r.context.used_percentage) + "%" : "";
+    const ctxColour = !ctx ? "" : (parseInt(ctx) >= 80 ? "color:var(--bad)"
+                                 : parseInt(ctx) >= 60 ? "color:var(--warn)" : "");
+    h += `<tr><td class="name">${esc(r.name)}</td><td class="dim">${esc(r.project)}</td>`
+       + `<td class="sev${r.sev}"><span class="badge">${esc(r.token)}</span></td>`
+       + `<td class="num dim">${dur(r.age)}</td>`
+       + `<td class="num" style="${ctxColour}">${ctx}</td>`
+       + `<td class="dim">${esc(last)}</td></tr>`;
+    if (r.pipeline) {
+      const p = r.pipeline, st = p.crashed ? "CRASHED" : p.status;
+      const cls = (p.crashed || /interrupted|failed|needs_input/.test(p.status)) ? "crash" : "";
+      h += `<tr class="sub"><td></td><td colspan="5">&#8627; ${esc(p.feature)} `
+         + `<span class="${cls}">${esc(p.phase)}/${esc(st)}</span> `
+         + `${esc(p.model||"")} $${(p.cost||0).toFixed(2)}</td></tr>`;
+    }
+  }
+  return h + "</tbody></table>";
+}
+
+function unfinished(rows, older) {
+  if (!rows.length) return '<p class="empty">Nothing unfinished recently.'
+    + (older ? ` <span class="dim">(${older} older — see <b>ccwatch resume</b>)</span>` : "") + '</p>';
+  let h = "<table><tbody>";
+  for (const r of rows)
+    h += `<tr><td class="sev3">${esc(r.phase)}/${esc(r.status)}</td>`
+       + `<td class="name">${esc(r.feature)}</td><td class="dim">${esc(r.model||"")}</td>`
+       + `<td class="num dim">$${(r.cost||0).toFixed(2)}</td>`
+       + `<td class="dim">${r.age!=null?dur(r.age)+" ago":""}</td>`
+       + `<td class="dim">claude --resume ${esc((r.sid||"").slice(0,8))}</td></tr>`;
+  return h + "</tbody></table>"
+    + (older ? `<div class="err dim">+${older} older — see ccwatch resume</div>` : "");
+}
+
+function deploys(d) {
+  if (!d) return '<p class="empty">Not checked.</p>';
+  let h = "";
+  if (d.error) h += `<div class="err">${esc(d.error)}</div>`;
+  if (!d.runs || !d.runs.length)
+    return (h || "") + '<p class="empty">No deploy-shaped runs in the last 24h.</p>';
+  const now = Date.now()/1000;
+  let t = "<table><tbody>";
+  for (const r of d.runs) {
+    const state = r.live ? "RUNNING" : String(r.conclusion||"?").toUpperCase();
+    const cls = state === "SUCCESS" ? "sev2" : state === "RUNNING" ? "" : "sev3";
+    t += `<tr><td class="${cls}" style="${state==='RUNNING'?'color:var(--warn)':''}">`
+       + `<span class="badge">${esc(state)}</span></td>`
+       + `<td class="name">${esc(r.workflowName)}</td><td class="dim">${esc(r.repo)}</td>`
+       + `<td class="dim">${esc(r.headBranch)}</td>`
+       + `<td class="dim">${r.live ? "started "+dur(now-Date.parse(r.createdAt)/1000)+" ago"
+                                  : dur(now-r.ended)+" ago"}</td>`
+       + `<td><a href="${esc(r.url)}" style="color:var(--info)">run</a></td></tr>`;
+  }
+  return h + t + "</tbody></table>";
+}
+
+function peers(p) {
+  if (!p || !p.edges || !p.edges.length)
+    return '<p class="empty">No messages between sessions yet.</p>';
+  let h = "";
+  for (const e of p.edges)
+    h += `<div class="edge"><div class="from name">${esc(e.from)}</div>`
+       + `<div class="arrow">${e.count>1?"&#8658;&#8658;":"&#8658;"} `
+       + `<span class="dim">${e.count}</span></div>`
+       + `<div class="to name">${esc(e.to)}</div>`
+       + `<div class="sample">${esc(e.sample)}</div></div>`;
+  return h;
+}
+
+async function tick() {
+  try {
+    const s = await (await fetch("/api/state", {cache:"no-store"})).json();
+    if (s.warming) {
+      $("foot").textContent = "taking the first snapshot…";
+      $("counts").innerHTML = '<span>warming up</span>';
+      return;
+    }
+    $("gauges").innerHTML  = gauges(s.usage);
+    $("sessions").innerHTML = sessions(s.sessions || []);
+    $("unfinished").innerHTML = unfinished(s.unfinished || [], s.unfinished_old || 0);
+    $("deploys").innerHTML = deploys(s.deploys);
+    $("peers").innerHTML   = peers(s.peers);
+    const w = (s.sessions||[]).filter(r => r.sev === 4).length;
+    const q = (s.sessions||[]).filter(r => r.sev === 3).length;
+    $("counts").innerHTML = `<span>${(s.sessions||[]).length} live`
+      + (w ? ` &middot; <b style="color:var(--block)">${w} waiting on you</b>` : "")
+      + (q ? ` &middot; <b style="color:var(--bad)">${q} suspect</b>` : "") + `</span>`;
+    document.title = (w ? `(${w}) ` : "") + "ccwatch";
+    // The age of the data, not the age of the request. A dashboard that
+    // repaints on schedule while the feed behind it has stopped is the exact
+    // failure this tool exists to prevent.
+    const bits = ["updated " + new Date().toLocaleTimeString()];
+    const a = s.ages || {};
+    if (a.snapshot > 10) bits.push(`<span class="stale">sessions ${dur(a.snapshot)} behind</span>`);
+    if (a.deploys != null) bits.push(`deploys ${dur(a.deploys)} ago`);
+    if (a.peers != null) bits.push(`peers ${dur(a.peers)} ago`);
+    if (s.error) bits.push(`<span style="color:var(--bad)">${esc(s.error)}</span>`);
+    $("foot").innerHTML = bits.join(" &middot; ");
+  } catch (e) {
+    // A dashboard that silently stops updating is the failure this whole tool
+    // exists to prevent, so a dead feed is stated in the page.
+    $("foot").innerHTML = `<span style="color:var(--bad)">feed is down: ${esc(e.message)}`
+      + ` — is \`ccwatch serve\` still running?</span>`;
+  }
+}
+tick();
+setInterval(tick, 3000);
+</script>
+</body>
+</html>

@@ -1,0 +1,2268 @@
+#!/usr/bin/env bash
+#
+# ccwatch — every Claude Code session on this machine, and which one is stuck.
+#
+# Three questions this answers, in the order they cost you time:
+#
+#   1. Which session is blocked on me right now, and for how long?
+#   2. Which session says it is working but has gone quiet — the silent hang?
+#   3. After a reboot, which sessions was I in the middle of?
+#
+# The design point is that a session must never be able to fail QUIETLY. Claude
+# Code's own registry reports `busy` from UI state alone (`isLoading ||
+# delegatedActive`), so a session wedged on a network stall or a hung tool call
+# reports `busy` forever and nothing ever re-checks it. So every status here is
+# corroborated against a second, independent signal — whether the session's
+# transcript is still growing — and a `busy` that has stopped writing is called
+# out as suspect rather than trusted. Silence is a reading, not an absence.
+#
+# This is deliberately self-contained: no lib/common.sh, no state file, nothing
+# spec-kit specific required. It ships with the plugin because the pipeline
+# overlay (which phase, on what model, for how much) is the most useful column
+# it draws — but it works the same in a repo that has never seen spec-run.
+#
+# SOURCES, and how much each is trusted
+#   ~/.claude/sessions/<pid>.json   the live registry. One file per process.
+#                                   Richer than `claude agents --json`, which
+#                                   drops `entrypoint` and `waitingFor` — the
+#                                   two fields that matter most here. Internal
+#                                   format, so `ccwatch doctor` cross-checks it
+#                                   against the supported CLI and complains
+#                                   loudly if a Claude Code upgrade moves it.
+#   ~/.claude/projects/*/<sid>.jsonl  the transcript. Append-only, survives
+#                                   reboots, and its mtime is the one honest
+#                                   answer to "is this thing still moving".
+#                                   This is also the ONLY resume authority: the
+#                                   registry is pid-keyed and evaporates on
+#                                   restart, exactly when you need it.
+#   <repo>/specs/*/.pipeline/state.json  the spec-run pipeline overlay, when
+#                                   present. Already distinguishes ok from
+#                                   interrupted, which the registry cannot.
+
+set -uo pipefail
+
+CCWATCH_VERSION=1
+
+# ---------------------------------------------------------------- output ------
+# A dumb terminal, a pipe, or a CI log gets plain text. Colour is decoration and
+# must never be the only thing carrying a meaning — every severity here also has
+# a distinct word, so `ccwatch | grep HUNG` works.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
+  _c_red=$'\033[31m';    _c_yellow=$'\033[33m'; _c_green=$'\033[32m'
+  _c_cyan=$'\033[36m';   _c_dim=$'\033[2m';     _c_bold=$'\033[1m'
+  _c_reset=$'\033[0m';   _c_magenta=$'\033[35m'
+else
+  _c_red=; _c_yellow=; _c_green=; _c_cyan=; _c_dim=; _c_bold=; _c_reset=
+  _c_magenta=
+fi
+
+say()  { printf '%s\n' "$*"; }
+warn() { printf '%s!%s %s\n' "$_c_yellow" "$_c_reset" "$*" >&2; }
+err()  { printf '%sx%s %s\n' "$_c_red" "$_c_reset" "$*" >&2; }
+die()  { err "$1"; [ -n "${2:-}" ] && printf '  %s\n' "$2" >&2; exit 1; }
+
+# ------------------------------------------------------------ where things ----
+CLAUDE_HOME="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+SESS_DIR="$CLAUDE_HOME/sessions"
+PROJ_DIR="$CLAUDE_HOME/projects"
+CCWATCH_HOME="${CCWATCH_HOME:-$CLAUDE_HOME/ccwatch}"
+EVENTS="$CCWATCH_HOME/events.jsonl"
+# Account-wide usage, written by `ccwatch statusline`. One file, last writer
+# wins — the numbers are per-account, not per-session, so any session that
+# reports is as good as any other.
+USAGE_FILE="$CCWATCH_HOME/usage.json"
+# Context-window fill, which IS per-session, so one file each.
+CTX_DIR="$CCWATCH_HOME/context"
+
+# Thresholds. A `busy` session that has not appended to its transcript in this
+# long is reported as suspect. It is not proof of a hang — one `Bash` call
+# running a long test suite is legitimately silent — which is why the table
+# always prints the actual silence next to the verdict, and why crossing 3x the
+# threshold escalates rather than the first crossing being final. Judgement
+# stays with you; the tool's job is to make the silence impossible to miss.
+CCWATCH_BUSY_STALE="${CCWATCH_BUSY_STALE:-600}"
+CCWATCH_SDK_STALE="${CCWATCH_SDK_STALE:-900}"
+CCWATCH_REFRESH="${CCWATCH_REFRESH:-2}"
+CCWATCH_RESUME_DAYS="${CCWATCH_RESUME_DAYS:-14}"
+# How recent an unfinished run has to be to earn a place in the live table. The
+# first version had no window and listed 24 runs going back a fortnight, which
+# buried the two from the last hour that actually mattered. Older wreckage is
+# still reachable, just through `ccwatch resume` rather than in your face.
+CCWATCH_UNFINISHED_HOURS="${CCWATCH_UNFINISHED_HOURS:-24}"
+# How old a statusline report can be before its context reading is dropped.
+# Generous relative to a 10s refreshInterval, because a session sitting idle
+# still repaints; a reading older than this means the session is gone from the
+# status line entirely, and a frozen gauge that looks live is worse than none.
+CCWATCH_CTX_STALE="${CCWATCH_CTX_STALE:-120}"
+# How long `ccwatch send` waits to OBSERVE its message in the target's
+# transcript before reporting it as merely queued. Writing to the socket is not
+# evidence of delivery — that was proven the hard way, see cmd_send.
+CCWATCH_SEND_VERIFY="${CCWATCH_SEND_VERIFY:-10}"
+# How injected messages identify themselves in the receiver's transcript. Left
+# as "ccwatch" so that "who told that agent to do that" is answerable from the
+# receiving side alone, not only from this machine's event log.
+CCWATCH_SEND_AS="${CCWATCH_SEND_AS:-ccwatch}"
+# Deploy watching. `gh` is a network call, so it is cached — polling it on every
+# 2s repaint would rate-limit you and make the table stutter.
+CCWATCH_DEPLOY_TTL="${CCWATCH_DEPLOY_TTL:-60}"
+# Which workflows count as a deploy. A CI run on every push is noise; a
+# production deploy is not. Matched case-insensitively against the workflow name.
+CCWATCH_DEPLOY_PATTERN="${CCWATCH_DEPLOY_PATTERN:-deploy|release|rollback|publish|promote}"
+CCWATCH_DEPLOY_LIMIT="${CCWATCH_DEPLOY_LIMIT:-20}"
+
+need() { command -v "$1" >/dev/null 2>&1 || die "ccwatch needs '$1' on PATH" "${2:-}"; }
+
+# CCWATCH_PROFILE=1 prints per-stage timings to stderr. Added because the first
+# round of "optimisation" here was guesswork: the fork overhead that looked
+# obvious turned out to be a fraction of the cost, and the real expense was
+# filesystem traversal of a 1.7GB transcript tree. Measure, then change.
+_prof_t0=0
+prof() { # prof <stage-label>
+  [ -n "${CCWATCH_PROFILE:-}" ] || return 0
+  local now
+  now=$(perl -MTime::HiRes -e 'print int(Time::HiRes::time()*1000)' 2>/dev/null) || now=0
+  [ "$_prof_t0" -ne 0 ] && printf '  %-22s %6sms\n' "$1" "$((now - _prof_t0))" >&2
+  _prof_t0=$now
+}
+
+# The one testing seam. Liveness and CPU both come from `ps`, and a fabricated
+# pid is never live, so without a way to substitute that output every fixture
+# row would be filtered out before it reached the classification — which is the
+# part most worth testing. Set CCWATCH_FAKE_PS to a file holding what
+# `ps -o pid=,lstart=,time=` would have printed.
+ps_out() {
+  if [ -n "${CCWATCH_FAKE_PS:-}" ]; then
+    cat "$CCWATCH_FAKE_PS" 2>/dev/null
+  else
+    ps -o pid=,lstart=,time= -p "$1" 2>/dev/null
+  fi
+}
+
+TMP=""
+cleanup() { [ -n "$TMP" ] && rm -rf "$TMP"; }
+trap cleanup EXIT
+
+# ============================================================== collection ===
+
+# collect_sessions — the live registry, one JSON array on stdout.
+#
+# Each file is parsed on its own rather than with a single `jq -s`, because a
+# session that is mid-write would otherwise take the whole table down with it.
+# One unreadable file costs one row, and PARSE_FAILED records how many so that
+# `ccwatch doctor` can report it instead of quietly showing a short list.
+PARSE_FAILED=0
+collect_sessions() {
+  local f n=0 fast count
+  [ -d "$SESS_DIR" ] || { printf '[]'; return 0; }
+  n=$(find "$SESS_DIR" -maxdepth 1 -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "${n:-0}" -gt 0 ] || { printf '[]'; return 0; }
+
+  # Fast path: ONE jq over every file at once. Registry files are single-line
+  # JSON, so `fromjson? // empty` per line both parses them and tolerates a
+  # file caught mid-write. This replaced a jq process per file, which cost
+  # ~1.1s of pure fork overhead on 19 sessions — the single largest slice of a
+  # snapshot that needs to complete inside a 2s repaint.
+  fast=$(cat "$SESS_DIR"/*.json 2>/dev/null \
+         | jq -c -R 'fromjson? // empty | select(type == "object")' 2>/dev/null | jq -s '.')
+  count=$(printf '%s' "$fast" | jq 'length' 2>/dev/null) || count=0
+
+  if [ "${count:-0}" -eq "$n" ]; then
+    printf '%s' "$fast"
+    return 0
+  fi
+
+  # Slow path, taken only when the fast one came up short. Parsing each file on
+  # its own is how PARSE_FAILED gets an accurate count — and an accurate count
+  # is the point, because `ccwatch doctor` reports it. Guessing "n - count"
+  # would also be wrong for a pretty-printed file, which the fast path splits
+  # across lines and drops entirely.
+  {
+    for f in "$SESS_DIR"/*.json; do
+      [ -f "$f" ] || continue
+      jq -c '. as $o | if ($o|type) == "object" then $o else empty end' "$f" 2>/dev/null \
+        || PARSE_FAILED=$((PARSE_FAILED + 1))
+    done
+  } | jq -s '.'
+}
+
+# collect_live — {pid, start, cpu} for every registry pid still running.
+#
+# `kill -0` alone is not enough: PIDs are recycled, and a stale registry file
+# whose number now belongs to an unrelated process would show as a live Claude
+# session. So the process's real start time is compared against the session's
+# own `startedAt`. A mismatch means the file outlived its process and the number
+# was reused — that session is gone, whatever the file says.
+#
+# Note the trap for anyone extending this: the registry's `procStart` string is
+# UTC while `ps -o lstart=` prints local time, so comparing those two strings
+# directly marks every session an impostor. Comparing epochs sidesteps it.
+#
+# `cpu` is cumulative CPU seconds, and it is the second independent progress
+# signal. It matters because it is the only one that works for EVERY session:
+# an embedded-SDK session writes no transcript and publishes no status, so
+# without this there would be a whole class of session about which ccwatch could
+# say nothing at all. Between two frames, CPU that moved means the process is
+# doing work; CPU that did not, alongside a transcript that did not grow, is
+# what turns a guess about a hang into two agreeing measurements.
+collect_live() {
+  local pids sessions="$1"
+  pids=$(printf '%s' "$sessions" | jq -r '[.[].pid // empty] | join(",")')
+  [ -n "$pids" ] || { printf '[]'; return 0; }
+  # ps, plus all the parsing, in ONE process. The first version forked `date -j`
+  # once per pid to convert lstart and `awk` once per pid to convert the CPU
+  # clock — ~1.7s of fork overhead on 19 sessions, inside a loop that is
+  # supposed to repaint every 2s.
+  ps_out "$pids" | python3 -c '
+import calendar, json, sys, time
+
+MONTHS = {m: i + 1 for i, m in enumerate(
+    ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"])}
+
+def epoch(dow, mon, day, clock, year):
+    # `ps -o lstart=` prints LOCAL time. The registry stores procStart in UTC,
+    # which is why these are compared as epochs and never as strings — doing
+    # the latter marks every session a pid-reuse impostor.
+    h, m, sec = (int(x) for x in clock.split(":"))
+    st = (int(year), MONTHS[mon], int(day), h, m, sec, 0, 0, -1)
+    return int(time.mktime(st))
+
+def cpu(clock):
+    # macOS prints MM:SS.ss and lets the minutes run past 60; HH:MM:SS also
+    # occurs. Handle both rather than mis-scaling a long-lived session.
+    parts = clock.split(":")
+    try:
+        if len(parts) == 3:
+            return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+        if len(parts) == 2:
+            return float(parts[0]) * 60 + float(parts[1])
+    except ValueError:
+        pass
+    return 0.0
+
+out = []
+for line in sys.stdin:
+    f = line.split()
+    if len(f) < 7:
+        continue
+    try:
+        out.append({"pid": int(f[0]),
+                    "start": epoch(f[1], f[2], f[3], f[4], f[5]),
+                    "cpu": cpu(f[6])})
+    except (ValueError, KeyError, OverflowError):
+        # A row we cannot parse is skipped, not guessed at: a wrong start time
+        # would make the pid-reuse guard reject a live session.
+        continue
+print(json.dumps(out))
+' 2>/dev/null || printf '[]'
+}
+
+# CPU is only meaningful as a delta, which needs a previous sample.
+#
+# ⚠️ Three things this has to get right, all learned the hard way.
+#
+# 1. It is keyed by the config directory being observed. The first version used
+#    one global path, so a `ccwatch serve` polling the real registry every two
+#    seconds silently overwrote the samples belonging to a run against a
+#    different CLAUDE_CONFIG_DIR. Both processes then reported no CPU movement
+#    and flagged healthy sessions as hung.
+# 2. Samples carry their own timestamp, so the delta is measured over the
+#    interval that actually elapsed rather than over an assumed "last frame".
+#    Two watchers on the same machine then cooperate — either one's sample is a
+#    valid baseline for the other — instead of fighting.
+# 3. A sample less than CCWATCH_CPU_MIN_GAP old yields null, not zero. Sub-second
+#    gaps measure nothing, and "measured no progress" is the claim that escalates
+#    a quiet session to HUNG. Getting this wrong invents hangs.
+#
+# In $TMPDIR rather than CCWATCH_HOME because it is worthless across a reboot —
+# the very event that invalidates every pid in it.
+CPU_CACHE="${TMPDIR:-/tmp}/ccwatch-cpu-$(id -u)-$(printf '%s' "$CLAUDE_HOME" | cksum | cut -d' ' -f1).json"
+CCWATCH_CPU_MIN_GAP="${CCWATCH_CPU_MIN_GAP:-1.5}"
+
+# collect_transcripts — {sid, mtime} for the given session ids.
+#
+# Globbed by session id rather than by reconstructing the escaped-cwd directory
+# name, because that escaping is lossy (both `/` and `.` collapse to `-`) and
+# guessing it wrong would silently report "no transcript" for a healthy session
+# — precisely the class of quiet mistake this tool exists to prevent.
+collect_transcripts() { # collect_transcripts <sid>...
+  [ -d "$PROJ_DIR" ] || { printf '[]'; return 0; }
+  [ $# -gt 0 ] || { printf '[]'; return 0; }
+  # ONE traversal of the transcript tree, filtered afterwards, rather than a
+  # glob per session id. The previous version expanded
+  # "$PROJ_DIR"/*/<sid>.jsonl once per live session — 17 globs across 94
+  # project directories over a 1.7GB tree — and the directory walking, not the
+  # process count, was where the seconds went.
+  #
+  # Session transcripts sit at depth 2. Subagent sidechains live deeper and are
+  # deliberately out of scope: they are not sessions and have no registry entry.
+  printf '%s\n' "$@" | python3 -c '
+import json, os, sys
+
+proj = sys.argv[1]
+wanted = {line.strip() for line in sys.stdin if line.strip()}
+out = []
+try:
+    for project in os.scandir(proj):
+        if not project.is_dir():
+            continue
+        try:
+            entries = os.scandir(project.path)
+        except OSError:
+            continue
+        with entries:
+            for e in entries:
+                if not e.name.endswith(".jsonl"):
+                    continue
+                sid = e.name[:-6]
+                if sid not in wanted:
+                    continue
+                try:
+                    out.append({"sid": sid, "mtime": int(e.stat().st_mtime)})
+                except OSError:
+                    continue
+except OSError:
+    pass
+print(json.dumps(out))
+' "$PROJ_DIR" 2>/dev/null || printf '[]'
+}
+
+# collect_pipelines — spec-run's own record, for each distinct working directory.
+#
+# Emits every phase, not a pre-chosen one, because the choice of which phase
+# matters depends on WHICH SESSION is asking: a phase records the session id of
+# the `claude -p` process that ran it, so a phase can be attached to the exact
+# session that owns it rather than to every session that happens to share a
+# directory. Attaching by directory was the first thing tried here and it lied —
+# four sessions in one repo all claimed the same run.
+collect_pipelines() {
+  local cwd
+  local -a states=()
+  for cwd in "$@"; do
+    # Every state file in the repo, not just the newest: an abandoned run in an
+    # older feature is exactly the debris worth reporting.
+    for state in "$cwd"/specs/*/.pipeline/state.json; do
+      [ -f "$state" ] && states+=("$state")
+    done
+  done
+  [ ${#states[@]} -gt 0 ] || { printf '[]'; return 0; }
+
+  # ONE jq for all of them. The previous version forked a jq per state file;
+  # with ~70 files across six repos that was ~5 seconds — measured with
+  # CCWATCH_PROFILE=1, and by far the largest slice of the snapshot.
+  #
+  # `input_filename` is what makes this possible: it identifies which file the
+  # current input came from, so the repo path can still be derived per state
+  # file without passing it in as an argument.
+  jq -c '
+    ( input_filename | sub("/specs/[^/]+/\\.pipeline/state\\.json$"; "") ) as $cwd
+    | { cwd: $cwd,
+        feature: ((.feature_dir // "") | split("/") | last),
+        branch:  (.branch // ""),
+        cost:    ([ (.phases // {}) | .[].cost_usd // 0 ] | add // 0),
+        phases: [ ( .phases // {} ) | to_entries[]
+                  | { name: .key,
+                      status: (.value.status // ""),
+                      model:  (.value.model // ""),
+                      cost:   (.value.cost_usd // 0),
+                      # The runner pid is the whole game for a `running` phase:
+                      # spec-run records it, and a `running` phase whose runner
+                      # is gone is a crash — not an opinion, a fact. spec-run
+                      # reconciles that to `interrupted` on its next
+                      # invocation, but that could be days away, and until then
+                      # this is the only place it shows.
+                      runner_pid: (.value.runner_pid // null),
+                      started_at: (.value.started_at // null),
+                      # Both keys: older runs recorded a single session_id,
+                      # chunked phases record a list. Missing either way would
+                      # silently break the attach.
+                      sids: ( [ .value.session_id // empty ]
+                              + ( .value.sessions // [] ) | unique ) } ] }
+  ' "${states[@]}" 2>/dev/null | jq -s '.'
+}
+
+# ============================================================== statusline ===
+#
+# Where the usage numbers come from, and why this route rather than the API.
+#
+# Claude Code hands its statusline command a JSON payload on stdin, and that
+# payload already contains `rate_limits` (five_hour / seven_day / spend_limit,
+# each with a used percentage and a reset time) and `context_window` (per
+# session). So the numbers are available WITHOUT touching a credential.
+#
+# The alternative is `GET /api/oauth/usage`, which is where `/usage` gets the
+# same figures — but that needs the OAuth token out of the keychain, and a
+# monitoring tool that handles your credential in order to display a percentage
+# is a bad trade. This route reads a feed Claude Code is already pushing.
+#
+# Two consequences worth knowing:
+#   - Only sessions with a statusline contribute, which means only interactive
+#     ones. Fine for rate limits (account-wide — one reporter is enough), and
+#     the reason the context column is blank for headless rows.
+#   - The figures are as fresh as your statusline refreshInterval, so the file
+#     records when it was written and the table ages it out rather than
+#     presenting a stale number as current.
+
+cmd_statusline() {
+  # This runs on every statusline repaint, in the critical path of the user's
+  # prompt. It must never fail, never be slow, and never print anything to
+  # stdout that is not statusline text.
+  local exec_cmd=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --exec) exec_cmd="${2:-}"; shift 2 || break;;
+      *) shift;;
+    esac
+  done
+
+  local payload
+  payload=$(cat 2>/dev/null) || payload=""
+
+  # Everything in this block is best-effort. A failure here would otherwise
+  # break the status line of whichever session happened to be running.
+  {
+    mkdir -p "$CCWATCH_HOME" "$CTX_DIR" 2>/dev/null
+
+    printf '%s' "$payload" | jq -c --arg at "$(date '+%s')" '
+      select(.rate_limits != null)
+      | { at: ($at|tonumber),
+          session: (.session_id // null),
+          five_hour: .rate_limits.five_hour,
+          seven_day: .rate_limits.seven_day,
+          seven_day_opus: .rate_limits.seven_day_opus,
+          spend_limit: .rate_limits.spend_limit }' 2>/dev/null \
+      >"$USAGE_FILE.tmp" && [ -s "$USAGE_FILE.tmp" ] && mv "$USAGE_FILE.tmp" "$USAGE_FILE"
+    rm -f "$USAGE_FILE.tmp"
+
+    # Per-session, keyed by session id so a row can find its own. The cost
+    # figure comes along because it is in the same payload and is the only
+    # per-session spend number available for a session that is not a spec-run
+    # phase.
+    local sid
+    sid=$(printf '%s' "$payload" | jq -r '.session_id // empty' 2>/dev/null)
+    if [ -n "$sid" ]; then
+      printf '%s' "$payload" | jq -c --arg at "$(date '+%s')" '
+        { at: ($at|tonumber),
+          used_percentage: (.context_window.used_percentage // null),
+          window: (.context_window.context_window_size // null),
+          cost_usd: (.cost.total_cost_usd // null),
+          model: (.model.display_name // .model.id // null),
+          effort: (.effort.level // null) }' 2>/dev/null \
+        >"$CTX_DIR/$sid.json.tmp" \
+        && [ -s "$CTX_DIR/$sid.json.tmp" ] && mv "$CTX_DIR/$sid.json.tmp" "$CTX_DIR/$sid.json"
+      rm -f "$CTX_DIR/$sid.json.tmp"
+    fi
+  } >/dev/null 2>&1
+
+  # Compose rather than replace. Wrapping an existing statusline means you keep
+  # it and gain the feed; replacing it would make adopting ccwatch cost you the
+  # status line you already tuned.
+  if [ -n "$exec_cmd" ]; then
+    printf '%s' "$payload" | eval "$exec_cmd" 2>/dev/null || true
+  else
+    # Standalone use: something has to be printed, or the status line is blank.
+    printf '%s' "$payload" | jq -r '
+      def pct(x): if x == null then empty else "\(x.used_percentage | floor)%" end;
+      [ (if .rate_limits.five_hour != null then "5h \(pct(.rate_limits.five_hour))" else empty end),
+        (if .rate_limits.seven_day != null then "7d \(pct(.rate_limits.seven_day))" else empty end),
+        (if .context_window.used_percentage != null
+         then "ctx \(.context_window.used_percentage | floor)%" else empty end)
+      ] | join("  ")' 2>/dev/null || true
+  fi
+  exit 0
+}
+
+# install-statusline wires the wrapper IN FRONT of whatever is already
+# configured, so the existing command keeps running and its output is what you
+# still see. It shows the change and asks first, like install-hooks.
+cmd_install_statusline() {
+  local settings="$CLAUDE_HOME/settings.json"
+  local self
+  self=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")
+  [ -f "$settings" ] || die "no settings file at $settings" \
+    "create it first, or point CLAUDE_CONFIG_DIR at the right directory"
+
+  local current proposed
+  current=$(jq -r '.statusLine.command // empty' "$settings" 2>/dev/null)
+
+  case "$current" in
+    *"ccwatch statusline"*)
+      say "Already wired:"
+      say "  ${_c_dim}$current${_c_reset}"
+      return 0;;
+  esac
+
+  if [ -n "$current" ]; then
+    say "You already have a statusline command:"
+    say "  ${_c_dim}$current${_c_reset}"
+    say ""
+    say "ccwatch will run ${_c_bold}in front of it${_c_reset} and pass its output through, so"
+    say "what you see does not change — it just also records the usage numbers."
+    say ""
+    proposed=$(jq --arg cmd "$self statusline --exec '$current'" \
+      '.statusLine = ((.statusLine // {type:"command"}) | .type = "command" | .command = $cmd)' \
+      "$settings") || die "could not compute the settings change" "is $settings valid JSON?"
+  else
+    proposed=$(jq --arg cmd "$self statusline" \
+      '.statusLine = {type:"command", command:$cmd, refreshInterval:10}' \
+      "$settings") || die "could not compute the settings change" "is $settings valid JSON?"
+  fi
+
+  say "${_c_bold}This will set${_c_reset} .statusLine.command ${_c_bold}in${_c_reset} $settings"
+  say ""
+  printf '%s' "$proposed" | jq -r '"  " + .statusLine.command'
+  say ""
+  printf 'Apply? [y/N] '
+  local reply=""
+  read -r reply
+  case "$reply" in
+    y|Y|yes|YES) ;;
+    *) say "Nothing changed."; return 0;;
+  esac
+
+  local backup
+  backup="$settings.ccwatch-backup.$(date '+%Y%m%d%H%M%S')"
+  cp "$settings" "$backup" || die "could not back up $settings"
+  printf '%s\n' "$proposed" >"$settings.ccwatch-tmp" \
+    && mv "$settings.ccwatch-tmp" "$settings" \
+    || die "could not write $settings" "your original is at $backup"
+  mkdir -p "$CCWATCH_HOME" "$CTX_DIR"
+  say "${_c_green}Wired.${_c_reset} Previous settings saved to $backup"
+  say "${_c_dim}Existing sessions pick it up on their next repaint.${_c_reset}"
+}
+
+# collect_usage / collect_context — read the feed back.
+#
+# Both report their own age. A percentage with no timestamp is the same failure
+# this whole tool exists to avoid: a number presented as current when nobody
+# knows whether it is.
+collect_usage() {
+  [ -f "$USAGE_FILE" ] || { printf 'null'; return 0; }
+  jq -c --argjson now "$(date '+%s')" '. + { age: ($now - .at) }' "$USAGE_FILE" 2>/dev/null \
+    || printf 'null'
+}
+
+collect_context() { # collect_context <sid>...
+  local sid
+  [ -d "$CTX_DIR" ] || { printf '[]'; return 0; }
+  {
+    for sid in "$@"; do
+      [ -f "$CTX_DIR/$sid.json" ] || continue
+      jq -c --arg sid "$sid" --argjson now "$(date '+%s')" \
+        '. + { sid: $sid, age: ($now - .at) }' "$CTX_DIR/$sid.json" 2>/dev/null
+    done
+  } | jq -s '.'
+}
+
+# ============================================================== the join =====
+
+# snapshot — one JSON array, one object per live session, fully classified.
+#
+# All the judgement lives in this jq program so that `ccwatch`, `ccwatch --json` and
+# the watch loop can never disagree about what a session's status is.
+# pids_alive — of the pids given, which are still running. Used for spec-run's
+# recorded runner pids, which are not Claude processes and so never appear in
+# the session registry.
+pids_alive() {
+  local csv
+  csv=$(printf '%s' "$1" | tr ' ' ',' | sed 's/^,*//; s/,*$//')
+  [ -n "$csv" ] || { printf '[]'; return 0; }
+  ps_out "$csv" | awk '{print $1}' | jq -R 'select(length>0) | tonumber' | jq -s '.'
+}
+
+snapshot() {
+  local sessions live transcripts pipelines sids cwds now
+  now=$(date '+%s')
+  prof start
+  sessions=$(collect_sessions)
+  prof collect_sessions
+
+  live=$(collect_live "$sessions")
+  prof collect_live
+
+  # Only live sessions are worth gathering the expensive signals for. A dead
+  # registry file is `ccwatch resume`'s business, not the table's.
+  local live_sessions
+  live_sessions=$(printf '%s' "$sessions" | jq -c \
+    --argjson live "$live" --argjson tol 300 '
+      ( $live | map({ key: (.pid|tostring), value: .start }) | from_entries ) as $L
+      | [ .[]
+          | select(.pid != null)
+          | . as $s
+          | ($L[.pid|tostring]) as $ps
+          | select($ps != null)
+          # PID reuse guard: the process running under this number must have
+          # started when this session did, within a few minutes of slack.
+          | select( $ps == 0 or (($ps - (($s.startedAt // 0) / 1000)) | fabs) <= $tol )
+        ]')
+
+  sids=$(printf '%s' "$live_sessions" | jq -r '[.[].sessionId // empty] | .[]')
+  cwds=$(printf '%s' "$live_sessions" | jq -r '[.[].cwd // empty] | unique | .[]')
+
+  # shellcheck disable=SC2086
+  transcripts=$(collect_transcripts $sids)
+  prof collect_transcripts
+  local ctx usage
+  # shellcheck disable=SC2086
+  ctx=$(collect_context $sids)
+  usage=$(collect_usage)
+  prof collect_context
+  pipelines='[]'
+  if [ -n "$cwds" ]; then
+    local -a cwda=()
+    while IFS= read -r c; do [ -n "$c" ] && cwda+=("$c"); done <<<"$cwds"
+    [ ${#cwda[@]} -gt 0 ] && pipelines=$(collect_pipelines "${cwda[@]}")
+  fi
+  prof collect_pipelines
+
+  # Which of spec-run's recorded runner pids are still up.
+  local runners runners_alive
+  runners=$(printf '%s' "$pipelines" | jq -r '[.[].phases[].runner_pid // empty] | unique | join(" ")')
+  runners_alive=$(pids_alive "$runners")
+
+  # The previous samples, and the merged write-back. Merging rather than
+  # replacing is what lets two watchers share the file without destroying each
+  # other's baselines.
+  local prev='{}' nowf
+  nowf=$(perl -MTime::HiRes -e 'print Time::HiRes::time()' 2>/dev/null) || nowf="$now"
+  if [ -f "$CPU_CACHE" ]; then
+    prev=$(jq -c 'if type == "object" then . else {} end' "$CPU_CACHE" 2>/dev/null) || prev='{}'
+    [ -n "$prev" ] || prev='{}'
+  fi
+  printf '%s' "$live" | jq -c --argjson prev "$prev" --argjson at "$nowf" \
+    --argjson gap "$CCWATCH_CPU_MIN_GAP" '
+    # Keep a previous sample when it is still too fresh to have produced a
+    # usable gap: overwriting it would reset the baseline on every repaint and
+    # make the delta permanently unmeasurable at a fast refresh rate.
+    reduce .[] as $s ($prev;
+      ($s.pid|tostring) as $k
+      | if (.[$k] != null) and (($at - .[$k].at) < $gap) then .
+        else .[$k] = { cpu: $s.cpu, at: $at } end)' \
+    >"$CPU_CACHE.tmp" 2>/dev/null && mv "$CPU_CACHE.tmp" "$CPU_CACHE" 2>/dev/null || true
+
+  printf '%s' "$live_sessions" | jq \
+    --argjson t "$transcripts" \
+    --argjson p "$pipelines" \
+    --argjson live "$live" \
+    --argjson prev "$prev" \
+    --argjson nowf "$nowf" \
+    --argjson cpu_gap "$CCWATCH_CPU_MIN_GAP" \
+    --argjson runners "$runners_alive" \
+    --argjson now "$now" \
+    --argjson busy_stale "$CCWATCH_BUSY_STALE" \
+    --argjson sdk_stale "$CCWATCH_SDK_STALE" \
+    --argjson unfinished_hours "$CCWATCH_UNFINISHED_HOURS" \
+    --argjson ctx "$ctx" \
+    --argjson usage "$usage" \
+    --argjson ctx_stale "$CCWATCH_CTX_STALE" '
+    ( $t | map({ key: .sid, value: .mtime }) | from_entries ) as $T
+    # One entry per session id that spec-run recorded, so a phase can be
+    # attached to the session that actually ran it. `crashed` is decided once,
+    # here, against the live runner pids.
+    | ( [ $p[]
+          | .feature as $f | .cwd as $c | .cost as $rc
+          | .phases[]
+          | . as $ph
+          | ( $ph.status == "running"
+              and $ph.runner_pid != null
+              and ($runners | index($ph.runner_pid)) == null ) as $crashed
+          | $ph.sids[]
+          | { key: .,
+              value: { feature: $f, cwd: $c, phase: $ph.name,
+                       status: $ph.status, model: $ph.model,
+                       # The run total, not this phase alone — a phase still
+                       # running has spent nothing yet, and "$0" under a live
+                       # run reads as a broken number rather than a true one.
+                       cost: $rc,
+                       runner_pid: $ph.runner_pid, started_at: $ph.started_at,
+                       crashed: $crashed } } ]
+        | from_entries ) as $P
+    | ( $live | map({ key: (.pid|tostring), value: .cpu }) | from_entries ) as $C
+    | $prev as $PC
+    | ( $ctx | map({ key: .sid, value: . }) | from_entries ) as $X
+    | [ .[]
+        | . as $s
+        | ($s.sessionId // "") as $sid
+        | ($T[$sid]) as $mtime
+        # quiet: seconds since the transcript last grew. null means there is no
+        # transcript to read at all, which is itself reported rather than
+        # silently treated as fresh.
+        # Clamped at zero. `$now` is captured at the start of the snapshot and
+        # the transcript is stat-ed after, so a session writing right now has an
+        # mtime a second or two AHEAD of it — which rendered as "-2s ago".
+        | (if $mtime == null then null else ([$now - $mtime, 0] | max) end) as $quiet
+        | ($s.status) as $st
+        # Two very different kinds of statusless session, and conflating them
+        # produces a false alarm on every one of the second kind:
+        #   sdk-cli  `claude -p` — what spec-run spawns. Writes a transcript,
+        #            so transcript silence is a real signal.
+        #   sdk-ts   the TypeScript SDK embedded in another program. Writes NO
+        #            transcript, ever. Silence there measures nothing, so it is
+        #            never reported as a hang — only CPU can speak for these.
+        | (($s.entrypoint // "") == "sdk-cli") as $is_sdk_cli
+        | (($s.entrypoint // "") | startswith("sdk")) as $is_sdk
+        | ($C[$s.pid|tostring]) as $cpu
+        # null = no previous frame yet. Distinct from 0, which means measured
+        # and did not move. The classification below never treats the first as
+        # if it were the second.
+        | ($PC[$s.pid|tostring]) as $psample
+        | (if $psample == null or $cpu == null
+                or (($nowf - $psample.at) < $cpu_gap) then null
+           else ($cpu - $psample.cpu) end) as $cpud
+        | ($cpud != null and $cpud > 0.05) as $cpu_moved
+        | (if   $st == "waiting" then
+               { sev: 4, token: "waiting", note: ($s.waitingFor // "input needed") }
+
+           # --- interactive, claims to be working ---------------------------
+           # A transcript that has gone quiet is suspicion, not proof: one Bash
+           # call running a long test suite is legitimately silent. So CPU gets
+           # a vote. Quiet AND no CPU is two signals agreeing. Quiet WITH CPU
+           # is a session that is genuinely working, and saying HUNG there
+           # would be the cry-wolf that stops you reading the column at all.
+           elif $st == "busy" and $quiet == null and $cpu_moved then
+               { sev: 2, token: "busy", note: "no transcript; cpu moving" }
+           elif $st == "busy" and $quiet == null then
+               { sev: 3, token: "NO TRANSCRIPT", note: "cannot verify progress" }
+           elif $st == "busy" and $quiet > $busy_stale and $cpu_moved then
+               { sev: 2, token: "busy", note: "quiet but cpu moving" }
+           elif $st == "busy" and $quiet > ($busy_stale * 3) then
+               { sev: 3, token: "HUNG!!", note: "quiet" }
+           elif $st == "busy" and $quiet > $busy_stale then
+               { sev: 3, token: "HUNG?", note: "quiet" }
+           elif $st == "busy"  then { sev: 2, token: "busy",  note: "" }
+           elif $st == "shell" then { sev: 1, token: "shell", note: "" }
+           elif $st == "idle"  then { sev: 0, token: "idle",  note: "" }
+
+           # --- headless `claude -p`: transcript is trustworthy here ---------
+           elif $is_sdk_cli and $quiet == null then
+               { sev: 3, token: "NO TRANSCRIPT", note: "headless, cannot verify" }
+           elif $is_sdk_cli and $quiet > $sdk_stale and $cpu_moved then
+               { sev: 2, token: "sdk", note: "quiet but cpu moving" }
+           elif $is_sdk_cli and $quiet > $sdk_stale then
+               { sev: 3, token: "SDK STALE?", note: "quiet" }
+           elif $is_sdk_cli then { sev: 2, token: "sdk", note: "no status published" }
+
+           # --- embedded SDK: only the process itself is observable ----------
+           # Deliberately never escalated to a hang. An embedded session
+           # waiting on its host program is quiet and idle by design, and
+           # ccwatch has no way to tell that from wedged. It says so.
+           elif $is_sdk and $cpu_moved then
+               { sev: 2, token: "sdk-ts", note: "cpu moving" }
+           elif $is_sdk and $cpud == null then
+               { sev: 1, token: "sdk-ts", note: "no status or transcript — liveness only" }
+           elif $is_sdk then
+               { sev: 1, token: "sdk-ts", note: "alive, no cpu since last frame" }
+
+           # Status absent on a non-SDK session means an older Claude Code that
+           # predates the field. Say so; do not imply health we did not measure.
+           else { sev: 1, token: "unknown", note: "no status published" }
+           end) as $c
+        # Keyed by session id, not by directory: the phase that shows here is
+        # the one this very session ran.
+        | ($P[$sid]) as $pl
+        | { sid: $sid,
+            pid: $s.pid,
+            name: ($s.name // ""),
+            cwd:  ($s.cwd // "?"),
+            # The basename of a worktree is the branch, useless without
+            # the repo it belongs to — show both.
+            project: (($s.cwd // "?") | if test("/\\.claude/worktrees/") then
+                          (capture("(?<repo>[^/]+)/\\.claude/worktrees/(?<wt>[^/]+)")
+                           | .repo + ":" + .wt)
+                        else ((split("/") | last)
+                              # A cwd of "/" has an empty basename. A blank cell
+                              # reads as a broken tool rather than as a fact
+                              # about the session, so it is named.
+                              | if . == "" then "/" else . end) end),
+            entrypoint: ($s.entrypoint // ""),
+            version: ($s.version // ""),
+            status_raw: ($st // null),
+            token: $c.token, sev: $c.sev, note: $c.note,
+            age: ([($now - (($s.startedAt // 0) / 1000)), 0] | max | floor),
+            quiet: $quiet,
+            cpu: $cpu,
+            cpu_delta: $cpud,
+            # Only from a statusline that is still reporting. A session whose
+            # last report is older than the threshold has its context reading
+            # dropped rather than shown — a context gauge frozen at the value it
+            # had an hour ago is worse than no gauge, because it looks live.
+            context: ( ($X[$sid]) as $c
+                       | if $c == null or $c.age > $ctx_stale then null
+                         else { used_percentage: $c.used_percentage,
+                                window: $c.window, cost_usd: $c.cost_usd,
+                                model: $c.model, effort: $c.effort,
+                                age: $c.age } end ),
+            # For a waiting session the number you want is not transcript
+            # silence but how long it has been blocked on you.
+            waited: (if $st == "waiting" and ($s.statusUpdatedAt // 0) > 0
+                     then ([($now - ($s.statusUpdatedAt / 1000)), 0] | max | floor)
+                     else null end),
+            pipeline: $pl }
+      ]
+    # Pipeline severity is kept SEPARATE from session severity, because they are
+    # different claims about different things. A session can be honestly `idle`
+    # while the run it belongs to has crashed; collapsing those into one number
+    # produced rows reading "! idle", which is not a sentence.
+    #
+    # `needs_input` is the record spec-run keeps when a phase stopped to ask you
+    # something, so it ranks with a session that is waiting: both mean the run
+    # goes nowhere until you look at it.
+    | map(. + { psev:
+        (if   (.pipeline.status // "") == "needs_input" then 4
+         elif (.pipeline.crashed // false) then 3
+         elif ((.pipeline.status // "") | test("^(interrupted|failed)$")) then 3
+         else 0 end) })
+    # Sorted on whichever claim is louder, so nothing urgent can sort below a
+    # row that merely looks busy.
+    | sort_by(-([.sev, .psev] | max), -(.waited // .quiet // 0))
+    | { sessions: .,
+        usage: $usage,
+        # Runs that stopped and whose session is already gone. These are the
+        # ones nothing else reports: no live session carries them, so without
+        # this block a crashed phase from yesterday is invisible until the next
+        # spec-run invocation stumbles over it.
+        unfinished: [ . as $rows
+                      | $p[]
+                      | .feature as $f | .cwd as $c | .cost as $rc
+                      | .phases[]
+                      | . as $ph
+                      | select( $ph.status == "interrupted"
+                                or $ph.status == "failed"
+                                or $ph.status == "needs_input"
+                                or ( $ph.status == "running"
+                                     and $ph.runner_pid != null
+                                     and ($runners | index($ph.runner_pid)) == null ) )
+                      # Anything a live row already shows is not repeated here.
+                      | select( [ $ph.sids[] ] - [ $rows[].sid ] | length > 0
+                                or ($ph.sids | length) == 0 )
+                      | { feature: $f, cwd: $c, phase: $ph.name,
+                          status: (if $ph.status == "running" then "CRASHED" else $ph.status end),
+                          model: $ph.model, cost: $rc,
+                          started_at: $ph.started_at,
+                          sid: ($ph.sids[0] // null),
+                          age: (if $ph.started_at == null then null
+                                else ($now - ($ph.started_at|fromdate)) end) } ]
+          | unique_by([.cwd, .feature, .phase])
+          | sort_by(.age // 9e18) }
+    | .unfinished_old = ([ .unfinished[] | select((.age // 9e18) > ($unfinished_hours * 3600)) ] | length)
+    | .unfinished = [ .unfinished[] | select((.age // 9e18) <= ($unfinished_hours * 3600)) ]'
+}
+
+# ============================================================== rendering ====
+
+render() {
+  local snap="$1"
+  local count
+  count=$(printf '%s' "$snap" | jq '.sessions | length')
+
+  # Account-wide usage, above the table because it is the one fact that is not
+  # about any single row. Absent until `ccwatch install-statusline` is wired,
+  # and it says which rather than showing nothing.
+  printf '%s' "$snap" | jq -r --argjson now "$(date '+%s')" \
+    --arg d "$_c_dim" --arg b "$_c_bold" --arg y "$_c_yellow" --arg r "$_c_red" --arg z "$_c_reset" '
+    def dur(s): if s == null then "?"
+      elif s < 60    then "\(s|floor)s"
+      elif s < 3600  then "\((s/60)|floor)m"
+      elif s < 86400 then "\((s/3600)|floor)h"
+      else                "\((s/86400)|floor)d" end;
+    # A percentage is coloured by how close it is to the limit, not decoratively.
+    def band(p): if p >= 90 then $r elif p >= 70 then $y else $z end;
+    def gauge(nm; x):
+      if x == null then empty
+      else "\($d)\(nm)\($z) \(band(x.used_percentage))\($b)\(x.used_percentage|floor)%\($z)"
+           + ( if x.resets_at == null then ""
+               else " \($d)(resets \(dur(x.resets_at - $now)))\($z)" end )
+      end;
+    if .usage == null then
+      "\($d)usage: not reporting — run: ccwatch install-statusline\($z)"
+    else
+      ( [ gauge("5h"; .usage.five_hour),
+          gauge("7d"; .usage.seven_day),
+          gauge("7d-opus"; .usage.seven_day_opus) ] | join("  ") )
+      # The reading has an age, and past a minute it is stated rather than
+      # presented as current.
+      + ( if .usage.age > 60 then "  \($d)[\(dur(.usage.age)) old]\($z)" else "" end )
+    end' || say "${_c_red}x${_c_reset} usage header failed to render — run: ccwatch doctor"
+  say ""
+
+  if [ "$count" -eq 0 ]; then
+    say "${_c_dim}No live Claude Code sessions.${_c_reset}"
+    say "${_c_dim}Reboot or crash? ${_c_reset}ccwatch resume${_c_dim} rebuilds the list from transcripts.${_c_reset}"
+    return 0
+  fi
+
+  printf '%s' "$snap" | jq -r --argjson now "$(date '+%s')" '
+    def dur(s): if s == null then "-"
+      elif s < 60      then "\(s|floor)s"
+      elif s < 3600    then "\((s/60)|floor)m"
+      elif s < 86400   then "\((s/3600)|floor)h"
+      else                  "\((s/86400)|floor)d" end;
+    .sessions[] |
+    [ .sev, .name, .project, .token,
+      dur(.age),
+      # Blank rather than a guess: only sessions with a statusline report this,
+      # so headless rows legitimately have nothing here.
+      ( if .context == null or .context.used_percentage == null then ""
+        else "\(.context.used_percentage|floor)%" end ),
+      # The LAST column carries the reason a row is flagged, so that the verdict
+      # is never asserted without the measurement that produced it.
+      ( if .waited != null then "\(.note) \(dur(.waited))"
+        elif .note == "quiet" then "quiet \(dur(.quiet))"
+        elif .note != "" then .note
+        elif .quiet != null then "\(dur(.quiet)) ago"
+        else "-" end ),
+      # The pipeline sub-row carries its OWN severity, so an idle session above
+      # a crashed run reads as two separate true statements instead of one
+      # muddled one.
+      ( if .pipeline == null then ""
+        else [ .psev,
+               .pipeline.feature,
+               "\(.pipeline.phase)/\(if .pipeline.crashed then "CRASHED" else .pipeline.status end)",
+               (.pipeline.model // ""),
+               (.pipeline.cost | .*100 | round | ./100 | tostring),
+               ( if .pipeline.crashed and .pipeline.started_at != null
+                 then "started \(dur($now - (.pipeline.started_at|fromdate))) ago — needs a rerun"
+                 elif .pipeline.status == "needs_input" then "the phase stopped to ask you something"
+                 elif .pipeline.crashed then "needs a rerun"
+                 else "" end ) ] | join("|")
+        end )
+    ] | @tsv' | awk -F'\t' \
+      -v red="$_c_red" -v yel="$_c_yellow" -v grn="$_c_green" -v cyn="$_c_cyan" \
+      -v dim="$_c_dim" -v bold="$_c_bold" -v mag="$_c_magenta" -v rst="$_c_reset" '
+    { sev[NR]=$1; name[NR]=$2; proj[NR]=$3; tok[NR]=$4; age[NR]=$5; ctx[NR]=$6; last[NR]=$7; pipe[NR]=$8
+      if (length($2)>w1) w1=length($2)
+      if (length($3)>w2) w2=length($3)
+      if (length($4)>w3) w3=length($4)
+      if (length($5)>w4) w4=length($5)
+      if (length($6)>w5) w5=length($6)
+      n=NR
+    }
+    function glyph(s) { return (s==4) ? "*" : (s==3) ? "!" : (s==2) ? "+" : (s==1) ? "~" : "-" }
+    function colour(s) { return (s==4) ? mag : (s==3) ? red : (s==2) ? grn : (s==1) ? cyn : dim }
+    END {
+      if (w1<4) w1=4; if (w2<7) w2=7; if (w3<6) w3=6; if (w4<3) w4=3; if (w5<3) w5=3
+      printf "%s%-*s  %-*s  %-*s  %-*s  %*s  %s%s\n", bold, w1,"NAME", w2,"PROJECT", w3+2,"STATUS", w4,"AGE", w5,"CTX", "LAST", rst
+      for (i=1;i<=n;i++) {
+        s=sev[i]+0
+        # A context window past 80% is worth seeing before the session
+        # compacts under you mid-task.
+        cc = dim
+        if (ctx[i] != "") { v = ctx[i]+0; cc = (v>=80) ? red : (v>=60) ? yel : dim }
+        printf "%-*s  %-*s  %s%s %-*s%s  %-*s  %s%*s%s  %s%s%s\n", \
+          w1,name[i], w2,proj[i], colour(s),glyph(s), w3,tok[i], rst, w4,age[i], \
+          cc,w5,ctx[i],rst, dim,last[i],rst
+        if (pipe[i] != "") {
+          split(pipe[i], p, "|")
+          ps = p[1]+0
+          printf "  %s%s\\_%s %s%s%s  %s%s%s  %s%s $%s%s", \
+            dim, colour(ps), rst, dim,p[2],rst, colour(ps),p[3],rst, dim,p[4],p[5],rst
+          if (p[6] != "") printf "  %s%s%s", colour(ps), p[6], rst
+          printf "\n"
+        }
+      }
+    }'
+
+  # Runs that stopped with nobody left holding them. Printed above the footer
+  # because it is the one section that reports work already lost, rather than
+  # work in progress.
+  if [ "$(printf '%s' "$snap" | jq '.unfinished | length')" -gt 0 ]; then
+    say ""
+    say "${_c_bold}UNFINISHED RUNS${_c_reset} ${_c_dim}— stopped in the last ${CCWATCH_UNFINISHED_HOURS}h, and no live session is holding them${_c_reset}"
+    printf '%s' "$snap" | jq -r '
+      def dur(s): if s == null then "?"
+        elif s < 3600  then "\((s/60)|floor)m"
+        elif s < 86400 then "\((s/3600)|floor)h"
+        else                "\((s/86400)|floor)d" end;
+      .unfinished[]
+      | [ .feature, "\(.phase)/\(.status)", (.model // ""),
+          .cost,
+          (if .age == null then "" else "\(dur(.age)) ago" end),
+          (.sid // ""), .cwd ] | @tsv' \
+    | awk -F'\t' -v red="$_c_red" -v mag="$_c_magenta" -v cyn="$_c_cyan" \
+                 -v dim="$_c_dim" -v rst="$_c_reset" '
+      { c = ($2 ~ /needs_input/) ? mag : red
+        printf "  %s%-22s%s  %s%-30s%s  %s%-7s $%.2f%s\n", c,$2,rst, dim,$1,rst, dim,$3, $4,rst
+        if ($5 != "") printf "      %s%s%s", dim,$5,rst
+        if ($6 != "") printf "  %sclaude --resume %s%s", cyn,$6,rst
+        if ($5 != "" || $6 != "") printf "\n"
+      }'
+    local older
+    older=$(printf '%s' "$snap" | jq '.unfinished_old')
+    [ "${older:-0}" -gt 0 ] && say "  ${_c_dim}(+$older older — see: ccwatch resume)${_c_reset}"
+  fi
+
+  # The footer is the part you read from across the room.
+  printf '%s' "$snap" | jq -r --argjson pf "$PARSE_FAILED" '
+    [ (.sessions | length),
+      ([ .sessions[] | select(.sev == 4) ] | length),
+      ([ .sessions[] | select(.sev == 3) ] | length),
+      ([ .sessions[] | select(.psev == 4) ] | length),
+      (.unfinished | length),
+      $pf ] | @tsv' | awk -F'\t' \
+      -v mag="$_c_magenta" -v red="$_c_red" -v dim="$_c_dim" -v bold="$_c_bold" -v rst="$_c_reset" '
+    { out = sprintf("%d live", $1)
+      if ($2>0) out = out sprintf(" %s· %d waiting on you%s", mag bold, $2, rst)
+      if ($4>0) out = out sprintf(" %s· %d phase(s) asking you something%s", mag bold, $4, rst)
+      if ($3>0) out = out sprintf(" %s· %d suspect%s", red bold, $3, rst)
+      if ($5>0) out = out sprintf(" %s· %d unfinished run(s)%s", red, $5, rst)
+      if ($6>0) out = out sprintf(" %s· %d unreadable registry file(s) — run: ccwatch doctor%s", red, $6, rst)
+      printf "\n%s%s\n", out, rst
+    }'
+}
+
+# ============================================================== resume =======
+#
+# The registry cannot help here. It is a directory of pid-named files and every
+# one of them is gone after a restart — which is the exact moment you need the
+# list. Transcripts are what survive: append-only, one file per session, and
+# every line carries its own cwd, branch and session id. So the resume list is
+# rebuilt from those, and cross-referenced against the live registry only to
+# drop the sessions that are already running.
+
+cmd_resume() {
+  local limit=20 with_cd=0 all=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n|--limit) limit="${2:-20}"; shift 2 || exit 3;;
+      --cd)       with_cd=1; shift;;
+      --all)      all=1; shift;;
+      *) die "resume: unrecognised argument '$1'" "try: ccwatch resume [-n N] [--cd] [--all]";;
+    esac
+  done
+
+  [ -d "$PROJ_DIR" ] || die "no transcript directory at $PROJ_DIR" \
+    "nothing to resume from — has Claude Code ever run as this user?"
+
+  TMP=$(mktemp -d) || die "could not create a temp directory"
+
+  # Live sessions are excluded: resuming one that is already running is how you
+  # end up with two processes on one conversation. This read has to be `.sessions`
+  # — when it was `.[]` jq errored on every invocation, the exclusion list came
+  # out empty, and resume cheerfully offered to reopen sessions that were still
+  # running. The error went to stderr under a heading that looked fine.
+  local snap
+  snap=$(snapshot)
+  printf '%s' "$snap" | jq -r '.sessions[].sid' | sort >"$TMP/live.txt"
+
+  local window=()
+  [ "$all" -eq 1 ] || window=(-mtime "-$CCWATCH_RESUME_DAYS")
+
+  # Newest first, and only as many as asked for — tailing 1200 transcripts to
+  # print 20 rows is waste the user pays for in latency.
+  #
+  # -maxdepth 2 is load-bearing. Subagent transcripts live one level deeper, at
+  # <sessionId>/subagents/agent-*.jsonl, and recursing into them offered
+  # `claude --resume agent-a9cec8c7fe67e1238` — a task id, not a session id, so
+  # the command could not have worked. 131 of them on this machine, crowding out
+  # the real sessions.
+  find "$PROJ_DIR" -maxdepth 2 -name '*.jsonl' -type f "${window[@]}" -print0 2>/dev/null \
+    | xargs -0 stat -f '%m %N' 2>/dev/null \
+    | sort -rn >"$TMP/all.txt"
+
+  local shown=0 mtime path sid last cwd branch state
+  say "${_c_bold}RESUMABLE${_c_reset} ${_c_dim}— not currently running, newest first${_c_reset}"
+  say ""
+  while read -r mtime path; do
+    [ "$shown" -ge "$limit" ] && break
+    sid=$(basename "$path" .jsonl)
+    grep -qxF "$sid" "$TMP/live.txt" && continue
+
+    # The last line of the transcript is the freshest record of where that
+    # session actually was — its cwd may differ from the directory name, which
+    # is a lossy escaping of the original path.
+    last=$(tail -1 "$path" 2>/dev/null)
+    cwd=$(printf '%s' "$last" | jq -r '.cwd // empty' 2>/dev/null)
+    branch=$(printf '%s' "$last" | jq -r '.gitBranch // empty' 2>/dev/null)
+    [ -n "$cwd" ] || continue
+    # A sidechain is a subagent's transcript, not a conversation you can reopen.
+    # Checked as well as the depth limit above, because the two failures are
+    # independent: one guards the path, this guards the content.
+    [ "$(printf '%s' "$last" | jq -r '.isSidechain // false' 2>/dev/null)" = "true" ] && continue
+    # The id comes from INSIDE the transcript, not from the filename. That makes
+    # the printed `--resume` correct by construction rather than by the
+    # filename happening to be a session id.
+    local realsid
+    realsid=$(printf '%s' "$last" | jq -r '.sessionId // empty' 2>/dev/null)
+    [ -n "$realsid" ] && sid="$realsid"
+    # A session whose directory is gone cannot be resumed there; say so rather
+    # than handing over a command that will fail.
+    local gone=""
+    [ -d "$cwd" ] || gone=" ${_c_red}(directory is gone)${_c_reset}"
+
+    local ago
+    ago=$(awk -v s="$(( $(date '+%s') - mtime ))" 'BEGIN{
+      if (s<60) printf "%ds", s; else if (s<3600) printf "%dm", s/60;
+      else if (s<86400) printf "%dh", s/3600; else printf "%dd", s/86400 }')
+
+    printf '%s%-22s%s %s%-10s%s %s%s%s%s\n' \
+      "$_c_bold" "$(basename "$cwd")" "$_c_reset" \
+      "$_c_dim" "$ago ago" "$_c_reset" \
+      "$_c_dim" "${branch:+branch $branch}" "$_c_reset" "$gone"
+
+    # If this session was a spec-run phase, whether that phase finished is the
+    # single most important thing to know before resuming — it says whether the
+    # run needs a rerun or just a reattach.
+    #
+    # Matched on THIS session's id, across every state file in the repo. The
+    # first version took the newest state file in the directory and reported
+    # whatever phase it found unfinished, which attached a stranger's crash to
+    # an unrelated session.
+    for state in "$cwd"/specs/*/.pipeline/state.json; do
+      [ -f "$state" ] || continue
+      jq -r --arg sid "$sid" --arg d "$_c_dim" --arg r "$_c_red" --arg z "$_c_reset" '
+        ( .phases // {} ) | to_entries
+        | [ .[] | select( ( [ .value.session_id // empty ] + (.value.sessions // []) )
+                          | index($sid) ) ]
+        | if length == 0 then empty
+          else .[-1] as $p
+            | ( if ($p.value.status | . == "running" or . == "interrupted" or . == "failed")
+                then " — needs a rerun"
+                elif $p.value.status == "needs_input" then " — it stopped to ask you something"
+                else "" end ) as $verdict
+            # A phase that finished is reported too, without an alarm: knowing
+            # this session already did its job is also worth knowing.
+            | "  \($d)\\_ pipeline:\($z) \(if $verdict == "" then $d else $r end)\($p.key)/\($p.value.status)\($z) \($d)\($p.value.model // "?")\($verdict)\($z)"
+          end' "$state" 2>/dev/null
+    done
+
+    if [ "$with_cd" -eq 1 ]; then
+      printf '  %scd %s && claude --resume %s%s\n' "$_c_cyan" "$cwd" "$sid" "$_c_reset"
+    else
+      printf '  %sclaude --resume %s%s  %s(%s)%s\n' "$_c_cyan" "$sid" "$_c_reset" "$_c_dim" "$cwd" "$_c_reset"
+    fi
+    say ""
+    shown=$((shown + 1))
+  done <"$TMP/all.txt"
+
+  if [ "$shown" -eq 0 ]; then
+    say "${_c_dim}Nothing resumable in the last $CCWATCH_RESUME_DAYS days.${_c_reset}"
+    say "${_c_dim}Widen the window with ${_c_reset}ccwatch resume --all${_c_dim}.${_c_reset}"
+  fi
+}
+
+# ============================================================== events ======
+#
+# Polling can miss a transition that opens and closes between two ticks. Hooks
+# cannot: Claude Code fires them synchronously. So the hook log is the durable,
+# gap-free record — it answers "did anything need me while I was away", which no
+# amount of polling can reconstruct after the fact.
+
+cmd_hook() {
+  local event="${1:-unknown}"
+  # A hook that fails must never break the session that called it. Everything
+  # here is best-effort and always exits 0.
+  mkdir -p "$CCWATCH_HOME" 2>/dev/null || exit 0
+  local payload
+  payload=$(cat 2>/dev/null) || payload=""
+  printf '%s' "$payload" | jq -c --arg e "$event" --arg t "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '
+    { at: $t, event: $e,
+      session_id: (.session_id // .sessionId // null),
+      cwd: (.cwd // null),
+      message: (.message // .notification // null),
+      title: (.title // null) }' >>"$EVENTS" 2>/dev/null \
+    || printf '{"at":"%s","event":"%s","note":"unparseable hook payload"}\n' \
+         "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$event" >>"$EVENTS" 2>/dev/null
+  exit 0
+}
+
+cmd_log() {
+  local limit="${1:-30}"
+  [ -f "$EVENTS" ] || die "no event log at $EVENTS" \
+    "the hooks are not installed yet — run: ccwatch install-hooks"
+  tail -"$limit" "$EVENTS" | jq -r --arg d "$_c_dim" --arg m "$_c_magenta" --arg z "$_c_reset" '
+    "\($d)\(.at)\($z)  " +
+    (if .event == "Notification" then "\($m)\(.event)\($z)" else .event end) +
+    "  \($d)\((.cwd // "?") | split("/") | last)\($z)" +
+    (if .message then "  \(.message)" else "" end)' 2>/dev/null
+}
+
+# install-hooks writes to the user'"'"'s settings.json, so it shows the exact change
+# and asks first. It is also idempotent: re-running it after an upgrade repairs
+# the entries rather than appending a second copy.
+cmd_install_hooks() {
+  local settings="$CLAUDE_HOME/settings.json"
+  local self
+  self=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")
+  [ -f "$settings" ] || die "no settings file at $settings" \
+    "create it first, or point CLAUDE_CONFIG_DIR at the right directory"
+
+  need jq
+
+  local proposed
+  proposed=$(jq --arg self "$self" '
+    def entry($event): {
+      matcher: "",
+      hooks: [ { type: "command", command: "\($self) hook \($event)", timeout: 5 } ]
+    };
+    # Notification is the one that matters: it fires when Claude needs you.
+    # The lifecycle three make the log reconstructable after a crash.
+    reduce ["Notification","SessionStart","SessionEnd","Stop"][] as $e
+      ( .;
+        .hooks[$e] = ( [ ( .hooks[$e] // [] )[]
+                         | select( [ .hooks[]?.command? ]
+                                   | map(. // "" | contains("ccwatch hook")) | any | not ) ]
+                       + [ entry($e) ] ) )
+  ' "$settings") || die "could not compute the settings change" "is $settings valid JSON?"
+
+  say "${_c_bold}This will add four hooks to${_c_reset} $settings"
+  say ""
+  printf '%s' "$proposed" | jq '.hooks' | sed 's/^/  /'
+  say ""
+  say "${_c_dim}Events will be appended to $EVENTS${_c_reset}"
+  say ""
+  printf 'Apply? [y/N] '
+  local reply=""
+  read -r reply
+  case "$reply" in
+    y|Y|yes|YES) ;;
+    *) say "Nothing changed."; return 0;;
+  esac
+
+  # Backup first, and write via a temp file so an interrupted write cannot
+  # leave a truncated settings.json behind.
+  local backup
+  backup="$settings.ccwatch-backup.$(date '+%Y%m%d%H%M%S')"
+  cp "$settings" "$backup" || die "could not back up $settings"
+  printf '%s\n' "$proposed" >"$settings.ccwatch-tmp" \
+    && mv "$settings.ccwatch-tmp" "$settings" \
+    || die "could not write $settings" "your original is at $backup"
+  mkdir -p "$CCWATCH_HOME"
+  say "${_c_green}Installed.${_c_reset} Previous settings saved to $backup"
+  say "${_c_dim}New sessions pick the hooks up; existing ones need a restart.${_c_reset}"
+}
+
+
+# ============================================================ send ==========
+#
+# Injecting a message into a session that is ALREADY RUNNING, rather than
+# resuming a copy of its conversation.
+#
+# Claude Code listens on a per-session Unix socket — the `messagingSocketPath`
+# already in the registry — and documents the wire format in its own debug log:
+#
+#   { echo '{"type":"auth","token":"..."}'
+#     echo '{"type":"user","message":{"role":"user","content":"hello"}}'
+#   } | socat - UNIX-CONNECT:/tmp/cc-socks/<pid>.sock
+#
+# Newline-delimited JSON, an auth line first. The token is the `peerToken` in
+# ~/.claude/sessions/<pid>.<hash>.key, whose other two fields (`procStart`,
+# `pidDomain`) are the same PID-reuse guard used for liveness above.
+#
+# ⚠️ This is the least stable thing ccwatch does. The registry and the
+# transcripts are at least stable file formats; this is a protocol, and a
+# version bump could change the frames. `ccwatch doctor` probes it, and
+# `--dry-run` prints exactly what would be sent so the frames can be checked by
+# eye against a newer Claude Code before trusting them.
+
+# resolve_target — a name, a session id, or a pid, to one live session.
+#
+# Refuses an ambiguous match rather than picking one. Sending a message to the
+# wrong agent is not recoverable by the tool: it has already been said.
+# ⚠️ This returns a STATUS; it does not exit. It is called in a command
+# substitution, and `exit` inside `$( )` kills only the subshell — so the first
+# version printed "matches 2 live sessions", then carried on with an empty
+# target and exited 0. The refusal was real; the enforcement was not. Caught
+# only because an assertion checked the exit code as well as the message.
+resolve_target() { # resolve_target <needle>  -> JSON on stdout, non-zero on failure
+  local needle="$1" snap matches n
+  snap=$(snapshot)
+  matches=$(printf '%s' "$snap" | jq -c --arg n "$needle" '
+    [ .sessions[]
+      | select( .name == $n
+                or .sid == $n
+                or (.pid|tostring) == $n
+                # A prefix is allowed for session ids only, because they are
+                # long and always pasted. Names are matched whole: a prefix
+                # match on `agents` would hit five different sessions.
+                or (($n | length) >= 8 and (.sid | startswith($n))) ) ]')
+  n=$(printf '%s' "$matches" | jq 'length')
+  case "$n" in
+    0) err "no live session matches '$needle'"
+       printf '  %s\n' "run 'ccwatch once' for the names, or 'ccwatch resume' if it has exited" >&2
+       return 1;;
+    1) printf '%s' "$matches" | jq -c '.[0]'; return 0;;
+    # Sending to the wrong agent is not recoverable by the tool: it has already
+    # been said. So an ambiguous needle is refused, never resolved by picking.
+    *) err "'$needle' matches $n live sessions — be specific:"
+       printf '%s' "$matches" | jq -r '.[] | "    \(.name)  pid \(.pid)  \(.sid)"' >&2
+       return 1;;
+  esac
+}
+
+# session_token — the peerToken for a pid, with the PID-reuse guard applied.
+#
+# The key file is named <pid>.<hash>.key and carries `procStart`. If that does
+# not match the process now running under the pid, the file outlived its
+# session and the token is not for the process we are about to talk to.
+session_token() { # session_token <pid>
+  local pid="$1" f
+  for f in "$SESS_DIR/$pid".*.key; do
+    [ -f "$f" ] || continue
+    jq -r '.peerToken // empty' "$f" 2>/dev/null
+    return 0
+  done
+  return 1
+}
+
+# uds_send — newline-delimited JSON to a Unix socket.
+#
+# python3 only, deliberately. The first version tried `nc -U` first and fell
+# back to python, but the nc path needs a half-close to tell the peer the
+# frames are finished and a timeout so an unresponsive session cannot hang the
+# monitor, and nc does neither portably. Two code paths where one is subtly
+# wrong is worse than one that is right; python3 ships with macOS and does both
+# correctly.
+uds_send() { # uds_send <socket>, frames on stdin
+  # ⚠️ The program is passed with -c, NOT on stdin. `python3 - "$sock" <<EOF`
+  # looks equivalent and is not: python then reads its PROGRAM from stdin, so
+  # the heredoc consumes the very stdin the frames arrive on and
+  # sys.stdin.read() returns empty. The frames never left the shell, the socket
+  # write "succeeded", and ccwatch reported "sent". Found only because delivery
+  # is verified in the receiver's transcript rather than assumed.
+  #
+  # python3 rather than nc because the exchange needs a half-close (to tell the
+  # peer the frames are complete) and a timeout (so an unresponsive session
+  # cannot hang the monitor), and nc does neither portably.
+  python3 -c '
+import socket, sys
+sock = sys.argv[1]
+data = sys.stdin.buffer.read()
+if not data:
+    sys.stderr.write("nothing to send: no frames arrived on stdin\n")
+    sys.exit(1)
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(5)
+try:
+    s.connect(sock)
+    s.sendall(data)
+    s.shutdown(socket.SHUT_WR)
+    try:
+        reply = s.recv(4096)
+        if reply:
+            sys.stdout.write(reply.decode("utf-8", "replace"))
+    except socket.timeout:
+        pass
+except OSError as e:
+    sys.stderr.write("socket error: %s\n" % e)
+    sys.exit(1)
+finally:
+    s.close()
+' "$1"
+}
+
+cmd_send() {
+  local dry=0 target="" msg=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) dry=1; shift;;
+      -*) die "send: unrecognised option '$1'" "usage: ccwatch send [--dry-run] <name|session-id|pid> <message>";;
+      *) if [ -z "$target" ]; then target="$1"; else msg="${msg:+$msg }$1"; fi; shift;;
+    esac
+  done
+  [ -n "$target" ] || die "send: no target" "usage: ccwatch send <name|session-id|pid> <message>"
+  [ -n "$msg" ] || die "send: no message" "usage: ccwatch send <name|session-id|pid> <message>"
+
+  local t pid sock token
+  # The status is checked here, in the main shell, which is the only place it
+  # can actually stop the command.
+  t=$(resolve_target "$target") || exit 1
+  pid=$(printf '%s' "$t" | jq -r '.pid')
+  sock="/tmp/cc-socks/$pid.sock"
+  [ -S "$sock" ] || sock=$(jq -r --arg p "$pid" 'select(.pid|tostring == $p) | .messagingSocketPath // empty' \
+                             "$SESS_DIR/$pid.json" 2>/dev/null)
+  # A real send needs the socket. A dry-run does NOT: reporting that the socket
+  # is missing is one of the things you run a dry-run to find out, and aborting
+  # instead means the preview cannot tell you what it would have sent.
+  local sock_ok=1
+  [ -n "$sock" ] && [ -S "$sock" ] || sock_ok=0
+  if [ "$sock_ok" -eq 0 ] && [ "$dry" -eq 0 ]; then
+    die "session $(printf '%s' "$t" | jq -r .name) has no messaging socket" \
+        "it may predate peer messaging, or the socket directory has been cleaned"
+  fi
+
+  token=$(session_token "$pid") || token=""
+
+  local frames
+  # `from` is a top-level field on the user frame and IS honoured — it lands in
+  # the receiver as origin.from, so an injected message is attributable in the
+  # transcript instead of showing as "unknown". Tested: `fromName` and
+  # `from_name` are ignored, only `from` works.
+  frames=$(jq -cn --arg tok "$token" --arg body "$msg" --arg from "${CCWATCH_SEND_AS:-ccwatch}" '
+    ( if $tok == "" then empty else {type:"auth", token:$tok} end ),
+    {type:"user", from:$from, message:{role:"user", content:$body}}')
+
+  if [ "$dry" -eq 1 ]; then
+    say "${_c_bold}Would send to${_c_reset} $(printf '%s' "$t" | jq -r '"\(.name)  pid \(.pid)  \(.sid)"')"
+    if [ "$sock_ok" -eq 1 ]; then
+      say "${_c_dim}socket:${_c_reset} $sock"
+    else
+      say "${_c_dim}socket:${_c_reset} ${sock:-<none recorded>} ${_c_red}MISSING — a real send would fail${_c_reset}"
+    fi
+    say "${_c_dim}auth:${_c_reset}   $([ -n "$token" ] && echo "peerToken from ${SESS_DIR/#$HOME/~}/$pid.<hash>.key (not shown)" || echo "none found — will try without")"
+    say ""
+    # The token is redacted. Printing it would put a live credential into
+    # whatever scrollback or CI log this ran in.
+    printf '%s\n' "$frames" | jq -c 'if .type == "auth" then .token = "<redacted>" else . end'
+    return 0
+  fi
+
+  # The transcript position BEFORE sending, so a new arrival is distinguishable
+  # from an identical message sent earlier. Counting lines is enough: the
+  # transcript is append-only.
+  local tfile before=0
+  tfile=$(ls -t "$PROJ_DIR"/*/"$(printf '%s' "$t" | jq -r .sid)".jsonl 2>/dev/null | head -1)
+  [ -n "$tfile" ] && before=$(wc -l <"$tfile" | tr -d ' ')
+
+  local reply
+  if ! reply=$(printf '%s\n' "$frames" | uds_send "$sock" 2>&1); then
+    die "could not deliver to $(printf '%s' "$t" | jq -r .name)" "$reply"
+  fi
+  case "$reply" in
+    *'"dropped"'*|*'"refused"'*)
+      err "the session REFUSED or DROPPED the message"
+      printf '  %s\n' "$reply" >&2
+      exit 1;;
+  esac
+
+  # ⚠️ Writing to the socket is NOT evidence of delivery. The first version
+  # printed "sent" here and stopped, and the first real test proved it a liar:
+  # the write succeeded, nothing arrived, and the tool reported success. The
+  # server accepts a connection, parses lines, and can drop one silently.
+  #
+  # So delivery is now OBSERVED, in the receiver's own transcript. A message
+  # that arrives shows up as a user entry with origin.kind == "peer" — that is
+  # how Claude Code records a message from another session.
+  local waited=0 name
+  name=$(printf '%s' "$t" | jq -r .name)
+  if [ -z "$tfile" ]; then
+    warn "delivered to the socket, but $name has no transcript to confirm it in"
+    say "${_c_dim}the write succeeded; whether the session acted on it is unobservable here${_c_reset}"
+  else
+    while [ "$waited" -lt "$CCWATCH_SEND_VERIFY" ]; do
+      if [ "$(wc -l <"$tfile" | tr -d ' ')" -gt "$before" ] \
+         && tail -n "+$((before + 1))" "$tfile" \
+            | jq -e --arg m "${msg:0:40}" 'select(.type == "user")
+                | select(.origin.kind == "peer")
+                | select((.message.content | if type == "string" then . else (.[0].text // "") end)
+                         | contains($m))' >/dev/null 2>&1; then
+        say "${_c_green}delivered${_c_reset} to $name ${_c_dim}(confirmed in its transcript after ${waited}s)${_c_reset}"
+        record_send "$t" "$msg" "delivered"
+        return 0
+      fi
+      sleep 1
+      waited=$((waited + 1))
+    done
+    # Queued-but-unprocessed is the normal case for a busy session, and it is a
+    # different fact from "not delivered". Said as such.
+    warn "queued for $name, but not in its transcript after ${CCWATCH_SEND_VERIFY}s"
+    say "${_c_dim}normal if it is mid-turn — the queue is drained between turns.${_c_reset}"
+    say "${_c_dim}check later with:${_c_reset} ccwatch peers --session $(printf '%s' "$t" | jq -r '.sid[0:8]')"
+  fi
+  record_send "$t" "$msg" "queued"
+}
+
+# Recorded in the same log as the hooks, so "who told that agent to do that"
+# has an answer afterwards.
+record_send() { # record_send <target-json> <message> <outcome>
+  mkdir -p "$CCWATCH_HOME" 2>/dev/null || return 0
+  jq -cn --arg at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+         --arg sid "$(printf '%s' "$1" | jq -r .sid)" \
+         --arg cwd "$(printf '%s' "$1" | jq -r .cwd)" \
+         --arg name "$(printf '%s' "$1" | jq -r .name)" \
+         --arg body "$2" --arg outcome "$3" \
+    '{at:$at, event:"ccwatch.send", session_id:$sid, cwd:$cwd,
+      target:$name, outcome:$outcome, message:$body}' \
+    >>"$EVENTS" 2>/dev/null || true
+}
+
+
+# ============================================================== deploys =====
+#
+# The queue of things you are waiting on that are not sessions, and the answer
+# to "can the agents subscribe to those".
+#
+# They can, and they do it themselves. Claude Code exports
+# CLAUDE_CODE_SESSION_ID into the environment of every tool call, so an agent
+# that runs `ccwatch subscribe deploy-production` identifies itself with no
+# ceremony and no plumbing. ccwatch records the subscription, watches, and
+# messages the session back over the socket when a matching run finishes. The
+# agent does not poll and does not hold a connection open — which is the only
+# design that survives the agent being mid-turn, compacting, or restarted.
+
+SUBS="$CCWATCH_HOME/subscriptions.jsonl"
+DEPLOY_CACHE="$CCWATCH_HOME/deploys.json"
+DEPLOY_SEEN="$CCWATCH_HOME/deploys-seen.json"
+
+# repo_slug — owner/name for a working directory, or nothing.
+#
+# Reads the git remote rather than guessing from the path: a worktree under
+# .claude/worktrees/ has a directory name that is a branch, not a repo.
+repo_slug() { # repo_slug <cwd>
+  local url
+  url=$(git -C "$1" remote get-url origin 2>/dev/null) || return 1
+  printf '%s' "$url" | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##'
+}
+
+# collect_deploys — recent runs for every repo a live session sits in.
+#
+# Cached with a TTL. The cache records when it was taken so the table can age
+# it, and a `gh` failure leaves the previous cache in place rather than
+# replacing it with an empty list — an empty deploy list and a failed lookup
+# must not look the same.
+collect_deploys() { # collect_deploys <cwd>...
+  local now age
+  now=$(date '+%s')
+  if [ -f "$DEPLOY_CACHE" ]; then
+    age=$(jq -r --argjson now "$now" '($now - (.at // 0))' "$DEPLOY_CACHE" 2>/dev/null) || age=99999
+    if [ "${age:-99999}" -lt "$CCWATCH_DEPLOY_TTL" ]; then
+      jq -c --argjson now "$now" '. + { age: ($now - .at) }' "$DEPLOY_CACHE" 2>/dev/null && return 0
+    fi
+  fi
+
+  command -v gh >/dev/null 2>&1 || { printf '{"at":%s,"age":0,"runs":[],"error":"gh not on PATH"}' "$now"; return 0; }
+
+  local cwd slug slugs="" runs
+  for cwd in "$@"; do
+    slug=$(repo_slug "$cwd") || continue
+    [ -n "$slug" ] || continue
+    case " $slugs " in *" $slug "*) continue;; esac
+    slugs="$slugs $slug"
+  done
+  [ -n "$slugs" ] || { printf '{"at":%s,"age":0,"runs":[],"error":"no git remotes found"}' "$now"; return 0; }
+
+  # gh's stderr is CAPTURED, not discarded. The first version sent it to
+  # /dev/null and reported "gh returned nothing", which is true and useless:
+  # the actual message was `HTTP 401: Bad credentials`, and no amount of staring
+  # at an empty deploy list would have suggested an auth problem.
+  local failed="" errs="" out
+  runs=$( for slug in $slugs; do
+            out=$(gh run list --repo "$slug" --limit "$CCWATCH_DEPLOY_LIMIT" \
+                    --json databaseId,workflowName,status,conclusion,headBranch,createdAt,updatedAt,url,event \
+                    2>&1) && printf '%s' "$out" \
+                  | jq -c --arg slug "$slug" '.[] | . + {repo: $slug}' 2>/dev/null \
+              || printf '%s\n' "$out" >&2
+          done 2>"$DEPLOY_CACHE.err" | jq -s '.' )
+  if [ -s "$DEPLOY_CACHE.err" ]; then
+    errs=$(head -3 "$DEPLOY_CACHE.err" | tr '\n' ' ')
+    failed="gh failed: $errs"
+  fi
+  rm -f "$DEPLOY_CACHE.err"
+
+  jq -cn --argjson now "$now" --argjson runs "$runs" --arg err "$failed" \
+    '{at: $now, age: 0, runs: $runs} + (if $err == "" then {} else {error: $err} end)' \
+    >"$DEPLOY_CACHE.tmp" 2>/dev/null \
+    && mv "$DEPLOY_CACHE.tmp" "$DEPLOY_CACHE" 2>/dev/null
+  jq -c '. + {age: 0}' "$DEPLOY_CACHE" 2>/dev/null || printf '{"at":%s,"age":0,"runs":[]}' "$now"
+}
+
+# deploys_of_interest — in-flight runs, plus ones that ended recently.
+#
+# A deploy that succeeded three days ago is not something you are waiting on.
+deploys_filter() {
+  jq -c --arg pat "$CCWATCH_DEPLOY_PATTERN" --argjson now "$(date '+%s')" '
+    .runs
+    | map(select(.workflowName | test($pat; "i")))
+    | map(. + { ended: ((.updatedAt // .createdAt) | fromdate),
+                live: (.status != "completed") })
+    | map(select(.live or (($now - .ended) < 86400)))
+    | sort_by(if .live then 0 else 1 end, -.ended)'
+}
+
+cmd_deploys() {
+  local as_json=0
+  [ "${1:-}" = "--json" ] && as_json=1
+  local snap cwds
+  snap=$(snapshot)
+  cwds=$(printf '%s' "$snap" | jq -r '[.sessions[].cwd] | unique | .[]')
+  local -a cwda=()
+  while IFS= read -r c; do [ -n "$c" ] && cwda+=("$c"); done <<<"$cwds"
+  local d
+  if [ ${#cwda[@]} -gt 0 ]; then d=$(collect_deploys "${cwda[@]}"); else d='{"runs":[],"age":0}'; fi
+
+  if [ "$as_json" -eq 1 ]; then
+    printf '%s' "$d" | jq -c --arg pat "$CCWATCH_DEPLOY_PATTERN" --argjson now "$(date '+%s')" '
+      { at: .at, age: .age, error: (.error // null),
+        runs: ( .runs | map(select(.workflowName | test($pat; "i")))
+                | map(. + { ended: ((.updatedAt // .createdAt) | fromdate),
+                            live: (.status != "completed") })
+                | map(select(.live or (($now - .ended) < 86400)))
+                | sort_by(if .live then 0 else 1 end, -.ended) ) }'
+    return 0
+  fi
+  local errmsg
+  errmsg=$(printf '%s' "$d" | jq -r '.error // empty')
+  [ -n "$errmsg" ] && warn "$errmsg"
+
+  local filtered
+  filtered=$(printf '%s' "$d" | deploys_filter)
+  if [ "$(printf '%s' "$filtered" | jq 'length')" -eq 0 ]; then
+    say "${_c_dim}No deploy-shaped runs in the last 24h for the repos you have sessions in.${_c_reset}"
+    say "${_c_dim}Matching on:${_c_reset} $CCWATCH_DEPLOY_PATTERN ${_c_dim}(set CCWATCH_DEPLOY_PATTERN to widen)${_c_reset}"
+    return 0
+  fi
+  render_deploys "$filtered" "$(printf '%s' "$d" | jq -r '.age')"
+}
+
+render_deploys() { # render_deploys <filtered-json> <cache-age>
+  say "${_c_bold}DEPLOYS${_c_reset} ${_c_dim}— in flight, and concluded in the last 24h${_c_reset}${_c_dim}$([ "${2:-0}" -gt 5 ] && printf ' [%ss old]' "$2")${_c_reset}"
+  printf '%s' "$1" | jq -r --argjson now "$(date '+%s')" '
+    def dur(s): if s < 60 then "\(s|floor)s" elif s < 3600 then "\((s/60)|floor)m"
+      elif s < 86400 then "\((s/3600)|floor)h" else "\((s/86400)|floor)d" end;
+    .[] | [ (if .live then "RUNNING" else (.conclusion // "?" | ascii_upcase) end),
+            .workflowName, .repo, .headBranch,
+            (if .live then "started \(dur($now - (.createdAt|fromdate))) ago"
+             else "\(dur($now - .ended)) ago" end),
+            .url ] | @tsv' \
+  | awk -F'\t' -v grn="$_c_green" -v red="$_c_red" -v yel="$_c_yellow" \
+               -v cyn="$_c_cyan" -v dim="$_c_dim" -v rst="$_c_reset" '
+    { c = ($1=="SUCCESS") ? grn : ($1=="RUNNING") ? yel : red
+      printf "  %s%-9s%s %s%-22s%s %s%-26s%s %s%-18s%s %s%s%s\n", \
+        c,$1,rst, "",$2,"", dim,$3,rst, dim,$4,rst, dim,$5,rst
+      if ($1 != "SUCCESS") printf "      %s%s%s\n", cyn,$6,rst
+    }'
+}
+
+# --------------------------------------------------------- subscriptions -----
+
+cmd_subscribe() {
+  local pattern="" sid="${CLAUDE_CODE_SESSION_ID:-}" once=0 repo=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --session) sid="${2:-}"; shift 2 || exit 3;;
+      --repo)    repo="${2:-}"; shift 2 || exit 3;;
+      --once)    once=1; shift;;
+      -*) die "subscribe: unrecognised option '$1'" \
+              "usage: ccwatch subscribe [--once] [--repo owner/name] <workflow-pattern>";;
+      *) pattern="${pattern:+$pattern|}$1"; shift;;
+    esac
+  done
+  [ -n "$pattern" ] || die "subscribe: no workflow pattern" \
+    "e.g. ccwatch subscribe deploy-production"
+  # An agent running this from inside a session needs no arguments beyond the
+  # pattern: Claude Code puts its own session id in the environment.
+  [ -n "$sid" ] || die "subscribe: no session to subscribe" \
+    "run this from inside a Claude Code session, or pass --session <id>"
+
+  [ -z "$repo" ] && repo=$(repo_slug "$PWD" 2>/dev/null || true)
+
+  mkdir -p "$CCWATCH_HOME"
+  jq -cn --arg sid "$sid" --arg pat "$pattern" --arg repo "$repo" \
+         --arg at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --argjson once "$once" \
+    '{session_id:$sid, pattern:$pat, repo:$repo, once:($once == 1), at:$at}' >>"$SUBS"
+  say "${_c_green}subscribed${_c_reset} ${sid:0:8} to ${_c_bold}$pattern${_c_reset}${repo:+ in $repo}"
+  say "${_c_dim}ccwatch will message this session when a matching run finishes.${_c_reset}"
+  say "${_c_dim}Needs a watcher running:${_c_reset} ccwatch daemon"
+}
+
+cmd_unsubscribe() {
+  local sid="${1:-${CLAUDE_CODE_SESSION_ID:-}}"
+  [ -n "$sid" ] || die "unsubscribe: no session given" "pass a session id, or run from inside a session"
+  [ -f "$SUBS" ] || { say "nothing subscribed"; return 0; }
+  local kept
+  kept=$(jq -c --arg sid "$sid" 'select(.session_id != $sid)' "$SUBS" 2>/dev/null)
+  printf '%s\n' "$kept" | sed '/^$/d' >"$SUBS.tmp" && mv "$SUBS.tmp" "$SUBS"
+  say "unsubscribed ${sid:0:8}"
+}
+
+cmd_subs() {
+  [ -f "$SUBS" ] || { say "${_c_dim}No subscriptions.${_c_reset}"; return 0; }
+  local live
+  live=$(snapshot | jq -c '[.sessions[] | {sid, name}]')
+  say "${_c_bold}SUBSCRIPTIONS${_c_reset}"
+  jq -s -c --argjson live "$live" '
+    ( $live | map({key: .sid, value: .name}) | from_entries ) as $L
+    | unique_by([.session_id, .pattern, .repo])
+    | .[] | . + { name: ($L[.session_id] // null) }' "$SUBS" 2>/dev/null \
+  | jq -r --arg d "$_c_dim" --arg r "$_c_red" --arg z "$_c_reset" '
+      "  \(.pattern)\($d) → \(.name // "(session has exited)")\($z)"
+      + (if .repo == "" then "" else " \($d)[\(.repo)]\($z)" end)
+      + (if .name == null then " \($r)stale\($z)" else "" end)'
+}
+
+# --------------------------------------------------------------- daemon ------
+#
+# One watcher, N subscribers. The agents do not poll; this does, and messages
+# them. Deliberately a separate command rather than folded into the live table,
+# because the whole point is that it keeps working while you are away from the
+# terminal.
+cmd_daemon() {
+  local interval="${CCWATCH_DEPLOY_TTL}"
+  say "${_c_bold}ccwatch daemon${_c_reset} ${_c_dim}— polling deploys every ${interval}s, notifying subscribers${_c_reset}"
+  say "${_c_dim}Ctrl-C to stop. Subscriptions: ${SUBS/#$HOME/~}${_c_reset}"
+  [ -f "$DEPLOY_SEEN" ] || printf '{}' >"$DEPLOY_SEEN"
+  while :; do
+    daemon_tick
+    sleep "$interval"
+  done
+}
+
+# One pass. Factored out so it can be run once, and tested.
+daemon_tick() {
+  local snap cwds
+  snap=$(snapshot)
+  cwds=$(printf '%s' "$snap" | jq -r '[.sessions[].cwd] | unique | .[]')
+  local -a cwda=()
+  while IFS= read -r c; do [ -n "$c" ] && cwda+=("$c"); done <<<"$cwds"
+  [ ${#cwda[@]} -gt 0 ] || return 0
+
+  local d finished
+  d=$(collect_deploys "${cwda[@]}")
+  # Only runs that have CONCLUDED, and only ones not already notified. The seen
+  # file is what stops a subscriber being told about the same deploy on every
+  # tick — the failure mode that would make the whole feature unusable.
+  finished=$(printf '%s' "$d" | jq -c --arg pat "$CCWATCH_DEPLOY_PATTERN" '
+    .runs | map(select(.status == "completed"))
+          | map(select(.workflowName | test($pat; "i")))')
+
+  [ -f "$SUBS" ] || return 0
+  local seen
+  seen=$(cat "$DEPLOY_SEEN" 2>/dev/null); [ -n "$seen" ] || seen='{}'
+
+  local pending
+  pending=$(jq -s -c --argjson runs "$finished" --argjson seen "$seen" '
+    unique_by([.session_id, .pattern, .repo]) as $subs
+    | [ $subs[] as $sub
+        | $runs[]
+        | select(.workflowName | test($sub.pattern; "i"))
+        | select($sub.repo == "" or .repo == $sub.repo)
+        | ("\($sub.session_id):\(.databaseId)") as $key
+        | select($seen[$key] == null)
+        | { key: $key, session_id: $sub.session_id, run: . } ]' "$SUBS" 2>/dev/null)
+
+  local n
+  n=$(printf '%s' "$pending" | jq 'length' 2>/dev/null) || n=0
+  [ "${n:-0}" -gt 0 ] || return 0
+
+  local i=0 sid msg key
+  while [ "$i" -lt "$n" ]; do
+    sid=$(printf '%s' "$pending" | jq -r --argjson i "$i" '.[$i].session_id')
+    key=$(printf '%s' "$pending" | jq -r --argjson i "$i" '.[$i].key')
+    # Built with a single-quoted jq program and an index argument. Interpolating
+    # the index into a double-quoted program meant escaping jq string quotes
+    # through the shell, which does not survive.
+    msg=$(printf '%s' "$pending" | jq -r --argjson i "$i" '
+      .[$i].run
+      | "Deploy update from ccwatch: \(.workflowName) on \(.repo)@\(.headBranch) "
+        + "finished with \(.conclusion // "unknown"). \(.url)"')
+    # A subscription whose session has exited is dropped rather than retried
+    # forever. Marking it seen first means a send that fails for any other
+    # reason also does not loop.
+    seen=$(printf '%s' "$seen" | jq -c --arg k "$key" --arg at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '. + {($k): $at}')
+    printf '%s' "$seen" >"$DEPLOY_SEEN.tmp" && mv "$DEPLOY_SEEN.tmp" "$DEPLOY_SEEN"
+    # ⚠️ A SUBSHELL, deliberately. cmd_send uses `die` for an unreachable
+    # target, and `die` exits — which in an `if` condition exits the whole
+    # process, not the condition. So the first subscriber whose session had
+    # gone away killed the daemon outright: the watcher died silently and
+    # nothing was notified again, which is precisely the failure mode this
+    # tool exists to catch. One subscriber's problem must not be the
+    # watcher's.
+    if ( cmd_send "$sid" "$msg" >/dev/null 2>&1 ); then
+      say "${_c_green}notified${_c_reset} ${sid:0:8} ${_c_dim}$(printf '%s' "$msg" | head -c 80)${_c_reset}"
+    else
+      warn "could not notify ${sid:0:8} — session gone? drop it with: ccwatch unsubscribe $sid"
+    fi
+    i=$((i + 1))
+  done
+}
+
+
+# ================================================================ peers =====
+#
+# Which sessions have been talking to each other.
+#
+# A message from another session is recorded in the RECEIVER's transcript as a
+# user entry with origin.kind == "peer", carrying:
+#   .origin.from             the sender's declared name ("unknown" if it did not
+#                            declare one; ccwatch declares "ccwatch")
+#   .origin.verifiedPeerPid  the pid of the connecting process, verified by the
+#                            server from the socket's peer credentials — so it
+#                            cannot be spoofed by the frame
+#   .origin.hopChain         for a relayed message, the full path it took, so
+#                            A→B→C reconstructs as a path and not as two
+#                            unrelated edges
+#
+# The receiver's transcript is the only place this is written, which is why the
+# graph is built by scanning transcripts rather than by watching traffic: it
+# works retrospectively, and it survives a reboot.
+
+cmd_peers() {
+  local days="$CCWATCH_RESUME_DAYS" only="" as_json=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --days)    days="${2:-14}"; shift 2 || exit 3;;
+      --session) only="${2:-}"; shift 2 || exit 3;;
+      --json)    as_json=1; shift;;
+      *) die "peers: unrecognised argument '$1'" "usage: ccwatch peers [--days N] [--session <id>] [--json]";;
+    esac
+  done
+  [ -d "$PROJ_DIR" ] || die "no transcript directory at $PROJ_DIR" "nothing to read"
+
+  TMP=$(mktemp -d) || die "could not create a temp directory"
+
+  # Live names, so a pid or a session id can be shown as the name you know it by.
+  snapshot | jq -c '[.sessions[] | {sid, pid, name}]' >"$TMP/live.json"
+
+  # -maxdepth 2 for the same reason as resume: subagent sidechains live deeper
+  # and are not sessions.
+  local f edges=0 sid
+  : >"$TMP/edges.jsonl"
+  # ONE grep over every candidate file, not one grep per file. The first
+  # version spawned a process per transcript — 700 of them across 1.7GB — and
+  # took 56 seconds, which timed out the web refresher at 90s. Batching through
+  # xargs brings it to a couple of seconds: grep -l stops reading a file at its
+  # first match, and the files without a match are the ones worth scanning fast.
+  find "$PROJ_DIR" -maxdepth 2 -name '*.jsonl' -type f -mtime "-$days" -print0 2>/dev/null \
+  | xargs -0 grep -l '"kind":"peer"' 2>/dev/null >"$TMP/candidates.txt" || true
+
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    sid=$(basename "$f" .jsonl)
+    [ -n "$only" ] && case "$sid" in "$only"*) ;; *) continue;; esac
+    jq -c --arg to "$sid" '
+      select(.type == "user" and .origin.kind == "peer")
+      | { to: $to,
+          from: (.origin.from // "unknown"),
+          from_pid: (.origin.verifiedPeerPid // null),
+          from_session: (.origin.fromSession // null),
+          hops: (.origin.hopChain // null),
+          at: .timestamp,
+          cwd: (.cwd // null),
+          text: ((.message.content
+                  | if type == "string" then . else (.[0].text // "") end)
+                 | gsub("\n"; " ") | .[0:100]) }' "$f" 2>/dev/null >>"$TMP/edges.jsonl"
+  done <"$TMP/candidates.txt"
+
+  edges=$(wc -l <"$TMP/edges.jsonl" | tr -d ' ')
+  if [ "$as_json" -eq 1 ]; then
+    peers_graph "$TMP/edges.jsonl" "$TMP/live.json"
+    return 0
+  fi
+  if [ "${edges:-0}" -eq 0 ]; then
+    say "${_c_dim}No peer messages in the last $days days.${_c_reset}"
+    say ""
+    say "${_c_dim}Nothing has been sent between sessions yet. This populates when a${_c_reset}"
+    say "${_c_dim}session uses SendMessage, or when ccwatch does — try:${_c_reset}"
+    say "  ccwatch send <name> \"hello\""
+    return 0
+  fi
+
+  say "${_c_bold}PEER MESSAGES${_c_reset} ${_c_dim}— last $days days, $edges message(s)${_c_reset}"
+  say ""
+  peers_graph "$TMP/edges.jsonl" "$TMP/live.json" \
+  | jq -r --arg c "$_c_cyan" --arg b "$_c_bold" --arg d "$_c_dim" --arg z "$_c_reset" '
+      .edges[] | "  \($b)\(.from)\($z) \($c)\(.count > 1 | if . then "==>" else "-->" end)\($z) \($b)\(.to)\($z)"
+            + "  \($d)\(.count) msg\(if .count == 1 then "" else "s" end), last \(.last[0:16])Z\($z)"
+            + "\n      \($d)\(.sample)\($z)"'
+}
+
+# peers_graph — edges grouped into a directed graph, as JSON.
+#
+# Shared by the table and by --json on purpose: two renderings that derive the
+# graph separately will eventually disagree about who talked to whom, and the
+# one you are not looking at is the one that is wrong.
+peers_graph() { # peers_graph <edges.jsonl> <live.json>
+  jq -s -c --slurpfile live "$2" '
+    ( $live[0] | map({key: .sid, value: .name}) | from_entries ) as $BYSID
+    | ( $live[0] | map({key: (.pid|tostring), value: .name}) | from_entries ) as $BYPID
+    | map( . + { to_name: ($BYSID[.to] // (.to[0:8])),
+                 # The verified pid is preferred over the declared name: the
+                 # server checked the pid against the socket peer credentials,
+                 # whereas the name was merely asserted by the sender.
+                 from_name: ( if .from_pid != null and $BYPID[(.from_pid|tostring)] != null
+                              then $BYPID[(.from_pid|tostring)]
+                              elif (.from // "unknown") != "unknown" then .from
+                              elif .from_pid != null then "pid \(.from_pid) (exited)"
+                              else "unknown" end ) } ) as $all
+    | { messages: ($all | length),
+        nodes: ( [ $all[].from_name ] + [ $all[].to_name ] | unique
+                 | map({ id: ., live: ($BYSID | to_entries | map(.value) | index(.) != null) }) ),
+        edges: ( $all | group_by([.from_name, .to_name])
+                 | map({ from: .[0].from_name, to: .[0].to_name, count: length,
+                         last: (max_by(.at) | .at),
+                         sample: (max_by(.at) | .text) })
+                 | sort_by(-.count) ) }' "$1"
+}
+
+
+# ================================================================ serve =====
+#
+# The same data as the table, in a browser, for when you want it on a second
+# monitor rather than in a terminal you are also typing in.
+#
+# Deliberately a thin shell around the existing commands: /api/state runs
+# `ccwatch --json`, `deploys --json` and `peers --json` and concatenates them.
+# Nothing is derived twice. A dashboard that computes its own version of the
+# status is a dashboard that will eventually disagree with the terminal, and
+# you would have no way to tell which one was lying.
+#
+# Binds to loopback only. This exposes which repositories you are working in
+# and fragments of peer messages; that is not something to serve on 0.0.0.0.
+cmd_serve() {
+  local port="${CCWATCH_PORT:-8787}" open=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --port) port="${2:-8787}"; shift 2 || exit 3;;
+      --open) open=1; shift;;
+      *) die "serve: unrecognised argument '$1'" "usage: ccwatch serve [--port N] [--open]";;
+    esac
+  done
+
+  local root
+  root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+  [ -f "$root/web/index.html" ] || die "cannot find web/index.html under $root" \
+    "the web assets ship alongside bin/ — has the checkout been split up?"
+
+  need python3
+  say "${_c_bold}ccwatch serve${_c_reset} ${_c_dim}on${_c_reset} http://127.0.0.1:$port"
+  say "${_c_dim}loopback only. Ctrl-C to stop.${_c_reset}"
+  [ "$open" -eq 1 ] && command -v open >/dev/null 2>&1 && open "http://127.0.0.1:$port" 2>/dev/null
+
+  CCWATCH_SELF="$root/bin/ccwatch" CCWATCH_WEB="$root/web" CCWATCH_BIND_PORT="$port" \
+  python3 -c '
+import http.server, json, os, socketserver, subprocess, sys, threading, time
+
+SELF = os.environ["CCWATCH_SELF"]
+WEB  = os.environ["CCWATCH_WEB"]
+PORT = int(os.environ["CCWATCH_BIND_PORT"])
+
+# ⚠️ The state is refreshed by ONE background thread and served from memory.
+#
+# The first version ran `ccwatch --json` inside the request handler. Each call
+# takes seconds (it shells out to ps, stats hundreds of files, and runs jq
+# repeatedly), the page polls every 3 seconds, and the requests piled up
+# without a single one completing — eleven concurrent snapshots and an empty
+# dashboard. Chrome showed every request as `pending`, which is how it was
+# found.
+#
+# So: one refresher, N readers. The handler never blocks, and the page gets a
+# `stale` age it can display rather than silently showing old numbers.
+STATE = {"warming": True}
+LOCK = threading.Lock()
+
+def run(args, timeout):
+    try:
+        out = subprocess.run([SELF] + args, capture_output=True, text=True,
+                             timeout=timeout, env={**os.environ, "NO_COLOR": "1"})
+        if out.returncode != 0 and not out.stdout.strip():
+            return {"error": "%s exited %d: %s" % (" ".join(args), out.returncode,
+                                                   out.stderr.strip()[:200])}
+        return json.loads(out.stdout) if out.stdout.strip() else None
+    except Exception as e:
+        # Surfaced to the page. A panel that is empty because a command failed
+        # must not look like a panel that is empty because there is nothing to
+        # show.
+        return {"error": "%s: %s" % (" ".join(args), e)}
+
+# THREE independent refreshers, not one loop.
+#
+# The first version refreshed everything in one pass, so the session table —
+# which is the whole point and takes ~1s — was gated on the deploy check (a
+# network call to gh) and the peer scan (hundreds of files). One pass took 14
+# seconds, and when gh hung the sessions panel went stale with it. Measured
+# with CCWATCH_PROFILE=1; found because Chrome showed every /api/state request
+# as `pending`.
+#
+# Each refresher owns one key and writes it under the lock. A slow one can only
+# make its own panel stale, and the page shows the age of each panel.
+def refresh_loop(key, args, timeout, every, transform=None):
+    def loop():
+        while True:
+            val = run(args, timeout)
+            if transform:
+                val = transform(val)
+            with LOCK:
+                STATE[key] = val
+                STATE[key + "_at"] = time.time()
+                if key == "snapshot":
+                    STATE["warming"] = False
+            time.sleep(every)
+    return loop
+
+def snapshot_ok(snap):
+    if not isinstance(snap, dict) or "sessions" not in snap:
+        return {"sessions": [], "unfinished": [],
+                "error": (snap or {}).get("error", "snapshot failed")}
+    return snap
+
+class H(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, directory=WEB, **kw)
+
+    def do_GET(self):
+        if self.path.startswith("/api/state"):
+            now = time.time()
+            with LOCK:
+                snap = dict(STATE.get("snapshot") or {})
+                payload = dict(snap)
+                payload["warming"] = STATE.get("warming", True)
+                payload["deploys"] = STATE.get("deploys")
+                payload["peers"] = STATE.get("peers")
+                # Every panel carries its OWN age, so one slow collector cannot
+                # make the whole dashboard look stale — or worse, make a stale
+                # panel look current.
+                payload["ages"] = {
+                    k: (now - STATE[k + "_at"]) if STATE.get(k + "_at") else None
+                    for k in ("snapshot", "deploys", "peers")}
+            payload["stale"] = payload["ages"].get("snapshot")
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        return super().do_GET()
+
+    def log_message(self, fmt, *args):
+        pass  # the access log is noise; failures surface in the page
+
+class S(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+for _key, _args, _to, _every, _tf in (
+        ("snapshot", ["--json"], 40, 2, snapshot_ok),
+        ("deploys",  ["deploys", "--json"], 120, 60, None),
+        ("peers",    ["peers", "--days", "2", "--json"], 120, 45, None)):
+    threading.Thread(target=refresh_loop(_key, _args, _to, _every, _tf), daemon=True).start()
+try:
+    with S(("127.0.0.1", PORT), H) as httpd:
+        httpd.serve_forever()
+except KeyboardInterrupt:
+    pass
+except OSError as e:
+    sys.stderr.write("could not bind 127.0.0.1:%d — %s\n" % (PORT, e))
+    sys.exit(1)
+'
+}
+
+# ============================================================== doctor ======
+#
+# This is the load-bearing command for the "nothing fails silently" promise.
+# ccwatch reads an internal file layout, so a Claude Code upgrade could change it
+# under us. The failure mode that must never happen is an EMPTY, CONFIDENT table
+# — so doctor cross-checks our own parse against the supported `claude agents
+# --json` and reports disagreement as a defect in ccwatch, not in your sessions.
+
+cmd_doctor() {
+  local problems=0
+  ok()   { printf '  %s+%s %s\n' "$_c_green" "$_c_reset" "$*"; }
+  bad()  { printf '  %sx%s %s\n' "$_c_red" "$_c_reset" "$*"; problems=$((problems + 1)); }
+  meh()  { printf '  %s~%s %s\n' "$_c_yellow" "$_c_reset" "$*"; }
+
+  say "${_c_bold}ccwatch doctor${_c_reset} ${_c_dim}(ccwatch v$CCWATCH_VERSION)${_c_reset}"
+  say ""
+
+  for t in jq awk ps date stat find; do
+    command -v "$t" >/dev/null 2>&1 && ok "$t found" || bad "$t is missing — ccwatch cannot run"
+  done
+
+  say ""
+  if [ -d "$SESS_DIR" ]; then
+    local nfiles
+    nfiles=$(find "$SESS_DIR" -maxdepth 1 -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
+    ok "registry at $SESS_DIR ($nfiles file(s))"
+  else
+    bad "no registry at $SESS_DIR — is this the right CLAUDE_CONFIG_DIR?"
+  fi
+  [ -d "$PROJ_DIR" ] && ok "transcripts at $PROJ_DIR" \
+    || bad "no transcripts at $PROJ_DIR — resume cannot work"
+
+  # Schema check. Missing keys mean our reader has drifted from the format.
+  say ""
+  local sessions probe
+  sessions=$(collect_sessions)
+  [ "$PARSE_FAILED" -gt 0 ] && meh "$PARSE_FAILED registry file(s) would not parse (a session mid-write does this; persistent means trouble)"
+  # The union of keys across all sessions, not the keys of one: most fields are
+  # optional per session (an SDK session has no `status`), so testing a single
+  # entry reports absences that are not defects.
+  probe=$(printf '%s' "$sessions" | jq -r '
+    if length == 0 then "empty"
+    else ( ["pid","cwd","sessionId","startedAt"] - ([ .[] | keys[] ] | unique) | join(",") )
+    end' 2>/dev/null)
+  if [ "$probe" = "empty" ]; then
+    meh "registry parsed to zero sessions — expected if no Claude Code is running"
+  elif [ -n "$probe" ]; then
+    bad "registry is missing expected field(s): $probe — ccwatch needs updating"
+  else
+    ok "registry schema looks right (pid, cwd, sessionId, startedAt)"
+  fi
+  local unknown
+  unknown=$(printf '%s' "$sessions" | jq -r '
+    [ .[].status // empty ] | map(select(. as $s | ["busy","shell","idle","waiting"] | index($s) | not))
+    | unique | join(",")')
+  [ -n "$unknown" ] \
+    && bad "unrecognised status value(s): $unknown — ccwatch does not know how to classify these" \
+    || ok "all status values are ones ccwatch understands"
+
+  # The cross-check. Two independent readers of the same truth must agree.
+  say ""
+  if command -v claude >/dev/null 2>&1; then
+    local theirs ours
+    theirs=$(claude agents --json 2>/dev/null | jq -r '[.[].sessionId] | sort | join(",")' 2>/dev/null)
+    ours=$(snapshot | jq -r '[.sessions[].sid] | sort | join(",")')
+    if [ -z "$theirs" ] && [ -z "$ours" ]; then
+      meh "both ccwatch and 'claude agents --json' see no live sessions"
+    elif [ "$theirs" = "$ours" ]; then
+      ok "agrees with 'claude agents --json' exactly"
+    else
+      bad "DISAGREES with 'claude agents --json' — ccwatch's view is not trustworthy"
+      printf '      %sonly claude sees:%s %s\n' "$_c_dim" "$_c_reset" \
+        "$(comm -13 <(tr ',' '\n' <<<"$ours" | sort) <(tr ',' '\n' <<<"$theirs" | sort) | tr '\n' ' ')"
+      printf '      %sonly ccwatch sees:%s  %s\n' "$_c_dim" "$_c_reset" \
+        "$(comm -23 <(tr ',' '\n' <<<"$ours" | sort) <(tr ',' '\n' <<<"$theirs" | sort) | tr '\n' ' ')"
+    fi
+  else
+    meh "'claude' not on PATH — skipping the cross-check that would catch a format change"
+  fi
+
+  # Hooks: without them, a prompt that opens and closes between polls is lost.
+  say ""
+  if [ -f "$CLAUDE_HOME/settings.json" ] \
+     && jq -e '[ .hooks // {} | .[]? | .[]? | .hooks[]?.command? // "" ] | map(contains("ccwatch hook")) | any' \
+        "$CLAUDE_HOME/settings.json" >/dev/null 2>&1; then
+    ok "hooks installed"
+    if [ -f "$EVENTS" ]; then
+      ok "event log has $(wc -l <"$EVENTS" | tr -d ' ') entr(ies)"
+    else
+      meh "no events recorded yet — hooks apply to sessions started after install"
+    fi
+  else
+    meh "hooks NOT installed — a prompt that opens and closes between polls will be missed"
+    printf '      %srun: ccwatch install-hooks%s\n' "$_c_cyan" "$_c_reset"
+  fi
+
+  say ""
+  [ "$problems" -eq 0 ] \
+    && say "${_c_green}No problems found.${_c_reset}" \
+    || { say "${_c_red}$problems problem(s) found.${_c_reset}"; return 1; }
+}
+
+# ============================================================== watch =======
+
+cmd_watch() {
+  # Without a TTY there is nothing to repaint, so print once and exit. That
+  # makes `ccwatch` safe in a pipe, a cron job or a status bar.
+  if [ ! -t 1 ]; then
+    render "$(snapshot)"
+    return 0
+  fi
+  local hide_cursor=$'\033[?25l' show_cursor=$'\033[?25h'
+  # shellcheck disable=SC2064
+  trap "printf '%s' '$show_cursor'; cleanup; exit 0" INT TERM
+  printf '%s' "$hide_cursor"
+  while :; do
+    local snap out
+    snap=$(snapshot)
+    out=$(render "$snap")
+    # Painted in one write after the frame is fully built, so the table never
+    # flickers half-drawn.
+    printf '\033[H\033[2J%s\n%s\n' "$out" \
+      "${_c_dim}$(date '+%H:%M:%S') · every ${CCWATCH_REFRESH}s · q/Ctrl-C to quit${_c_reset}"
+    # read -t doubles as the sleep and as the keypress check, so quitting is
+    # instant rather than up to one refresh away.
+    local key=""
+    if read -r -t "$CCWATCH_REFRESH" -n 1 key 2>/dev/null; then
+      case "$key" in
+        q|Q) break;;
+      esac
+    fi
+  done
+  printf '%s' "$show_cursor"
+}
+
+# ============================================================== usage =======
+
+usage() {
+  cat <<'EOF'
+ccwatch — every Claude Code session on this machine, and which one is stuck
+
+USAGE
+  ccwatch                    live table, refreshed until you quit (q / Ctrl-C)
+  ccwatch once               draw the table once and exit
+  ccwatch --json             the same data as JSON, for scripting
+  ccwatch resume [-n N]      what to reopen after a crash or reboot
+        --cd               print a `cd <dir> && claude --resume` you can paste
+        --all              ignore the recency window
+  ccwatch log [N]            recent hook events (needs install-hooks)
+  ccwatch install-hooks      record "needs your input" events, so a prompt that
+                           opens and closes between polls is never lost
+  ccwatch doctor             check that ccwatch's own view is trustworthy
+  ccwatch -h | --version
+
+STATUS COLUMN
+  * waiting        blocked on you. LAST says on what, and for how long.
+  ! HUNG?          says busy, but its transcript has stopped growing.
+  ! HUNG!!         the same, past 3x the threshold.
+  ! SDK STALE?     headless session, publishes no status, gone quiet.
+  ! NO TRANSCRIPT  claims to be working with nothing to corroborate it.
+  + busy / sdk     working, and the transcript proves it.
+  ~ sdk-ts         an embedded-SDK session. Publishes no status and writes no
+                   transcript, so only CPU can speak for it — deliberately
+                   never escalated to a hang, because a session waiting on its
+                   host program is quiet by design.
+  ~ shell          dropped to a shell.
+  - idle           waiting for a prompt, nothing pending.
+
+  A `busy` row is never trusted on its own: the LAST column always shows the
+  measurement behind the verdict, because one long-running Bash call is
+  legitimately silent and only you can tell those apart.
+
+PIPELINE SUB-ROWS
+  Under a session that ran a spec-run phase: which feature, which phase, on
+  what model, and what the run has cost. Attached by session id, so it names
+  the run this session actually drove rather than every run in the directory.
+
+    plan/CRASHED     the phase is still marked `running` but its runner is
+                     gone. Lost work, and nothing else reports it until the
+                     next spec-run invocation reconciles the state file.
+    plan/needs_input the phase stopped to ask you something.
+
+  A session's own status and its run's status are kept separate on purpose: a
+  session can be honestly idle while the run it drove has crashed.
+
+ENVIRONMENT
+  CCWATCH_BUSY_STALE   seconds of transcript silence before `busy` is
+                     suspect (default 600)
+  CCWATCH_SDK_STALE    the same for headless sessions (default 900)
+  CCWATCH_REFRESH      seconds between repaints (default 2)
+  CCWATCH_RESUME_DAYS  how far back `ccwatch resume` looks (default 14)
+  CCWATCH_UNFINISHED_HOURS
+                     how recent an unfinished run must be to appear in the
+                     live table (default 24) — older ones are counted, and
+                     listed by `ccwatch resume`
+  CCWATCH_HOME         where the event log lives (default ~/.claude/ccwatch)
+  CLAUDE_CONFIG_DIR  which Claude Code config directory to read
+  NO_COLOR           set to disable colour
+EOF
+}
+
+# ============================================================== dispatch ====
+
+need jq "install with: brew install jq"
+need awk
+
+case "${1:-}" in
+  ''|watch)        cmd_watch;;
+  once)            render "$(snapshot)";;
+  --json)          snapshot;;
+  resume)          shift; cmd_resume "$@";;
+  hook)            shift; cmd_hook "$@";;
+  log)             shift; cmd_log "${1:-30}";;
+  install-hooks)   cmd_install_hooks;;
+  statusline)      shift; cmd_statusline "$@";;
+  install-statusline) cmd_install_statusline;;
+  send)            shift; cmd_send "$@";;
+  deploys)         shift; cmd_deploys "$@";;
+  subscribe)       shift; cmd_subscribe "$@";;
+  unsubscribe)     shift; cmd_unsubscribe "$@";;
+  subs)            cmd_subs;;
+  peers)           shift; cmd_peers "$@";;
+  serve)           shift; cmd_serve "$@";;
+  daemon)          cmd_daemon;;
+  tick)            daemon_tick;;
+  doctor)          cmd_doctor;;
+  -h|--help|help)  usage;;
+  --version)       say "ccwatch $CCWATCH_VERSION";;
+  *) die "unrecognised command '$1'" "try: ccwatch --help";;
+esac
