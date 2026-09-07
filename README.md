@@ -33,6 +33,7 @@ ccwatch send <who> <msg> # say something to a session that is already running
 ccwatch deploys          # CI/deploy runs you are waiting on
 ccwatch subscribe <wf>   # (run by an agent) tell me when that deploy lands
 ccwatch peers            # which sessions have been talking to each other
+ccwatch kill <who>       # stop a session — refuses when it would cost you work
 ccwatch daemon           # watch deploys and notify subscribers while you are away
 ccwatch log              # recent hook events (needs install-hooks)
 ccwatch doctor           # check that ccwatch's own view is trustworthy
@@ -197,6 +198,57 @@ in the tool could have explained a session vanishing at that moment.
 Shown only past `CCWATCH_SWAP_WARN` (80%). Below it the line is absent, not
 green: a monitor that reports normal conditions on every refresh trains you to
 skip the line that eventually is not normal.
+
+## Killing a session
+
+```bash
+ccwatch kill agents-aa            # asks first, and says what is at stake
+ccwatch serve --allow-kill        # enables the button in the browser
+```
+
+The one destructive thing this tool does, so it is the most careful thing in
+it.
+
+**What survives:** the transcript. It is append-only and flushed as the session
+runs, so the conversation is kept and `claude --resume <sid>` reopens it — the
+same guarantee `claude stop` gives a background session. That is printed every
+time, so you do not have to remember it. A background session is stopped with
+`claude stop`; anything else gets **SIGTERM, never SIGKILL**, so it can flush.
+Escalation is not offered: a session that ignores TERM is doing something, and
+the right response is to look at it.
+
+**What does not survive:** whatever was in flight. So two cases are *refused*
+rather than warned about — a warning in a list of nineteen rows is a warning
+nobody reads:
+
+| Refused | Because |
+|---|---|
+| the session is **mid-turn** | a tool call may be part-applied, leaving the working tree half-edited |
+| it is running a **spec-run phase** | that is a paid model call in flight; killing it wastes what has been spent and leaves the pipeline recording a crash |
+
+`--force` overrides either. Every kill is recorded to the event log with the
+memory it was holding, because a monitoring tool that can destroy without
+leaving a trace is one you cannot audit.
+
+**In the browser it is off by default.** Sending a message to the wrong agent
+is embarrassing; killing the wrong one costs work. So `/api/kill` needs
+`--allow-kill` *in addition to* the token every other write requires, and the
+page is told whether it may draw the button at all. The confirmation is two
+steps and names the session, the memory it frees, and the resume command.
+
+### Does killing agents actually help?
+
+Only sometimes, so the numbers are shown rather than implied:
+
+```
+host under memory pressure — swap 97% used (26749/27648MB), 59MB RAM free.
+Sessions account for 2055MB of it (1289MB of that idle).
+```
+
+On the machine this was built on, nineteen sessions came to ~2GB against 26GB
+of swap in use — enough to be worth reclaiming, nowhere near enough to explain
+the pressure. A tool that offered a kill button without that second sentence
+would be inviting you to destroy work for a rounding error.
 
 ## What a blocked session is asking
 
@@ -545,6 +597,7 @@ All environment variables, all optional.
 | `CCWATCH_REPO_TTL` | `21600` | how long a directory's resolved repo is cached |
 | `CCWATCH_TAIL_BYTES` | `400000` | how much of a transcript `convo` reads |
 | `CCWATCH_SWAP_WARN` | `80` | swap percentage at which the host is called out |
+| `CCWATCH_KILL_GRACE` | `8` | seconds to wait for a killed session to exit |
 | `CCWATCH_TAIL_TEXT` | `1200` | how much of one turn's text `convo` keeps |
 | `CCWATCH_ASK_BYTES` | `600000` | cap on the seek back to the last question |
 | `CCWATCH_DEPLOY_LIMIT` | `20` | runs requested per repo from `gh` |
@@ -567,7 +620,7 @@ distinct word, so `ccwatch once | grep HUNG` works, and so does a screen reader.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 165 assertions
+./tests/run.sh          # shellcheck + 188 assertions
 ```
 
 CI runs the same script on macOS, and macOS only: `stat -f` and `ps -o lstart=`
@@ -617,6 +670,9 @@ implementation broken in the specific way it describes:
 | derive the project from the directory name instead of the git remote | 3 |
 | ship a tool result's contents instead of only its size | 1 |
 | report host pressure on every refresh instead of only when it matters | 1 |
+| allow killing a mid-turn or mid-phase session without refusing | 4 |
+| enable the kill endpoint without an explicit flag | 2 |
+| read only the last transcript line when rebuilding the resume list | 1 |
 | resolve the script's own location without following the install symlink | 2 |
 
 That last table is not decoration. Two of those mutations are bugs that were

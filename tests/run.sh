@@ -45,6 +45,7 @@ cleanup_suite() {
   [ -n "${SPORT2:-}" ] && pkill -f "ccwatch serve --port $SPORT2" 2>/dev/null
   [ -n "${SPORT3:-}" ] && pkill -f "ccwatch serve --port $SPORT3" 2>/dev/null
   [ -n "${SPORT4:-}" ] && pkill -f "ccwatch serve --port $SPORT4" 2>/dev/null
+  [ -n "${SPORT4:-}" ] && pkill -f "ccwatch serve --port $SPORT4" 2>/dev/null
   rm -rf "$WORK"
   return 0
 }
@@ -839,15 +840,68 @@ if command -v curl >/dev/null 2>&1; then
   assert_contains "$_through" "failed" "and an unknown target is reported as a failure"
 
   # Size and shape limits, so the endpoint cannot be used to wedge the server.
+  # A well-formed body with a field missing gets a specific reason, not a
+  # generic one — the caller can act on "message is required" and cannot act on
+  # "bad request".
   _empty=$(curl -s --max-time 10 -X POST "http://127.0.0.1:$SPORT/api/send" \
            -H "X-CCWatch-Token: $_tok" -H 'Content-Type: application/json' -d '{"target":"x"}')
-  assert_contains "$_empty" "bad request" "a malformed body is rejected"
+  assert_contains "$_empty" "both required" "a body missing the message says which field is missing"
+  # Genuinely unparseable input is a different failure and says so.
+  _bad=$(curl -s --max-time 10 -X POST "http://127.0.0.1:$SPORT/api/send" \
+         -H "X-CCWatch-Token: $_tok" -H 'Content-Type: application/json' -d 'not json at all')
+  assert_contains "$_bad" "bad request" "an unparseable body is rejected as a bad request"
   _long=$(python3 -c "import json;print(json.dumps({'target':'x','message':'z'*5000}))" \
           | curl -s --max-time 10 -X POST "http://127.0.0.1:$SPORT/api/send" \
             -H "X-CCWatch-Token: $_tok" -H 'Content-Type: application/json' --data-binary @-)
   assert_contains "$_long" "too long" "an oversized message is rejected"
 
+  # Killing from a browser is OFF unless asked for. Sending to the wrong agent
+  # is embarrassing; killing the wrong one costs work in flight, so it needs an
+  # explicit flag on top of the token every other write already requires.
+  _kd=$(curl -s --max-time 15 -X POST "http://127.0.0.1:$SPORT/api/kill" \
+        -H "X-CCWatch-Token: $_tok" -H "Origin: http://127.0.0.1:$SPORT" \
+        -H 'Content-Type: application/json' -d '{"target":"anything"}')
+  assert_contains "$_kd" "--allow-kill" \
+    "the kill endpoint is refused by default, and names the flag that enables it"
+  assert_eq "$(curl -s --max-time 5 "http://127.0.0.1:$SPORT/api/state" | jq -r '.can_kill')" "false" \
+    "and the page is told it cannot kill, so no button is drawn"
+
   pkill -f "ccwatch serve --port $SPORT" 2>/dev/null || true
+
+  # --- killing, when explicitly enabled ------------------------------------
+  SPORT4=$(free_port) || SPORT4=""
+  if [ -n "$SPORT4" ]; then
+    mksess 9501 aaaaaaaa-9999-0000-0000-000000000001 killable "$WORK/other" busy cli
+    mktrans aaaaaaaa-9999-0000-0000-000000000001 10
+    mkps 9501 "0:10.00" > "$WORK/ps-k4"
+    ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-k4" CCWATCH_HOME="$DH" \
+      CCWATCH_DEPLOY_TTL=999999 "$CCWATCH" serve --port "$SPORT4" --allow-kill \
+      >"$WORK/serve-k.log" 2>&1 & )
+    _k4=0
+    while [ "$_k4" -lt 40 ]; do
+      [ "$(curl -s --max-time 3 "http://127.0.0.1:$SPORT4/api/state" 2>/dev/null | jq -r '.warming' 2>/dev/null)" = "false" ] && break
+      sleep 1; _k4=$((_k4 + 1))
+    done
+    assert_eq "$(curl -s --max-time 5 "http://127.0.0.1:$SPORT4/api/state" | jq -r '.can_kill')" "true" \
+      "with --allow-kill the page is told it may kill"
+    _tok4=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT4/map" \
+            | grep -oE 'const SEND_TOKEN = "[0-9a-f]+"' | sed 's/.*"\(.*\)"/\1/')
+    # The guards still apply over HTTP — enabling the endpoint does not bypass
+    # them, which is the whole point of putting them in the command.
+    _kb4=$(curl -s --max-time 25 -X POST "http://127.0.0.1:$SPORT4/api/kill" \
+           -H "X-CCWatch-Token: $_tok4" -H "Origin: http://127.0.0.1:$SPORT4" \
+           -H 'Content-Type: application/json' \
+           -d '{"target":"aaaaaaaa-9999-0000-0000-000000000001"}')
+    assert_contains "$_kb4" "mid-turn" "a mid-turn session is refused over HTTP too"
+    assert_contains "$_kb4" "refused" "and the refusal is reported as such, not as a failure"
+    # The refusal text is passed through verbatim: it explains what would have
+    # been lost, and reducing it to "failed" throws that away.
+    assert_contains "$_kb4" "half-edited" "with the reason preserved verbatim"
+    pkill -f "ccwatch serve --port $SPORT4" 2>/dev/null || true
+    rm -f "$FH/sessions/9501.json"
+  else
+    t_skip "kill over HTTP" "no free port"
+  fi
 
   # --- and the read-only mode, for anyone who wants no endpoint at all -----
   SPORT2=$(free_port) || SPORT2=""
@@ -1218,6 +1272,110 @@ _lo=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-u" CCWATCH_HOME="$SLH" \
       CCWATCH_SWAP_WARN=101 NO_COLOR=1 "$CCWATCH" once 2>&1)
 assert_not_contains "$_lo" "host under memory pressure" \
   "and stays silent when the host is healthy"
+
+# =================================================================== kill ====
+printf '\nkill\n'
+
+# The one destructive thing the tool does, so the assertions are mostly about
+# what it REFUSES. A real process is never killed here: the fixtures use pids
+# that do not exist, so the guards are exercised without collateral.
+KH="$WORK/kill-home"; mkdir -p "$KH"
+kl() { CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-k" CCWATCH_HOME="$KH" \
+       NO_COLOR=1 "$CCWATCH" kill "$@" 2>&1; }
+
+# A session mid-turn may be part-way through a tool call, so the working tree
+# could be left half-edited. Refused rather than warned about — a warning in a
+# list of nineteen rows is a warning nobody reads.
+mksess 9401 kkkkkkkk-0000-0000-0000-000000000001 busyone "$WORK/other" busy cli
+mktrans kkkkkkkk-0000-0000-0000-000000000001 10
+mkps 9401 "0:10.00" > "$WORK/ps-k"
+_kb=$(kl -y busyone; echo "rc=$?")
+assert_contains "$_kb" "mid-turn" "a session that is mid-turn is refused"
+assert_contains "$_kb" "rc=1" "and refusing is a failure, not a silent no-op"
+assert_contains "$_kb" "--force" "with the escape hatch named"
+
+# A live spec-run phase is a paid model call in flight. Killing it wastes what
+# has been spent and leaves the pipeline recording a crash.
+KSPEC="$WORK/other/specs/001-k/.pipeline"; mkdir -p "$KSPEC"
+cat > "$KSPEC/state.json" <<EOF
+{"version":1,"feature_dir":"$WORK/other/specs/001-k","branch":"main",
+ "phases":{"implement":{"status":"running","session_id":"kkkkkkkk-0000-0000-0000-000000000002",
+                        "model":"sonnet","cost_usd":9.5,"runner_pid":$$,
+                        "started_at":"$(date -u '+%Y-%m-%dT%H:%M:%SZ')"}}}
+EOF
+mksess 9402 kkkkkkkk-0000-0000-0000-000000000002 phaserunner "$WORK/other" idle sdk-cli
+mktrans kkkkkkkk-0000-0000-0000-000000000002 10
+mkps 9402 "0:10.00" >> "$WORK/ps-k"
+_kp=$(kl -y phaserunner; echo "rc=$?")
+assert_contains "$_kp" "spec-run phase" "a session running a spec-run phase is refused"
+assert_contains "$_kp" "paid model call" "and says what killing it would waste"
+assert_contains "$_kp" "rc=1" "and is a failure"
+
+# Declining at the prompt must change nothing.
+mksess 9403 kkkkkkkk-0000-0000-0000-000000000003 idleone "$WORK/other" idle cli
+mktrans kkkkkkkk-0000-0000-0000-000000000003 10
+mkps 9403 "0:10.00" >> "$WORK/ps-k"
+_kn=$(printf 'n\n' | CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-k" CCWATCH_HOME="$KH" \
+      NO_COLOR=1 "$CCWATCH" kill idleone 2>&1)
+assert_contains "$_kn" "Nothing killed" "declining the prompt kills nothing"
+
+# What survives is stated every time, because that is what makes this
+# recoverable rather than a deletion — and the operator should not have to
+# remember it.
+_kr=$(kl -y idleone)
+assert_contains "$_kr" "conversation is kept" "the kill states that the conversation survives"
+assert_contains "$_kr" "claude --resume kkkkkkkk-0000-0000-0000-000000000003" \
+  "and prints the command that reopens it"
+# A pid that does not exist is already gone, so this reports the outcome rather
+# than hanging on a process that will never disappear.
+assert_contains "$_kr" "killed" "a session whose process is already gone is reported as killed"
+assert_eq "$(jq -r 'select(.event=="ccwatch.kill") | .target' "$KH/events.jsonl" 2>/dev/null | tail -1)" \
+  "idleone" "every kill is recorded, so 'who stopped that agent' has an answer"
+assert_contains "$(jq -c 'select(.event=="ccwatch.kill")' "$KH/events.jsonl" | tail -1)" '"rss_mb"' \
+  "including how much memory it was holding"
+
+# A waiting session is killable but says what is lost with it.
+mksess 9404 kkkkkkkk-0000-0000-0000-000000000004 askingone "$WORK/other" waiting cli "your approval"
+mktrans kkkkkkkk-0000-0000-0000-000000000004 10
+mkps 9404 "0:10.00" >> "$WORK/ps-k"
+assert_contains "$(kl -y askingone)" "waiting on you" \
+  "killing a session that is waiting on you warns that its question is lost"
+rm -f "$FH/sessions/9401.json" "$FH/sessions/9402.json" "$FH/sessions/9403.json" "$FH/sessions/9404.json"
+
+# --- memory, which is the reason anyone reaches for kill -------------------
+mksess 9405 kkkkkkkk-0000-0000-0000-000000000005 heavy "$WORK/other" idle cli
+mktrans kkkkkkkk-0000-0000-0000-000000000005 10
+# ps reports RSS in KB as its last column.
+printf '%s %s %s %s\n' 9405 "$(date -r "$(( $(date '+%s') - 3600 ))" '+%a %b %e %T %Y')" "0:10.00" 204800 \
+  > "$WORK/ps-mem"
+_mem=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-mem" CCWATCH_HOME="$KH" \
+       NO_COLOR=1 "$CCWATCH" --json 2>/dev/null)
+assert_eq "$(printf '%s' "$_mem" | jq -r '.sessions[] | select(.name=="heavy") | .rss_mb')" "200" \
+  "each session reports how much memory it is holding"
+assert_eq "$(printf '%s' "$_mem" | jq -r '.host.idle_mb')" "200" \
+  "and the host reports what the idle ones add up to, which is what killing them would release"
+rm -f "$FH/sessions/9405.json"
+
+# --- the regression that broke recovery ------------------------------------
+#
+# A transcript can end with metadata records carrying no cwd — `last-prompt`,
+# `mode`, `pr-link` are written after the conversation. `resume` read only the
+# LAST line, found a null cwd, and skipped the session: a session killed moments
+# earlier was absent from its own recovery list. Found by killing one and
+# looking for it.
+MP="$FH/projects/-meta-repo"; mkdir -p "$MP"
+MSID=ffffffff-0000-0000-0000-0000000000ff
+{
+  printf '{"type":"user","sessionId":"%s","cwd":"%s","gitBranch":"main","isSidechain":false,' "$MSID" "$WORK/other"
+  printf '"message":{"role":"user","content":"real content"}}\n'
+  printf '{"type":"last-prompt","sessionId":"%s","cwd":null}\n' "$MSID"
+  printf '{"type":"mode","sessionId":"%s"}\n' "$MSID"
+} > "$MP/$MSID.jsonl"
+: > "$WORK/ps-empty2"
+_rm=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-empty2" CCWATCH_HOME="$KH" \
+      NO_COLOR=1 "$CCWATCH" resume -n 30 2>&1)
+assert_contains "$_rm" "claude --resume $MSID" \
+  "a transcript ending in metadata records is still offered for resume"
 
 
 printf '\n%s passed, %s failed' "$pass" "$fail"

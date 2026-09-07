@@ -131,6 +131,24 @@
   .turn.system .what { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
                        overflow:hidden; }
   #ifoot { display:flex; gap:.5rem; align-items:center; }
+  /* Kill: styled as the destructive action it is, and two-step. A single click
+     that ends a four-day-old session mid-task is not an affordance, it is a
+     trap. */
+  #killbar { display:none; flex-direction:column; gap:.35rem; font-size:11px;
+             border-top:1px solid var(--line); padding-top:.45rem; }
+  #killbar.on { display:flex; }
+  #killbar .danger { background:none; border:1px solid var(--bad); color:var(--bad);
+                     font:inherit; font-size:11px; padding:.15rem .5rem;
+                     border-radius:3px; cursor:pointer; align-self:flex-start; }
+  #killbar .danger:hover { background:color-mix(in srgb, var(--bad) 18%, transparent); }
+  #killconfirm { display:none; flex-direction:column; gap:.3rem;
+                 border:1px solid var(--bad); border-radius:4px; padding:.45rem; }
+  #killconfirm.on { display:flex; }
+  #killconfirm .row { display:flex; gap:.4rem; align-items:center; }
+  #killconfirm b { color:var(--bad); }
+  #killout { font-size:11px; }
+  #killout.killed { color:var(--ok); } #killout.refused { color:var(--warn); }
+  #killout.failed { color:var(--bad); }
   /* The pending question. Given the most prominent place in the inspector
      because it is the reason the session stopped, and the reason you opened
      this panel. */
@@ -181,6 +199,7 @@
   </div>
   <div id="ask"></div>
   <div id="convo"></div>
+  <div id="killbar"></div>
   <div id="ifoot">
     <input id="replyText" placeholder="message…" autocomplete="off">
     <button id="replySend">send</button>
@@ -196,6 +215,8 @@ const dur = s => { if (s == null) return "-"; s = Math.max(0, s);
        : s < 86400 ? Math.floor(s/3600)+"h" : Math.floor(s/86400)+"d"; };
 const SEND_TOKEN = "__CCWATCH_SEND_TOKEN__";
 const CAN_SEND = SEND_TOKEN && !SEND_TOKEN.startsWith("__");
+// Set from the server, which only enables it when started with --allow-kill.
+let CAN_KILL = false;
 
 // One mapping from status to appearance, so the figure, the label colour and
 // the territory border can never disagree about how bad something is.
@@ -273,6 +294,7 @@ function agentCard(r) {
   bits.push(`age ${dur(r.age)}`);
   if (r.context && r.context.used_percentage != null)
     bits.push(`ctx ${Math.floor(r.context.used_percentage)}%`);
+  if (r.rss_mb != null) bits.push(`${r.rss_mb}MB`);
   return `<div class="agent sev${k.sev} ${k.cls} clickable"
     data-sid="${esc(r.sid)}" data-name="${esc(r.name)}" title="${esc(bits.join(" · "))}">
     ${figure(r)}<div class="alabel">${esc(shortName(r))}</div></div>`;
@@ -376,9 +398,14 @@ function hostwarn(h) {
   if (!el) return;
   if (!h || !h.pressure) { el.className = ""; el.textContent = ""; return; }
   el.className = "on";
+  // The sessions' own share is stated, so "would killing agents help" is a
+  // number rather than a hunch. Usually it is a small fraction of the total.
+  const share = h.sessions_mb != null
+    ? ` Sessions account for ${h.sessions_mb}MB of it (${h.idle_mb || 0}MB of that idle).` : "";
   el.innerHTML = `<b>host under memory pressure</b> — swap ${h.swap_used_pct}% used `
     + `(${h.swap_used_mb}/${h.swap_total_mb}MB), ${h.ram_free_mb}MB RAM free. `
-    + `The OS may kill sessions, and a killed session looks exactly like a clean exit.`;
+    + `The OS may kill sessions, and a killed session looks exactly like a clean exit.`
+    + share;
 }
 
 function gauges(u) {
@@ -468,12 +495,61 @@ function renderAsk(row) {
     + ` dialog is resolved — it does not answer it.</div>`;
 }
 
+// Two steps, and the second one names what is at stake. The figures come from
+// the same snapshot the map draws, so what you are told you will free is what
+// the process is actually holding.
+function renderKill(row) {
+  const bar = $("killbar");
+  if (!bar) return;
+  if (!CAN_KILL || !row) { bar.className = ""; bar.innerHTML = ""; return; }
+  bar.className = "on";
+  const mem = row.rss_mb != null ? `${row.rss_mb}MB` : "an unknown amount";
+  const phase = row.pipeline && row.pipeline.status === "running"
+    ? ` It is running spec-run phase <b>${esc(row.pipeline.phase)}</b> — killing it aborts a paid model call.`
+    : "";
+  const busy = row.token === "busy"
+    ? " It is mid-turn, so a tool call may be left half-applied." : "";
+  bar.innerHTML =
+      `<button class="danger" id="killstart">kill this session (frees ${mem})</button>`
+    + `<div id="killconfirm">`
+    + `<div>Killing <b>${esc(row.name)}</b> frees <b>${mem}</b>.`
+    + ` The conversation is kept — reopen it with <code>claude --resume ${esc(row.sid)}</code>.`
+    + `${phase}${busy}</div>`
+    + `<div class="row"><button class="danger" id="killgo">yes, kill it</button>`
+    + `<button class="ghost" id="killno">cancel</button>`
+    + `<span id="killout"></span></div></div>`;
+  $("killstart").addEventListener("click", () => $("killconfirm").classList.add("on"));
+  $("killno").addEventListener("click", () => $("killconfirm").classList.remove("on"));
+  $("killgo").addEventListener("click", () => doKill(row));
+}
+
+async function doKill(row) {
+  const out = $("killout");
+  out.className = ""; out.textContent = "killing…";
+  try {
+    const res = await fetch("/api/kill", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-CCWatch-Token": SEND_TOKEN},
+      body: JSON.stringify({target: row.sid}),
+    });
+    const j = await res.json();
+    out.className = j.state || "failed";
+    // A refusal is shown verbatim: it explains what would have been lost, and
+    // reducing it to "failed" would throw away the only useful part.
+    out.textContent = j.state === "killed"
+      ? `killed — ${row.rss_mb != null ? row.rss_mb + "MB" : "memory"} released`
+      : (j.detail || j.error || "failed");
+    if (j.state === "killed") setTimeout(closeReply, 1200);
+  } catch (e) { out.className = "failed"; out.textContent = e.message; }
+}
+
 function openReply(sid, name, row) {
   target = {sid, name};
   $("iname").textContent = name;
   $("imeta").textContent = row
     ? [row.repo, row.branch, row.token].filter(Boolean).join(" · ") : "";
   renderAsk(row);
+  renderKill(row);
   $("replyOut").textContent = ""; $("replyOut").className = "";
   $("convo").innerHTML = '<div class="dim">reading the transcript…</div>';
   $("ifoot").style.display = CAN_SEND ? "flex" : "none";
@@ -532,6 +608,7 @@ async function tick() {
   try {
     const s = await (await fetch("/api/state", {cache:"no-store"})).json();
     if (s.warming) { $("foot").textContent = "taking the first snapshot…"; return; }
+    CAN_KILL = !!s.can_kill;
 
     // Grouped by project. Territories that need you sort first, so the map does
     // not reorder itself into a different arrangement each time you glance at

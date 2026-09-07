@@ -144,7 +144,7 @@ ps_out() {
   if [ -n "${CCWATCH_FAKE_PS:-}" ]; then
     cat "$CCWATCH_FAKE_PS" 2>/dev/null
   else
-    ps -o pid=,lstart=,time= -p "$1" 2>/dev/null
+    ps -o pid=,lstart=,time=,rss= -p "$1" 2>/dev/null
   fi
 }
 
@@ -276,9 +276,15 @@ for line in sys.stdin:
     if len(f) < 7:
         continue
     try:
-        out.append({"pid": int(f[0]),
-                    "start": epoch(f[1], f[2], f[3], f[4], f[5]),
-                    "cpu": cpu(f[6])})
+        rec = {"pid": int(f[0]),
+               "start": epoch(f[1], f[2], f[3], f[4], f[5]),
+               "cpu": cpu(f[6])}
+        # Resident size, when ps was asked for it. Absent in the test fixtures,
+        # which supply only the columns they care about, so it is optional
+        # rather than required — a missing figure must not drop the row.
+        if len(f) >= 8:
+            rec["rss_mb"] = round(int(f[7]) / 1024)
+        out.append(rec)
     except (ValueError, KeyError, OverflowError):
         # A row we cannot parse is skipped, not guessed at: a wrong start time
         # would make the pid-reuse guard reject a live session.
@@ -750,6 +756,7 @@ snapshot() {
                        crashed: $crashed } } ]
         | from_entries ) as $P
     | ( $live | map({ key: (.pid|tostring), value: .cpu }) | from_entries ) as $C
+    | ( $live | map({ key: (.pid|tostring), value: .rss_mb }) | from_entries ) as $M
     | $prev as $PC
     | ( $ctx | map({ key: .sid, value: . }) | from_entries ) as $X
     | [ .[]
@@ -853,6 +860,7 @@ snapshot() {
             quiet: $quiet,
             cpu: $cpu,
             cpu_delta: $cpud,
+            rss_mb: ($M[$s.pid|tostring]),
             # Only from a statusline that is still reporting. A session whose
             # last report is older than the threshold has its context reading
             # dropped rather than shown — a context gauge frozen at the value it
@@ -892,7 +900,12 @@ snapshot() {
     | { sessions: .,
         usage: $usage,
         host: (if $host == null then null
-               else $host + { pressure: (($host.swap_used_pct // 0) >= $swap_warn) } end),
+               else $host + { pressure: (($host.swap_used_pct // 0) >= $swap_warn),
+                              # What the sessions themselves account for, so
+                              # "would killing agents help" has a number rather
+                              # than an intuition behind it.
+                              sessions_mb: ([ .[] | .rss_mb // 0 ] | add),
+                              idle_mb: ([ .[] | select(.sev <= 1) | .rss_mb // 0 ] | add) } end),
         # Runs that stopped and whose session is already gone. These are the
         # ones nothing else reports: no live session carries them, so without
         # this block a crashed phase from yesterday is invisible until the next
@@ -1221,10 +1234,16 @@ cmd_resume() {
     sid=$(basename "$path" .jsonl)
     grep -qxF "$sid" "$TMP/live.txt" && continue
 
-    # The last line of the transcript is the freshest record of where that
-    # session actually was — its cwd may differ from the directory name, which
-    # is a lossy escaping of the original path.
-    last=$(tail -1 "$path" 2>/dev/null)
+    # ⚠️ The last line with a CWD, not simply the last line.
+    #
+    # A transcript can end with metadata records that carry no cwd —
+    # `last-prompt`, `mode`, `pr-link` and others are written after the
+    # conversation. The first version read `tail -1`, found a null cwd, and
+    # skipped the session entirely: a session killed moments earlier was
+    # missing from its own recovery list, which is precisely the case this
+    # command exists for. Found by killing a session and looking for it.
+    last=$(tail -40 "$path" 2>/dev/null \
+           | jq -R -c 'fromjson? // empty | select(.cwd != null)' 2>/dev/null | tail -1)
     cwd=$(printf '%s' "$last" | jq -r '.cwd // empty' 2>/dev/null)
     branch=$(printf '%s' "$last" | jq -r '.gitBranch // empty' 2>/dev/null)
     [ -n "$cwd" ] || continue
@@ -1516,6 +1535,134 @@ cmd_convo() {
 }
 
 
+
+
+# ================================================================== kill ====
+#
+# The one destructive thing this tool does, so it is the most careful.
+#
+# What survives a kill: the transcript. It is append-only and flushed as the
+# session runs, so the conversation is kept and `claude --resume <sid>` reopens
+# it — the same guarantee `claude stop` gives for a background session. That is
+# what makes this recoverable rather than a deletion, and it is printed every
+# time so the operator does not have to remember it.
+#
+# What does NOT survive: whatever was in flight. A tool call mid-execution, an
+# unwritten file, a spec-run phase halfway through a paid model call. So the
+# cases where that matters are refused by default rather than warned about,
+# because a warning in a list of nineteen rows is a warning nobody reads.
+CCWATCH_KILL_GRACE="${CCWATCH_KILL_GRACE:-8}"
+
+cmd_kill() {
+  local force=0 yes=0 target=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force) force=1; shift;;
+      -y|--yes) yes=1; shift;;
+      -*) die "kill: unrecognised option '$1'" \
+              "usage: ccwatch kill [--force] [-y] <name|session-id|pid>";;
+      *) target="$1"; shift;;
+    esac
+  done
+  [ -n "$target" ] || die "kill: no session given" \
+    "usage: ccwatch kill [--force] [-y] <name|session-id|pid>"
+
+  local t
+  t=$(resolve_target "$target") || exit 1
+
+  local name sid pid kindv rss tok phase pstatus prunner
+  name=$(printf '%s' "$t" | jq -r '.name')
+  sid=$(printf '%s' "$t" | jq -r '.sid')
+  pid=$(printf '%s' "$t" | jq -r '.pid')
+  rss=$(printf '%s' "$t" | jq -r '.rss_mb // "?"')
+  tok=$(printf '%s' "$t" | jq -r '.token')
+  pstatus=$(printf '%s' "$t" | jq -r '.pipeline.status // ""')
+  phase=$(printf '%s' "$t" | jq -r '.pipeline.phase // ""')
+  prunner=$(printf '%s' "$t" | jq -r '.pipeline.runner_pid // ""')
+  kindv=$(jq -r '.kind // "interactive"' "$SESS_DIR/$pid.json" 2>/dev/null) || kindv="interactive"
+
+  # --- the refusals ---------------------------------------------------------
+  # A spec-run phase that is genuinely running is a paid model call in flight.
+  # Killing it wastes what has been spent and leaves the pipeline recording a
+  # crash. Refused, not warned.
+  if [ "$pstatus" = "running" ] && [ -n "$prunner" ] && [ "$force" -eq 0 ]; then
+    if kill -0 "$prunner" 2>/dev/null; then
+      err "$name is running spec-run phase '$phase' right now"
+      say "  ${_c_dim}Killing it aborts a paid model call mid-flight and leaves the"
+      say "  pipeline recording a crash. Let it finish, or:${_c_reset} ccwatch kill --force $target"
+      exit 1
+    fi
+  fi
+  # Mid-turn means a tool call may be part-applied. The transcript survives
+  # either way, but the working tree might be left half-edited.
+  if [ "$tok" = "busy" ] && [ "$force" -eq 0 ]; then
+    err "$name is mid-turn (busy)"
+    say "  ${_c_dim}A tool call may be part-way through, so the working tree could be"
+    say "  left half-edited. Wait for it to go idle, or:${_c_reset} ccwatch kill --force $target"
+    exit 1
+  fi
+
+  say "${_c_bold}Kill $name${_c_reset} ${_c_dim}($tok, ${rss}MB, pid $pid)${_c_reset}"
+  say "  ${_c_dim}The conversation is kept. Reopen it with:${_c_reset}"
+  say "  ${_c_cyan}claude --resume $sid${_c_reset}"
+  [ "$tok" = "waiting" ] && \
+    say "  ${_c_yellow}!${_c_reset} ${_c_dim}This session is waiting on you — whatever it asked will be lost from the dialog.${_c_reset}"
+  if [ "$yes" -eq 0 ]; then
+    printf 'Kill it? [y/N] '
+    local reply=""
+    read -r reply
+    case "$reply" in y|Y|yes|YES) ;; *) say "Nothing killed."; return 0;; esac
+  fi
+
+  # --- graceful first -------------------------------------------------------
+  # A background session has a supported command for this, which does the
+  # bookkeeping ccwatch would otherwise have to guess at. Use it.
+  local method=""
+  if [ "$kindv" = "bg" ] && command -v claude >/dev/null 2>&1; then
+    method="claude stop"
+    claude stop "${sid:0:8}" >/dev/null 2>&1 || method="TERM"
+  else
+    method="TERM"
+  fi
+  # SIGTERM, never SIGKILL: a terminated session gets to flush. Escalation is
+  # not offered, because a session that ignores TERM is doing something and
+  # the right answer is to look at it rather than to insist.
+  [ "$method" = "TERM" ] && kill -TERM "$pid" 2>/dev/null
+
+  local waited=0
+  while [ "$waited" -lt "$CCWATCH_KILL_GRACE" ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  if kill -0 "$pid" 2>/dev/null; then
+    warn "$name is still running after ${CCWATCH_KILL_GRACE}s (sent $method)"
+    say "  ${_c_dim}It may be finishing a tool call. Look at it before insisting:${_c_reset}"
+    say "  ${_c_cyan}ccwatch convo $sid${_c_reset}"
+    kill_record "$t" "$method" "still-running"
+    exit 1
+  fi
+
+  say "${_c_green}killed${_c_reset} $name ${_c_dim}— ${rss}MB released, conversation kept${_c_reset}"
+  kill_record "$t" "$method" "killed"
+}
+
+# Every kill is recorded. "Who stopped that agent, and why is it not running"
+# needs an answer afterwards, and a monitoring tool that can destroy without
+# leaving a trace is one you cannot audit.
+kill_record() { # kill_record <target-json> <method> <outcome>
+  mkdir -p "$CCWATCH_HOME" 2>/dev/null || return 0
+  jq -cn --arg at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+         --arg sid "$(printf '%s' "$1" | jq -r .sid)" \
+         --arg name "$(printf '%s' "$1" | jq -r .name)" \
+         --arg cwd "$(printf '%s' "$1" | jq -r .cwd)" \
+         --argjson rss "$(printf '%s' "$1" | jq '.rss_mb // 0')" \
+         --arg method "$2" --arg outcome "$3" \
+    '{at:$at, event:"ccwatch.kill", session_id:$sid, target:$name, cwd:$cwd,
+      rss_mb:$rss, method:$method, outcome:$outcome}' >>"$EVENTS" 2>/dev/null || true
+  return 0
+}
 
 # ================================================================= host =====
 #
@@ -2472,14 +2619,15 @@ peers_graph() { # peers_graph <edges.jsonl> <live.json>
 # Binds to loopback only. This exposes which repositories you are working in
 # and fragments of peer messages; that is not something to serve on 0.0.0.0.
 cmd_serve() {
-  local port="${CCWATCH_PORT:-8787}" open=0 readonly=0
+  local port="${CCWATCH_PORT:-8787}" open=0 readonly=0 allowkill=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --port)      port="${2:-8787}"; shift 2 || exit 3;;
       --open)      open=1; shift;;
       --read-only) readonly=1; shift;;
+      --allow-kill) allowkill=1; shift;;
       *) die "serve: unrecognised argument '$1'" \
-             "usage: ccwatch serve [--port N] [--open] [--read-only]";;
+             "usage: ccwatch serve [--port N] [--open] [--read-only] [--allow-kill]";;
     esac
   done
 
@@ -2514,7 +2662,12 @@ cmd_serve() {
     say "${_c_dim}loopback only, read-only. Ctrl-C to stop.${_c_reset}"
   else
     say "${_c_dim}loopback only. Replies from the page are enabled (token-gated).${_c_reset}"
-    say "${_c_dim}Use --read-only to disable them. Ctrl-C to stop.${_c_reset}"
+    if [ "$allowkill" -eq 1 ]; then
+      say "${_c_yellow}!${_c_reset} ${_c_dim}Killing from the page is ENABLED (--allow-kill).${_c_reset}"
+    else
+      say "${_c_dim}Killing is disabled; pass --allow-kill to enable it.${_c_reset}"
+    fi
+    say "${_c_dim}Use --read-only to disable writes entirely. Ctrl-C to stop.${_c_reset}"
   fi
   [ "$open" -eq 1 ] && command -v open >/dev/null 2>&1 && open "http://127.0.0.1:$port" 2>/dev/null
 
@@ -2524,7 +2677,7 @@ cmd_serve() {
     EXIT INT TERM
 
   CCWATCH_SELF="$root/bin/ccwatch" CCWATCH_WEB="$root/web" CCWATCH_BIND_PORT="$port" \
-  CCWATCH_SEND_TOKEN="$send_token" \
+  CCWATCH_SEND_TOKEN="$send_token" CCWATCH_ALLOW_KILL="$allowkill" \
   python3 -c '
 import http.server, json, os, socketserver, subprocess, sys, threading, time
 
@@ -2532,6 +2685,11 @@ SELF = os.environ["CCWATCH_SELF"]
 WEB  = os.environ["CCWATCH_WEB"]
 PORT = int(os.environ["CCWATCH_BIND_PORT"])
 SEND_TOKEN = os.environ.get("CCWATCH_SEND_TOKEN", "")
+# ⚠️ Killing from a browser is OFF unless asked for. Sending a message to the
+# wrong agent is embarrassing; killing the wrong one costs work in flight. A
+# monitoring tool should not be able to destroy by default, so this needs
+# --allow-kill in addition to the token every other write already requires.
+ALLOW_KILL = os.environ.get("CCWATCH_ALLOW_KILL", "0") == "1" and bool(SEND_TOKEN)
 ALLOWED_ORIGINS = {"http://127.0.0.1:%d" % PORT, "http://localhost:%d" % PORT}
 MAX_MESSAGE = 4000
 
@@ -2626,7 +2784,7 @@ class H(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        if not self.path.startswith("/api/send"):
+        if not (self.path.startswith("/api/send") or self.path.startswith("/api/kill")):
             self.send_error(404)
             return
         if not SEND_TOKEN:
@@ -2660,10 +2818,36 @@ class H(http.server.SimpleHTTPRequestHandler):
         try:
             req = json.loads(self.rfile.read(length))
             target = str(req["target"]).strip()
-            message = str(req["message"]).strip()
+            message = str(req.get("message") or "").strip()
         except Exception as e:
             self.reply_json(400, {"error": "bad request: %s" % e})
             return
+        if self.path.startswith("/api/kill"):
+            if not ALLOW_KILL:
+                self.reply_json(403, {"error": "killing is disabled — start with: "
+                                               "ccwatch serve --allow-kill"})
+                return
+            if not target:
+                self.reply_json(400, {"error": "target is required"})
+                return
+            args = [SELF, "kill", "-y"]
+            if req.get("force"):
+                args.append("--force")
+            args.append(target)
+            try:
+                out = subprocess.run(args, capture_output=True, text=True, timeout=40,
+                                     env={**os.environ, "NO_COLOR": "1"})
+                text = (out.stdout + out.stderr).strip()
+                # The refusals are the useful part of the reply: the page shows
+                # them verbatim rather than reducing everything to "failed".
+                state = ("killed" if "killed" in out.stdout
+                         else "refused" if out.returncode != 0 else "unknown")
+                self.reply_json(200 if state == "killed" else 409,
+                                {"state": state, "detail": text})
+            except Exception as e:
+                self.reply_json(504, {"state": "failed", "detail": str(e)})
+            return
+
         if not target or not message:
             self.reply_json(400, {"error": "target and message are both required"})
             return
@@ -2730,6 +2914,7 @@ class H(http.server.SimpleHTTPRequestHandler):
                 # Every panel carries its OWN age, so one slow collector cannot
                 # make the whole dashboard look stale — or worse, make a stale
                 # panel look current.
+                payload["can_kill"] = ALLOW_KILL
                 payload["ages"] = {
                     k: (now - STATE[k + "_at"]) if STATE.get(k + "_at") else None
                     for k in ("snapshot", "deploys", "peers")}
@@ -3049,6 +3234,7 @@ case "${1:-}" in
   statusline)      shift; cmd_statusline "$@";;
   install-statusline) cmd_install_statusline;;
   send)            shift; cmd_send "$@";;
+  kill)            shift; cmd_kill "$@";;
   deploys)         shift; cmd_deploys "$@";;
   subscribe)       shift; cmd_subscribe "$@";;
   unsubscribe)     shift; cmd_unsubscribe "$@";;
