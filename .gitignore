@@ -1,1 +1,7 @@
 *.log
+.DS_Store
+
+# Claude Code's own per-machine state. Shared project settings, if any are ever
+# added, live in .claude/settings.json and ARE committed.
+.claude/settings.local.json
+.claude/.cc-writes/

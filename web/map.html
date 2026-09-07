@@ -32,6 +32,9 @@
   .g-label { color:var(--dim); } .g-val { font-weight:600; }
   .g-reset { color:var(--dim); font-size:11px; }
   .stale { color:var(--warn); }
+  #hostwarn { display:none; padding:.45rem 1.1rem; background:color-mix(in srgb, var(--bad) 14%, transparent);
+              border-bottom:1px solid var(--bad); color:var(--bad); font-size:12px; }
+  #hostwarn.on { display:block; }
 
   /* The map itself. Territories are laid out in a normal responsive grid and
      the message lines are drawn on an SVG layer above them, positioned from
@@ -165,6 +168,7 @@
   <nav><a href="/">table</a><a href="/map" class="on">map</a></nav>
   <div class="gauges" id="gauges"></div>
 </header>
+<div id="hostwarn"></div>
 <div id="wrap">
   <svg id="wires"></svg>
   <div id="map"></div>
@@ -365,6 +369,18 @@ function wires(peers) {
   return drawn;
 }
 
+// A session killed by the OS leaves the same trace as one that exited
+// cleanly, so without this the dashboard can say an agent is gone but not why.
+function hostwarn(h) {
+  const el = $("hostwarn");
+  if (!el) return;
+  if (!h || !h.pressure) { el.className = ""; el.textContent = ""; return; }
+  el.className = "on";
+  el.innerHTML = `<b>host under memory pressure</b> — swap ${h.swap_used_pct}% used `
+    + `(${h.swap_used_mb}/${h.swap_total_mb}MB), ${h.ram_free_mb}MB RAM free. `
+    + `The OS may kill sessions, and a killed session looks exactly like a clean exit.`;
+}
+
 function gauges(u) {
   if (!u) return '<span class="dim">usage not reporting — run <b>ccwatch install-statusline</b></span>';
   const now = Date.now()/1000;
@@ -540,8 +556,8 @@ async function tick() {
     for (const u of (s.unfinished || [])) bucket(u).unfinished.push(u);
     // Exact match on owner/name. The previous version matched on the last path
     // segment of the repo against the directory basename, so a deploy on
-    // rvohealth/ppc-agents-workspace never found the territory shown as
-    // "agents" — those badges simply never appeared.
+    // acme/checkout-api never found the territory shown as "platform" —
+    // those badges simply never appeared.
     for (const d of ((s.deploys && s.deploys.runs) || [])) {
       const g = groups[d.repo];
       if (g) g.deploys.push(d);
@@ -557,6 +573,7 @@ async function tick() {
       ? order.map(k => territory(groups[k])).join("")
       : '<p class="empty">No live sessions. After a reboot, run <b>ccwatch resume</b>.</p>';
     $("gauges").innerHTML = gauges(s.usage);
+    hostwarn(s.host);
     const drawn = wires(s.peers) || 0;
 
     const w = (s.sessions||[]).filter(r => r.sev === 4).length;

@@ -1,18 +1,21 @@
 # ccwatch
 
+[![ci](https://github.com/rv-jclark/ccwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/rv-jclark/ccwatch/actions/workflows/ci.yml)
+[![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
+
 Every Claude Code session on this machine, and which one is stuck.
 
 ```
 NAME                  PROJECT            STATUS         AGE   LAST
-crimeball-d9          crimeball          * waiting      3m    permission to run rm 3m
-ganttlet-web-fc       ganttlet-web       ! HUNG?        4d    quiet 41m
-screened-84           screened           + sdk          5m    no status published
-  \_ 011-list-challenge-tracking  analyze/running  opus  $11.15
-agents-38             agents             ~ sdk-ts       4d    cpu moving
-agents-e6             agents             - idle         1d    14m ago
+checkout-api-d9       checkout-api       * waiting      3m    permission to run rm 3m
+web-app-fc            web-app            ! HUNG?        4d    quiet 41m
+pricing-84            pricing            + sdk          5m    no status published
+  \_ 011-usage-report  analyze/running  opus  $11.15
+infra-38              infra              ~ sdk-ts       4d    cpu moving
+infra-e6              infra              - idle         1d    14m ago
 
 UNFINISHED RUNS — stopped in the last 24h, and no live session is holding them
-  specify/failed       314-ganttlet-derived-capacity  opus  $55.19
+  specify/failed       314-cohort-capacity  opus  $55.19
       9h ago  claude --resume 15dbe4c0-58ef-4ace-8b21-f633c37caa85
 
 19 live · 1 waiting on you · 1 suspect · 3 unfinished run(s)
@@ -23,12 +26,15 @@ ccwatch                  # live table, refreshed until you quit (q / Ctrl-C)
 ccwatch once             # draw it once — safe in a pipe or a status bar
 ccwatch --json           # the same data, for scripting
 ccwatch serve            # table + map in a browser, with replies
+ccwatch ask              # what each blocked session is actually asking
+ccwatch convo <who>      # the recent conversation of one session
 ccwatch resume           # what to reopen after a crash or reboot
 ccwatch send <who> <msg> # say something to a session that is already running
 ccwatch deploys          # CI/deploy runs you are waiting on
 ccwatch subscribe <wf>   # (run by an agent) tell me when that deploy lands
 ccwatch peers            # which sessions have been talking to each other
 ccwatch daemon           # watch deploys and notify subscribers while you are away
+ccwatch log              # recent hook events (needs install-hooks)
 ccwatch doctor           # check that ccwatch's own view is trustworthy
 ```
 
@@ -71,6 +77,7 @@ independent signal:
 | the process's CPU time | whether *any* work is happening, for any session | a long network wait looks idle |
 | `.pipeline/state.json` + runner pid | a phase marked `running` whose runner is dead — a crash, as a fact | only exists for [spec-run](https://github.com/rv-jclark/speckit-pipeline) phases |
 | the git remote | which repository a session is really in | nothing, for a directory with no remote — and it says so |
+| host swap and free RAM | that the OS is about to start killing things | which process it will pick |
 
 The corroboration cuts **both** ways, which matters more than the flagging. A
 quiet transcript is reported as `HUNG?` only when CPU has also stopped moving —
@@ -87,7 +94,7 @@ shows how full its context window is:
 5h 42% (resets 1h)   7d 18% (resets 3d)
 
 NAME                  PROJECT            STATUS      AGE   CTX  LAST
-speckit-pipeline-8e   speckit-pipeline   ● busy      2h    18%  3s ago
+checkout-api-8e       checkout-api       ● busy      2h    18%  3s ago
 ```
 
 These come from a feed Claude Code is **already pushing**: it hands its
@@ -131,13 +138,13 @@ machine:
 
 | Directory | Shown as | Actually |
 |---|---|---|
-| `~/code/agents` | `agents` | `rvohealth/ppc-agents-workspace` |
-| `~/code/agents/.claude/worktrees/X` | `agents:X`, a separate project | the **same** repo, on another branch |
-| `.../worktrees/X/services/ppc-agent-context` | grouped under the outer one | a **different** repo nested inside |
+| `~/code/platform` | `platform` | `acme/checkout-api` |
+| `~/code/platform/.claude/worktrees/X` | `platform:X`, a separate project | the **same** repo, on another branch |
+| `.../worktrees/X/services/pricing` | grouped under the outer one | a **different** repo nested inside |
 
 It also broke deploys silently. Runs come back from `gh` keyed `owner/name`, so
-a deploy on `ppc-agents-workspace` could never match a territory labelled
-`agents` — those badges simply never appeared, and nothing said so.
+a deploy on `acme/checkout-api` could never match a territory labelled
+`platform` — those badges simply never appeared, and nothing said so.
 
 Worktrees of one repository now share a territory, with the branch shown, since
 that is what actually distinguishes them. A directory with **no** remote keys on
@@ -171,6 +178,26 @@ Two things are deliberately **not** claimed:
   be honestly `idle` while the run it drove has crashed. Collapsing those
   produced rows reading `! idle`, which is not a sentence.
 
+### Why an agent died, when it was not Claude's fault
+
+A session killed by the OS under memory pressure leaves **exactly the same
+trace** as one that exited cleanly: its registry file disappears. So the table
+says so, once, when it matters:
+
+```
+! host under memory pressure  swap 95% used (26155/27648MB), 58MB RAM free
+  — the OS may kill sessions, and a killed session looks exactly like a clean exit
+```
+
+This was added after the host it was built on hit 26.3GB of 27.6GB swap with
+58MB of free RAM and a load average of 128, with nineteen sessions running and
+no single large consumer — and the OS started reaping background tasks. Nothing
+in the tool could have explained a session vanishing at that moment.
+
+Shown only past `CCWATCH_SWAP_WARN` (80%). Below it the line is absent, not
+green: a monitor that reports normal conditions on every refresh trains you to
+skip the line that eventually is not normal.
+
 ## What a blocked session is asking
 
 ```bash
@@ -183,7 +210,7 @@ question, with every option and its description, is in the transcript as the
 input to an `AskUserQuestion` call:
 
 ```
-ganttlet-web-fc  ganttlet-web  waiting 1013s — input needed
+web-app-fc  web-app  waiting 1013s — input needed
   Should the release ship today or wait for the audit?
     1. Ship today
        Proceed with the release immediately without waiting for audit completion
@@ -222,8 +249,8 @@ panel.
 send` puts a message into the session that is **already running**:
 
 ```bash
-ccwatch send ganttlet-web-fc "the deploy failed, look at the migration step"
-ccwatch send --dry-run agents-7b "..."   # show the exact frames first
+ccwatch send web-app-fc "the deploy failed, look at the migration step"
+ccwatch send --dry-run pricing-7b "..."   # show the exact frames first
 ```
 
 This is not prising anything open. Claude Code exports
@@ -240,10 +267,10 @@ after sending, `ccwatch` watches the *receiver's* transcript for the message to
 appear and reports one of three things:
 
 ```
-delivered to agents-7b (confirmed in its transcript after 3s)
-queued for agents-7b, but not in its transcript after 10s
+delivered to pricing-7b (confirmed in its transcript after 3s)
+queued for pricing-7b, but not in its transcript after 10s
       normal if it is mid-turn — the queue is drained between turns.
-could not deliver to agents-7b: <the actual socket error>
+could not deliver to pricing-7b: <the actual socket error>
 ```
 
 That verification earned its place immediately. The first version printed
@@ -260,9 +287,9 @@ ccwatch deploys      # in flight, and concluded in the last 24h
 
 ```
 DEPLOYS — in flight, and concluded in the last 24h
-  RUNNING   Deploy to ShipIt    rvohealth/ganttlet-web  main   started 5m ago
-  FAILURE   deploy-production   jamiebclark/crimeball   main   1h ago
-      https://github.com/jamiebclark/crimeball/actions/runs/2
+  RUNNING   Deploy to staging    acme/web-app       main   started 5m ago
+  FAILURE   deploy-production    acme/checkout-api  main   1h ago
+      https://github.com/acme/checkout-api/actions/runs/2
 ```
 
 Runs come from `gh run list` for every repo you have a session in, filtered to
@@ -291,8 +318,8 @@ ccwatch peers
 ```
 
 ```
-  ganttlet-web-fc ==> agents-7b        7 msgs, last 2026-09-07T14:04Z
-  agents-7b ==> ganttlet-web-fc        6 msgs, last 2026-09-07T15:08Z
+  web-app-fc ==> pricing-7b        7 msgs, last 2026-09-07T14:04Z
+  pricing-7b ==> web-app-fc        6 msgs, last 2026-09-07T15:08Z
 ```
 
 A message from another session is recorded in the **receiver's** transcript as
@@ -316,11 +343,11 @@ Two views, same data: **`/`** is the table, **`/map`** groups agents into their
 projects.
 
 ```
-┌ agents:ganttlet-platform ─┐ ┌ screened ─────────────┐ ┌ crimeball ─ FAILURE ┐
-│   ☺                       │ │  ☺    ☺──2──☺          │ │   ☺      ☺ᶻ         │
-│   84                      │ │  4f   1f    d9         │ │   f6     d9         │
-│ specify/failed  $55.19    │ │ plan/needs_input       │ │                     │
-└───────────────────────────┘ └───────────────────────┘ └─────────────────────┘
+┌ acme/checkout-api ────────┐ ┌ acme/pricing ─────────┐ ┌ acme/web-app ─ FAILURE ┐
+│   ☺                       │ │  ☺    ☺──2──☺          │ │   ☺      ☺ᶻ            │
+│   84                      │ │  4f   1f    d9         │ │   f6     d9            │
+│ specify/failed  $55.19    │ │ plan/needs_input       │ │                        │
+└───────────────────────────┘ └───────────────────────┘ └────────────────────────┘
 ```
 
 Each project is a territory; each session is a figure inside it. Appearance
@@ -394,6 +421,24 @@ ccwatch resume --cd     # emit `cd <dir> && claude --resume <id>` to paste
 ccwatch resume --all    # ignore the 14-day window
 ```
 
+It also prints a **`LAST KNOWN ROSTER`** — who was live the last time anything
+looked, and what each one was doing when everything stopped:
+
+```
+LAST KNOWN ROSTER — 6 session(s) were live 12m ago; these are not running now
+
+  web-app-fc  web-app  waiting  (input needed)
+      claude --resume 15dbe4c0-58ef-4ace-8b21-f633c37caa85  (~/code/web-app)
+```
+
+Transcripts remain the resume *authority* — that is where the session id comes
+from — but they do not record which sessions were open **together**, what each
+was called, or what it was doing at the moment the machine went down, and that
+is exactly the part you would otherwise rebuild from memory. So every snapshot
+taken for display writes the roster down. Rows already running are dropped from
+it, and it is written from `render`, not from `snapshot`, so a `--json` consumer
+polling the state does not rewrite history as a side effect.
+
 Two bugs found here worth knowing about, because both produced output that
 looked fine:
 
@@ -450,9 +495,41 @@ branch and be presented as though it had been read.
 ## Install
 
 ```bash
-git clone https://github.com/rv-jclark/ccwatch
+git clone https://github.com/rv-jclark/ccwatch.git
 ln -s "$PWD/ccwatch/bin/ccwatch" /usr/local/bin/ccwatch
+ccwatch doctor          # confirm it can read what it needs to read
 ```
+
+A symlink rather than a copy, so `git pull` upgrades it. `bin/ccwatch` runs from
+anywhere and finds `web/` relative to its own resolved path, so it does not
+matter where the clone lives.
+
+Optional, and each shows the exact change before making it:
+
+```bash
+ccwatch install-hooks         # never miss a prompt that opened between polls
+ccwatch install-statusline    # wrap your statusline to report usage + context
+```
+
+### Requirements
+
+| | |
+|---|---|
+| macOS | `stat -f` and `ps -o lstart=` are used in their BSD forms |
+| `bash` 3.2+ | what macOS ships, and the floor the test suite enforces |
+| `jq` | `brew install jq` — the only hard dependency not already present |
+| `python3` | ships with macOS; used for the socket client and date parsing |
+| `git`, `gh` | only for the deploy panel and repo identity; degrades with a message |
+
+### Uninstall
+
+```bash
+rm /usr/local/bin/ccwatch && rm -rf ~/.claude/ccwatch
+```
+
+Hooks and the statusline wrapper, if you installed them, are entries in
+`~/.claude/settings.json` — remove the ones naming `ccwatch`. Every write is
+preceded by a timestamped backup of that file.
 
 ## Configuration
 
@@ -467,6 +544,10 @@ All environment variables, all optional.
 | `CCWATCH_USAGE_STALE` | `600` | how old a usage reading may be before its numbers are withheld |
 | `CCWATCH_REPO_TTL` | `21600` | how long a directory's resolved repo is cached |
 | `CCWATCH_TAIL_BYTES` | `400000` | how much of a transcript `convo` reads |
+| `CCWATCH_SWAP_WARN` | `80` | swap percentage at which the host is called out |
+| `CCWATCH_TAIL_TEXT` | `1200` | how much of one turn's text `convo` keeps |
+| `CCWATCH_ASK_BYTES` | `600000` | cap on the seek back to the last question |
+| `CCWATCH_DEPLOY_LIMIT` | `20` | runs requested per repo from `gh` |
 | `CCWATCH_REFRESH` | `2` | seconds between repaints |
 | `CCWATCH_RESUME_DAYS` | `14` | how far back `ccwatch resume` looks |
 | `CCWATCH_UNFINISHED_HOURS` | `24` | how recent an unfinished run must be to appear in the live table |
@@ -486,8 +567,12 @@ distinct word, so `ccwatch once | grep HUNG` works, and so does a screen reader.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 158 assertions
+./tests/run.sh          # shellcheck + 160 assertions
 ```
+
+CI runs the same script on macOS, and macOS only: `stat -f` and `ps -o lstart=`
+are used in their BSD forms and bash 3.2 is the floor, so a suite green on
+Linux would not be testing the thing anyone runs.
 
 **Hermetic.** Every assertion runs against a fabricated `~/.claude`: a suite
 that reads the developer's live sessions asserts on whatever happened to be
@@ -524,6 +609,8 @@ implementation broken in the specific way it describes:
 | read a fixed tail instead of seeking to the last question | 1 |
 | derive the project from the directory name instead of the git remote | 3 |
 | ship a tool result's contents instead of only its size | 1 |
+| report host pressure on every refresh instead of only when it matters | 1 |
+| resolve the script's own location without following the install symlink | 2 |
 
 That last table is not decoration. Two of those mutations are bugs that were
 actually **in** the code and were found this way, and one entry started life as
@@ -576,6 +663,18 @@ from an empty table.
 
 It writes nothing except its own event log, its CPU-sample cache in `$TMPDIR`,
 and — only when you run `install-hooks` and confirm — your `settings.json`.
+
+## Contributing
+
+Patches welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). The one thing to know
+in advance is that every assertion here has been mutation-checked, and new ones
+are expected to be: break the implementation in the way your assertion
+describes, watch it fail, then restore. [CLAUDE.md](CLAUDE.md) states the
+invariants in full, for humans and agents alike.
+
+Security-relevant reports go through [SECURITY.md](SECURITY.md) rather than a
+public issue. That file also lists exactly what `ccwatch` reads and writes, if
+you would rather judge the risk yourself than take the summary above on trust.
 
 ## Licence
 

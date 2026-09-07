@@ -148,6 +148,27 @@ ps_out() {
   fi
 }
 
+# resolved_self — this script's real path, with symlinks followed.
+#
+# ⚠️ Load-bearing for `serve`, which finds web/ relative to bin/. The documented
+# install is a SYMLINK into /usr/local/bin so that `git pull` upgrades the tool,
+# and `${BASH_SOURCE[0]}` is then the symlink — so the naive dirname put the web
+# root at /usr/local and `serve` died for everyone who followed the README.
+#
+# A loop rather than `readlink -f`: the BSD readlink macOS shipped for years has
+# no -f, and a chain of symlinks (Homebrew, a dotfiles repo, /usr/local itself)
+# is the normal case, not an exotic one.
+resolved_self() {
+  local p=${BASH_SOURCE[0]} d n=0
+  while [ -L "$p" ]; do
+    n=$((n + 1)); [ "$n" -gt 40 ] && break     # a symlink cycle must not hang
+    d=$(cd -- "$(dirname -- "$p")" && pwd)
+    p=$(readlink -- "$p")
+    case "$p" in /*) ;; *) p="$d/$p";; esac    # a link target may be relative
+  done
+  printf '%s/%s\n' "$(cd -- "$(dirname -- "$p")" && pwd)" "$(basename -- "$p")"
+}
+
 TMP=""
 cleanup() { [ -n "$TMP" ] && rm -rf "$TMP"; }
 trap cleanup EXIT
@@ -616,7 +637,9 @@ snapshot() {
   # shellcheck disable=SC2086
   ctx=$(collect_context $sids)
   usage=$(collect_usage)
-  prof collect_context
+  local host
+  host=$(collect_host)
+  prof collect_host
   pipelines='[]'
   if [ -n "$cwds" ]; then
     local -a cwda=()
@@ -686,6 +709,8 @@ snapshot() {
     --argjson unfinished_hours "$CCWATCH_UNFINISHED_HOURS" \
     --argjson ctx "$ctx" \
     --argjson usage "$usage" \
+    --argjson host "${host:-null}" \
+    --argjson swap_warn "$CCWATCH_SWAP_WARN" \
     --argjson ctx_stale "$CCWATCH_CTX_STALE" \
     --argjson repos "$repos" \
     --argjson asks "${asks:-\{\}}" '
@@ -866,6 +891,8 @@ snapshot() {
     | sort_by(-([.sev, .psev] | max), -(.waited // .quiet // 0))
     | { sessions: .,
         usage: $usage,
+        host: (if $host == null then null
+               else $host + { pressure: (($host.swap_used_pct // 0) >= $swap_warn) } end),
         # Runs that stopped and whose session is already gone. These are the
         # ones nothing else reports: no live session carries them, so without
         # this block a crashed phase from yesterday is invisible until the next
@@ -958,6 +985,19 @@ render() {
       # presented as current.
       + ( if .usage.age > 60 then "  \($d)[\(dur(.usage.age)) old]\($z)" else "" end )
     end' || say "${_c_red}x${_c_reset} usage header failed to render — run: ccwatch doctor"
+
+  # Only shown under pressure. A monitoring tool that reports normal conditions
+  # on every refresh trains you to skip the line that eventually is not normal.
+  #
+  # Placed above the "no live sessions" return on purpose: an empty session list
+  # is exactly the situation where the reason matters most.
+  printf '%s' "$snap" | jq -r --arg r "$_c_red" --arg d "$_c_dim" --arg z "$_c_reset" '
+    if (.host // null) == null or ((.host.pressure // false) | not) then empty
+    else "\($r)! host under memory pressure\($z) \($d)swap \(.host.swap_used_pct)% used"
+         + " (\(.host.swap_used_mb)/\(.host.swap_total_mb)MB), \(.host.ram_free_mb)MB RAM free"
+         + " — the OS may kill sessions, and a killed session looks exactly"
+         + " like a clean exit\($z)"
+    end' || true
   say ""
 
   if [ "$count" -eq 0 ]; then
@@ -1476,6 +1516,66 @@ cmd_convo() {
 }
 
 
+
+# ================================================================= host =====
+#
+# Why an agent died, when it died for a reason that had nothing to do with
+# Claude.
+#
+# A session killed by the OS under memory pressure leaves exactly the same
+# trace as one that exited cleanly: its registry file disappears. ccwatch can
+# say the session is gone; without this it cannot say the machine was out of
+# swap when it went. That turns "it died mysteriously" — the original complaint
+# this tool was built for — into a cause.
+#
+# Measured on the machine this was written on: 26.3GB of 27.6GB swap in use and
+# 59MB of free RAM, with nineteen sessions running and no single large
+# consumer. The OS was reaping background tasks at the time.
+CCWATCH_SWAP_WARN="${CCWATCH_SWAP_WARN:-80}"
+
+collect_host() {
+  python3 -c '
+import json, re, subprocess
+
+def sh(*args):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return ""
+
+out = {}
+
+# Free RAM, from vm_stat. "Free" alone is misleading on macOS — the compressor
+# is holding real pages that the system has already had to squeeze — so both
+# are reported.
+vm = sh("vm_stat")
+m = re.search(r"page size of (\d+)", vm)
+page = int(m.group(1)) if m else 4096
+def pages(label):
+    mm = re.search(label + r":\s+(\d+)", vm)
+    return int(mm.group(1)) if mm else 0
+if vm:
+    out["ram_free_mb"] = round(pages("Pages free") * page / 1048576)
+    out["compressed_mb"] = round(pages("Pages occupied by compressor") * page / 1048576)
+
+# Swap. This is the number that actually predicts a kill.
+sw = sh("sysctl", "-n", "vm.swapusage")
+m = re.search(r"total = ([\d.]+)M\s+used = ([\d.]+)M", sw)
+if m:
+    total, used = float(m.group(1)), float(m.group(2))
+    out["swap_total_mb"] = round(total)
+    out["swap_used_mb"] = round(used)
+    out["swap_used_pct"] = round(used / total * 100) if total else None
+
+la = sh("sysctl", "-n", "vm.loadavg")
+m = re.search(r"([\d.]+)", la)
+if m:
+    out["load1"] = float(m.group(1))
+
+print(json.dumps(out) if out else "null")
+' 2>/dev/null || printf 'null'
+}
+
 # ============================================================ pending asks ==
 #
 # WHAT a blocked session is asking, not merely that it is blocked.
@@ -1920,19 +2020,18 @@ DEPLOY_SEEN="$CCWATCH_HOME/deploys-seen.json"
 # ⚠️ NOT the directory basename. That was the first version and it was wrong in
 # three ways at once, all visible on one real machine:
 #
-#   ~/code/agents                      is rvohealth/ppc-agents-workspace, so a
-#                                      territory labelled "agents" named nothing
-#                                      that exists on GitHub.
-#   ~/code/agents/.claude/worktrees/X  is the SAME repo as above, but was shown
-#                                      as a separate project "agents:X".
-#   .../worktrees/X/services/ppc-agent-context
-#                                      is a DIFFERENT repo nested inside that
+#   ~/code/platform                    is acme/checkout-api, so a territory
+#                                      labelled "platform" named nothing that
+#                                      exists on GitHub.
+#   ~/code/platform/.claude/worktrees/X  is the SAME repo as above, but was
+#                                      shown as a separate project "platform:X".
+#   .../worktrees/X/services/pricing   is a DIFFERENT repo nested inside that
 #                                      worktree, and was grouped under the
 #                                      outer one — merging two repositories.
 #
 # It also broke deploys silently: runs come back from `gh` keyed by owner/name,
-# so a deploy on ppc-agents-workspace could never match a territory called
-# "agents", and those badges simply never appeared.
+# so a deploy on checkout-api could never match a territory called "platform",
+# and those badges simply never appeared.
 #
 # The remote is the identity. The branch is carried separately, because that is
 # what distinguishes two worktrees of one repo.
@@ -2405,7 +2504,7 @@ cmd_serve() {
   fi
 
   local root
-  root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+  root=$(cd -- "$(dirname -- "$(resolved_self)")/.." && pwd)
   [ -f "$root/web/index.html" ] || die "cannot find web/index.html under $root" \
     "the web assets ship alongside bin/ — has the checkout been split up?"
 
@@ -2752,6 +2851,21 @@ cmd_doctor() {
 
   # Hooks: without them, a prompt that opens and closes between polls is lost.
   say ""
+  local hp
+  hp=$(collect_host | jq -r 'if . == null then "?" else "\(.swap_used_pct)|\(.ram_free_mb)" end' 2>/dev/null)
+  case "$hp" in
+    "?"|"") meh "could not read host memory state";;
+    *) local swp="${hp%%|*}" freem="${hp##*|}"
+       if [ "${swp:-0}" -ge "$CCWATCH_SWAP_WARN" ]; then
+         bad "host under memory pressure — swap ${swp}% used, ${freem}MB RAM free"
+         printf '      %sthe OS kills processes in this state, and a killed session%s\n' "$_c_dim" "$_c_reset"
+         printf '      %slooks identical to a clean exit. Check: ccwatch resume%s\n' "$_c_dim" "$_c_reset"
+       else
+         ok "host memory is fine (swap ${swp}% used, ${freem}MB RAM free)"
+       fi;;
+  esac
+
+  say ""
   if [ -f "$USAGE_FILE" ]; then
     local uage
     uage=$(jq -r --argjson now "$(date '+%s')" '($now - (.at // 0))' "$USAGE_FILE" 2>/dev/null) || uage=999999
@@ -2830,14 +2944,47 @@ USAGE
   ccwatch                    live table, refreshed until you quit (q / Ctrl-C)
   ccwatch once               draw the table once and exit
   ccwatch --json             the same data as JSON, for scripting
-  ccwatch resume [-n N]      what to reopen after a crash or reboot
+
+  ccwatch ask [<who>]        what each blocked session is actually asking —
+                           the question and every option, from its transcript
+  ccwatch convo [-n N] <who>  the recent conversation of one session. Tool
+                           results are reduced to a size, never their contents.
+
+  ccwatch send <who> <msg>   put a message into a session that is ALREADY
+                           running, and watch its transcript to confirm arrival
+        --dry-run          print the exact frames instead of sending them
+  ccwatch peers [--days N]   which sessions have been talking to each other
+
+  ccwatch serve              table + map in a browser (127.0.0.1 only)
+        --open             open it once it is up
+        --port N           default 8787
+        --read-only        drop the send endpoint and serve no token
+
+  ccwatch resume [-n N]      what to reopen after a crash or reboot, plus the
+                           last known roster of what was live
         --cd               print a `cd <dir> && claude --resume` you can paste
         --all              ignore the recency window
+
+  ccwatch deploys            deploy runs in flight, and concluded in the last 24h
+  ccwatch subscribe <wf>     (run BY an agent, in its own session) tell me when
+                           a matching deploy finishes
+  ccwatch unsubscribe <wf>   the reverse
+  ccwatch subs               current subscriptions
+  ccwatch daemon             watch deploys and notify subscribers while you are
+                           away
+
   ccwatch log [N]            recent hook events (needs install-hooks)
   ccwatch install-hooks      record "needs your input" events, so a prompt that
                            opens and closes between polls is never lost
+  ccwatch install-statusline  wrap your statusline to report rate limits and
+                           context fill. Wraps, does not replace.
   ccwatch doctor             check that ccwatch's own view is trustworthy
   ccwatch -h | --version
+
+  <who> is a session name, a session id, or a pid. Names must match whole; a
+  session id may be given as a prefix of 8 or more characters. Anything that
+  matches more than one live session is refused with the candidates listed,
+  never resolved by picking — the wrong agent has already been told.
 
 STATUS COLUMN
   * waiting        blocked on you. LAST says on what, and for how long.

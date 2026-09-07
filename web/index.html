@@ -63,6 +63,9 @@
                   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   footer { padding:0 1.25rem 2rem; color:var(--dim); font-size:12px; }
   .stale { color:var(--warn); }
+  #hostwarn { display:none; padding:.45rem 1.1rem; background:color-mix(in srgb, var(--bad) 14%, transparent);
+              border-bottom:1px solid var(--bad); color:var(--bad); font-size:12px; }
+  #hostwarn.on { display:block; }
   /* Replying from the page. Kept visually quiet until you open it: this is a
      monitoring view first, and a row that shouts an input box at you on every
      repaint is a row you stop reading. */
@@ -93,6 +96,7 @@
   <nav><a href="/" class="on">table</a><a href="/map">map</a></nav>
   <div class="gauges" id="gauges"></div>
 </header>
+<div id="hostwarn"></div>
 <main>
   <section><h2>Sessions</h2><div id="sessions"></div></section>
   <section><h2>Unfinished runs</h2><div id="unfinished"></div></section>
@@ -111,6 +115,18 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;
 const dur = s => { if (s == null) return "-"; s = Math.max(0, s);
   return s < 60 ? Math.floor(s)+"s" : s < 3600 ? Math.floor(s/60)+"m"
        : s < 86400 ? Math.floor(s/3600)+"h" : Math.floor(s/86400)+"d"; };
+
+// A session killed by the OS leaves the same trace as one that exited
+// cleanly, so without this the dashboard can say an agent is gone but not why.
+function hostwarn(h) {
+  const el = $("hostwarn");
+  if (!el) return;
+  if (!h || !h.pressure) { el.className = ""; el.textContent = ""; return; }
+  el.className = "on";
+  el.innerHTML = `<b>host under memory pressure</b> — swap ${h.swap_used_pct}% used `
+    + `(${h.swap_used_mb}/${h.swap_total_mb}MB), ${h.ram_free_mb}MB RAM free. `
+    + `The OS may kill sessions, and a killed session looks exactly like a clean exit.`;
+}
 
 function gauges(u) {
   if (!u) return '<span class="dim">usage not reporting — run <b>ccwatch install-statusline</b></span>';
@@ -309,6 +325,7 @@ async function tick() {
       return;
     }
     $("gauges").innerHTML  = gauges(s.usage);
+    hostwarn(s.host);
     $("sessions").innerHTML = sessions(s.sessions || []);
     $("unfinished").innerHTML = unfinished(s.unfinished || [], s.unfinished_old || 0);
     $("deploys").innerHTML = deploys(s.deploys);

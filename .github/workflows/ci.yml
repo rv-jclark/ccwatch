@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # macOS only, and deliberately. ccwatch uses `stat -f` and `ps -o lstart=`
+    # in their BSD forms, and bash 3.2 is the floor precisely because that is
+    # what macOS ships — a suite green on ubuntu would not be testing the thing
+    # people run.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq and shellcheck
+        run: |
+          command -v jq >/dev/null || brew install jq
+          command -v shellcheck >/dev/null || brew install shellcheck
+          jq --version
+          shellcheck --version | awk '/^version:/{print}'
+
+      - name: Record the shell and python the suite will use
+        run: |
+          # bash 3.2 is the constraint being honoured, so print what ran.
+          /bin/bash --version | head -1
+          python3 --version
+
+      # The suite is hermetic: it fabricates its own ~/.claude and substitutes
+      # the `ps` probe, so it needs no Claude Code installation and no network.
+      - name: Tests
+        run: /bin/bash ./tests/run.sh
+
+      - name: Serve leaks nothing
+        if: always()
+        run: |
+          # A leaked server would hold a port and quietly answer a later run.
+          # Nothing should be listening once the suite has exited.
+          if pgrep -f 'ccwatch serve' >/dev/null 2>&1; then
+            echo "a ccwatch serve process outlived the suite"
+            pgrep -lf 'ccwatch serve'
+            exit 1
+          fi
+          echo "no orphaned servers"

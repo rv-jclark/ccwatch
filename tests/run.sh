@@ -44,6 +44,7 @@ cleanup_suite() {
   [ -n "${SPORT:-}" ] && pkill -f "ccwatch serve --port $SPORT" 2>/dev/null
   [ -n "${SPORT2:-}" ] && pkill -f "ccwatch serve --port $SPORT2" 2>/dev/null
   [ -n "${SPORT3:-}" ] && pkill -f "ccwatch serve --port $SPORT3" 2>/dev/null
+  [ -n "${SPORT4:-}" ] && pkill -f "ccwatch serve --port $SPORT4" 2>/dev/null
   rm -rf "$WORK"
   return 0
 }
@@ -785,6 +786,26 @@ if command -v curl >/dev/null 2>&1; then
   assert_eq "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$SPORT/map")" "200" \
     "the map view is served too"
 
+  # ⚠️ Invoked through a SYMLINK, which is the install the README documents —
+  # `ln -s .../bin/ccwatch /usr/local/bin/ccwatch`, so that `git pull` upgrades
+  # the tool. `${BASH_SOURCE[0]}` is then the symlink, and the naive dirname put
+  # the web root at /usr/local: `serve` died for everyone who installed it the
+  # documented way, while working perfectly from the checkout. A chain of two
+  # links, because Homebrew and dotfiles repos both produce one.
+  SPORT4=$(free_port) || SPORT4=""
+  mkdir -p "$WORK/link1" "$WORK/link2"
+  ln -sf "$CCWATCH" "$WORK/link1/ccwatch"
+  ln -sf "$WORK/link1/ccwatch" "$WORK/link2/ccwatch"
+  ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-sv" CCWATCH_HOME="$DH" \
+    CCWATCH_DEPLOY_TTL=999999 "$WORK/link2/ccwatch" serve --port "$SPORT4" \
+    >"$WORK/serve-link.log" 2>&1 & )
+  sleep 2
+  assert_not_contains "$(cat "$WORK/serve-link.log" 2>/dev/null)" "cannot find web/index.html" \
+    "serve finds its web assets when installed as a symlink, as the README says to"
+  assert_eq "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$SPORT4/")" "200" \
+    "and actually serves the dashboard through the link"
+  pkill -f "ccwatch serve --port $SPORT4" 2>/dev/null || true
+
   # --- the send endpoint, which is the part with teeth ---------------------
   #
   # Binding to loopback is NOT a security boundary for this: any page open in
@@ -896,8 +917,8 @@ printf '\nrepo identity\n'
 # ⚠️ The project a session belongs to is the git REMOTE, not the directory
 # basename. The path-based version was wrong three ways at once on one real
 # machine — see collect_repos — and it also broke deploys silently, because
-# `gh` returns owner/name and a territory labelled "agents" could never match a
-# run on "rvohealth/ppc-agents-workspace".
+# `gh` returns owner/name and a territory labelled "platform" could never match
+# a run on "acme/checkout-api".
 RH="$WORK/repo-home"
 mkdir -p "$RH"
 # A repo whose DIRECTORY NAME DIFFERS FROM ITS REMOTE — the case the old code
@@ -1148,6 +1169,38 @@ mkps 9303 "0:10.00" >> "$WORK/ps-ask"
 assert_eq "$(aj | jq -r '.sessions[] | select(.name=="busybody") | .questions')" "null" \
   "a session that is not waiting carries no question"
 rm -f "$FH/sessions/9301.json" "$FH/sessions/9302.json" "$FH/sessions/9303.json"
+
+# =================================================================== host ====
+printf '\nhost pressure\n'
+
+# Why an agent died, when it died for a reason unrelated to Claude. A session
+# killed by the OS under memory pressure leaves exactly the same trace as one
+# that exited cleanly — its registry file disappears — so without this the tool
+# can say a session is gone but not why. Measured on the machine this was built
+# on: 26.3GB of 27.6GB swap in use, 58MB free RAM, and the OS reaping
+# background tasks.
+_h=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-u" CCWATCH_HOME="$SLH" \
+     NO_COLOR=1 "$CCWATCH" --json 2>/dev/null | jq -c '.host')
+assert_not_contains "$_h" "null" "host memory state is collected"
+_swp=$(printf '%s' "$_h" | jq -r '.swap_used_pct // "x"')
+case "$_swp" in
+  ''|*[!0-9]*) t_fail "swap usage is read as a percentage" "got '$_swp'";;
+  *) t_pass "swap usage is read as a percentage";;
+esac
+# The flag is derived from a threshold, so it can be exercised either way on any
+# machine rather than only on one that happens to be struggling.
+_hi=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-u" CCWATCH_HOME="$SLH" \
+      CCWATCH_SWAP_WARN=0 NO_COLOR=1 "$CCWATCH" once 2>&1)
+assert_contains "$_hi" "host under memory pressure" \
+  "past the threshold the table says the host is under pressure"
+assert_contains "$_hi" "looks exactly" \
+  "and explains that a killed session is indistinguishable from a clean exit"
+# Below the threshold it says NOTHING. A monitoring tool that reports normal
+# conditions on every refresh trains you to skip the line that eventually is not.
+_lo=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-u" CCWATCH_HOME="$SLH" \
+      CCWATCH_SWAP_WARN=101 NO_COLOR=1 "$CCWATCH" once 2>&1)
+assert_not_contains "$_lo" "host under memory pressure" \
+  "and stays silent when the host is healthy"
 
 
 printf '\n%s passed, %s failed' "$pass" "$fail"
