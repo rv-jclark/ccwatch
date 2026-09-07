@@ -81,6 +81,14 @@ produced a specific wrong output that someone believed.
     invokes the commands the CLI does. Two renderings that compute status
     separately will eventually disagree, and there is no way to tell which is
     lying.
+12. **Normal conditions are silent.** A line that appears on every refresh to
+    say things are fine is a line people learn to skip, and then it is not
+    there when it matters. Warnings appear at a threshold and are absent below
+    it — not green, absent. The host-pressure line works this way.
+13. **An assertion must not encode one machine's configuration.** Where the host
+    cannot supply what a test needs — no swap, a slow CPU, no `curl` — skip with
+    the reason stated rather than failing. A red suite that means "this runner
+    is configured differently" costs the same attention as a real regression.
 
 ## Portability constraints
 
