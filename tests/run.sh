@@ -581,7 +581,7 @@ import json, sys, time
 now = int(sys.argv[1])
 def ts(off): return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - off))
 print(json.dumps({"at": now, "age": 0, "runs": [
- {"databaseId":1,"workflowName":"Deploy to ShipIt","status":"in_progress","conclusion":None,
+ {"databaseId":1,"workflowName":"Deploy to staging","status":"in_progress","conclusion":None,
   "headBranch":"main","createdAt":ts(300),"updatedAt":ts(300),"url":"u1","event":"push",
   "repo":"acme/web"},
  {"databaseId":2,"workflowName":"deploy-production","status":"completed","conclusion":"failure",
