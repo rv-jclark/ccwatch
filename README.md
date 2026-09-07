@@ -567,12 +567,19 @@ distinct word, so `ccwatch once | grep HUNG` works, and so does a screen reader.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 160 assertions
+./tests/run.sh          # shellcheck + 165 assertions
 ```
 
 CI runs the same script on macOS, and macOS only: `stat -f` and `ps -o lstart=`
 are used in their BSD forms and bash 3.2 is the floor, so a suite green on
 Linux would not be testing the thing anyone runs.
+
+An assertion that needs something the host cannot provide **skips with the
+reason**, rather than failing. A runner with swap disabled has no swap
+percentage to report, and `null` is the honest reading there — 0% would claim
+that swap exists and is empty. The first CI run went red on exactly that, while
+passing on the machine the assertion was written on, which is the ordinary way
+a suite ends up encoding one machine's configuration.
 
 **Hermetic.** Every assertion runs against a fabricated `~/.claude`: a suite
 that reads the developer's live sessions asserts on whatever happened to be

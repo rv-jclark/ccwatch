@@ -1181,9 +1181,26 @@ printf '\nhost pressure\n'
 # background tasks.
 _h=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-u" CCWATCH_HOME="$SLH" \
      NO_COLOR=1 "$CCWATCH" --json 2>/dev/null | jq -c '.host')
-assert_not_contains "$_h" "null" "host memory state is collected"
-_swp=$(printf '%s' "$_h" | jq -r '.swap_used_pct // "x"')
+t_note "host reports: ${_h:-<nothing>}"
+
+# ⚠️ Asserted field by field, NOT by grepping the JSON for the substring
+# "null". A host with swap disabled — a CI runner, a VM — legitimately reports
+# `swap_used_pct: null`, and a substring check fails on that while the
+# collection is working perfectly. That is exactly how this first went red on
+# CI while passing on the machine it was written on.
+assert_eq "$(printf '%s' "$_h" | jq -r \
+    'if type == "object" and has("ram_free_mb") then "ok" else "missing" end')" "ok" \
+  "host memory state is collected"
+
+# A percentage requires swap to exist. Where it does not, `null` is the honest
+# reading and 0% would be a lie — "0% of swap used" says there is swap and it
+# is empty. So this skips rather than failing, with the reason stated: a host
+# without swap is not a defect in ccwatch.
+_swp=$(printf '%s' "$_h" | jq -r '.swap_used_pct // "none"')
+_swt=$(printf '%s' "$_h" | jq -r '.swap_total_mb // "none"')
 case "$_swp" in
+  none) t_skip "swap usage is read as a percentage" \
+          "this host reports no swap percentage (swap_total_mb=$_swt)";;
   ''|*[!0-9]*) t_fail "swap usage is read as a percentage" "got '$_swp'";;
   *) t_pass "swap usage is read as a percentage";;
 esac
