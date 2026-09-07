@@ -37,7 +37,17 @@ assert_not_contains() { case "$1" in *"$2"*) t_fail "$3" "should NOT contain: $2
 assert_eq() { [ "$1" = "$2" ] && t_pass "$3" || t_fail "$3" "expected '$2', got '$1'"; }
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/ccwatch-tests.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT
+# The serve tests start real servers. Reaping them on exit is not optional:
+# a leaked one holds a port that a later run may pick, and then that run tests
+# the leaked binary instead of its own.
+cleanup_suite() {
+  [ -n "${SPORT:-}" ] && pkill -f "ccwatch serve --port $SPORT" 2>/dev/null
+  [ -n "${SPORT2:-}" ] && pkill -f "ccwatch serve --port $SPORT2" 2>/dev/null
+  [ -n "${SPORT3:-}" ] && pkill -f "ccwatch serve --port $SPORT3" 2>/dev/null
+  rm -rf "$WORK"
+  return 0
+}
+trap cleanup_suite EXIT
 
 for t in jq awk; do
   command -v "$t" >/dev/null 2>&1 || { printf 'ccwatch needs %s\n' "$t" >&2; exit 2; }
@@ -300,6 +310,14 @@ assert_eq "$(printf '%s' "$_un" | jq '[.unfinished[] | select(.phase=="plan")] |
 assert_eq "$(printf '%s' "$_un" | jq -r '.unfinished[] | select(.phase=="plan") | .sid')" \
   "bbbbbbbb-0000-0000-0000-000000000002" \
   "with the session id needed to resume it"
+# Which project it belongs to. The record carried the cwd from the start and
+# neither renderer showed it, so two unfinished runs from different repos were
+# indistinguishable — the feature name alone does not say where it lives.
+assert_eq "$(printf '%s' "$_un" | jq -r '.unfinished[] | select(.phase=="plan") | .project')" \
+  "ccwatch-repo" "and the project it belongs to"
+assert_contains "$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-un" CCWATCH_HOME="$WORK/ccwatch-events" \
+  NO_COLOR=1 "$CCWATCH" once 2>&1)" "ccwatch-repo" \
+  "and the table prints it next to the feature"
 # The window, and the fact that what it withholds is counted rather than dropped
 # in silence.
 _old=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-un" CCWATCH_HOME="$WORK/ccwatch-events" \
@@ -695,12 +713,30 @@ printf '\nserve\n'
 # looking at is the one that is wrong. So /api/state is asserted to be the same
 # shape the CLI produces.
 if command -v curl >/dev/null 2>&1; then
-  SPORT=$((18000 + RANDOM % 900))
+  # Find a port nothing is already listening on, and afterwards confirm the
+  # server answering is the one this test started. Without that, a stale
+  # `ccwatch serve` left behind by an earlier run answers instead — and since
+  # it predates whatever route is under test, the failure reads as a missing
+  # feature rather than as a dirty environment. Seven of them were found this
+  # way.
+  free_port() {
+    local try n=0
+    while [ "$n" -lt 25 ]; do
+      try=$((18000 + RANDOM % 1500))
+      curl -s --max-time 1 -o /dev/null "http://127.0.0.1:$try/" 2>/dev/null || { printf '%s' "$try"; return 0; }
+      n=$((n + 1))
+    done
+    return 1
+  }
+  SPORT=$(free_port) || SPORT=""
   mksess 9107 ssssssss-0000-0000-0000-000000000001 serverow /fake/repo idle cli
   mktrans ssssssss-0000-0000-0000-000000000001 20
   mkps 9107 "0:10.00" > "$WORK/ps-sv"
   ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-sv" CCWATCH_HOME="$DH" \
     CCWATCH_DEPLOY_TTL=999999 "$CCWATCH" serve --port "$SPORT" >"$WORK/serve.log" 2>&1 & )
+  sleep 2
+  assert_not_contains "$(cat "$WORK/serve.log" 2>/dev/null)" "could not bind" \
+    "the test server got the port it asked for"
   _tries=0; _w=""
   while [ "$_tries" -lt 90 ]; do
     _w=$(curl -s --max-time 3 "http://127.0.0.1:$SPORT/api/state" 2>/dev/null | jq -r '.warming' 2>/dev/null)
@@ -730,6 +766,108 @@ if command -v curl >/dev/null 2>&1; then
   # Loopback only: this exposes which repositories you work in and fragments of
   # peer messages.
   assert_contains "$(cat "$WORK/serve.log")" "127.0.0.1" "serve binds loopback, not every interface"
+  assert_eq "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$SPORT/map")" "200" \
+    "the map view is served too"
+
+  # --- the send endpoint, which is the part with teeth ---------------------
+  #
+  # Binding to loopback is NOT a security boundary for this: any page open in
+  # the browser can POST to 127.0.0.1. Without a gate, a random site could
+  # inject prompts into every agent running on the machine. Both checks are
+  # asserted because either alone is insufficient.
+  _tok=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT/map" \
+         | grep -oE 'const SEND_TOKEN = "[0-9a-f]+"' | sed 's/.*"\(.*\)"/\1/')
+  [ -n "$_tok" ] && t_pass "the page is served with a per-run send token" \
+    || t_fail "the page is served with a per-run send token" "no token found in the served HTML"
+  assert_eq "${#_tok}" "64" "and it is 32 bytes of entropy, not a guessable constant"
+
+  _notok=$(curl -s --max-time 10 -X POST "http://127.0.0.1:$SPORT/api/send" \
+           -H 'Content-Type: application/json' -d '{"target":"x","message":"y"}')
+  assert_contains "$_notok" "bad or missing token" "a POST with no token is refused"
+
+  _badorigin=$(curl -s --max-time 10 -X POST "http://127.0.0.1:$SPORT/api/send" \
+               -H "X-CCWatch-Token: $_tok" -H "Origin: https://evil.example" \
+               -H 'Content-Type: application/json' -d '{"target":"x","message":"y"}')
+  assert_contains "$_badorigin" "unexpected Origin" \
+    "a POST from another origin is refused even WITH the token"
+
+  # A token that is right and an origin that is ours gets through the gate and
+  # is then judged on the target, which is the correct order of checks.
+  _through=$(curl -s --max-time 20 -X POST "http://127.0.0.1:$SPORT/api/send" \
+             -H "X-CCWatch-Token: $_tok" -H "Origin: http://127.0.0.1:$SPORT" \
+             -H 'Content-Type: application/json' \
+             -d '{"target":"definitely-not-a-session","message":"y"}')
+  assert_contains "$_through" "no live session matches" \
+    "a correctly-authorised POST reaches the send logic"
+  assert_contains "$_through" "failed" "and an unknown target is reported as a failure"
+
+  # Size and shape limits, so the endpoint cannot be used to wedge the server.
+  _empty=$(curl -s --max-time 10 -X POST "http://127.0.0.1:$SPORT/api/send" \
+           -H "X-CCWatch-Token: $_tok" -H 'Content-Type: application/json' -d '{"target":"x"}')
+  assert_contains "$_empty" "bad request" "a malformed body is rejected"
+  _long=$(python3 -c "import json;print(json.dumps({'target':'x','message':'z'*5000}))" \
+          | curl -s --max-time 10 -X POST "http://127.0.0.1:$SPORT/api/send" \
+            -H "X-CCWatch-Token: $_tok" -H 'Content-Type: application/json' --data-binary @-)
+  assert_contains "$_long" "too long" "an oversized message is rejected"
+
+  pkill -f "ccwatch serve --port $SPORT" 2>/dev/null || true
+
+  # --- and the read-only mode, for anyone who wants no endpoint at all -----
+  SPORT2=$(free_port) || SPORT2=""
+  ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-sv" CCWATCH_HOME="$DH" \
+    CCWATCH_DEPLOY_TTL=999999 "$CCWATCH" serve --port "$SPORT2" --read-only \
+    >"$WORK/serve-ro.log" 2>&1 & )
+  sleep 2
+  assert_not_contains "$(cat "$WORK/serve-ro.log" 2>/dev/null)" "could not bind" \
+    "the read-only test server got the port it asked for"
+  _t2=0
+  while [ "$_t2" -lt 30 ]; do
+    curl -s --max-time 2 -o /dev/null "http://127.0.0.1:$SPORT2/" 2>/dev/null && break
+    sleep 1; _t2=$((_t2 + 1))
+  done
+  _ro=$(curl -s --max-time 10 -X POST "http://127.0.0.1:$SPORT2/api/send" \
+        -H 'Content-Type: application/json' -d '{"target":"x","message":"y"}')
+  assert_contains "$_ro" "read-only" "--read-only refuses the send endpoint outright"
+  _rotok=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT2/" \
+           | grep -oE 'const SEND_TOKEN = "[0-9a-f]+"' | sed 's/.*"\(.*\)"/\1/')
+  assert_eq "$_rotok" "" "and serves no token, so the page shows itself as read-only"
+  pkill -f "ccwatch serve --port $SPORT2" 2>/dev/null || true
+
+  # Killing the wrapper must take the HTTP server with it. It did not: python
+  # ran in the foreground of the shell, so Ctrl-C reached it but any other kill
+  # orphaned a server holding a port with no visible owner. Two were found
+  # still running after a suite, and one then answered a request this very
+  # suite believed it was making to its own server — which is how the leak was
+  # noticed at all.
+  SPORT3=$(free_port) || SPORT3=""
+  if [ -n "$SPORT3" ]; then
+    ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-sv" CCWATCH_HOME="$DH" \
+      CCWATCH_DEPLOY_TTL=999999 "$CCWATCH" serve --port "$SPORT3" >"$WORK/serve-l.log" 2>&1 & )
+    _l=0
+    while [ "$_l" -lt 25 ]; do
+      curl -s --max-time 2 -o /dev/null "http://127.0.0.1:$SPORT3/" 2>/dev/null && break
+      sleep 1; _l=$((_l + 1))
+    done
+    assert_eq "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$SPORT3/")" "200" \
+      "a third server starts and answers"
+    pkill -f "ccwatch serve --port $SPORT3" 2>/dev/null || true
+    sleep 3
+    # `curl -w %{http_code}` prints 000 on a refused connection AND exits
+    # non-zero, so appending `|| echo gone` produced "000gone" and the
+    # comparison never matched. Only the code is captured, and the branch is a
+    # plain if — the `a || b && pass || fail` form runs both branches when the
+    # first test fails.
+    _after=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+             "http://127.0.0.1:$SPORT3/" 2>/dev/null) || _after="000"
+    if [ "$_after" = "000" ]; then
+      t_pass "killing the wrapper takes the HTTP server with it, leaving no orphan"
+    else
+      t_fail "killing the wrapper takes the HTTP server with it, leaving no orphan" \
+             "something is still listening on $SPORT3 (HTTP $_after)"
+    fi
+  else
+    t_skip "killing the wrapper leaves no orphan" "no free port"
+  fi
   pkill -f "ccwatch serve --port $SPORT" 2>/dev/null || true
   rm -f "$FH/sessions/9107.json"
 else

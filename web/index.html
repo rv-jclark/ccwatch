@@ -63,11 +63,34 @@
                   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   footer { padding:0 1.25rem 2rem; color:var(--dim); font-size:12px; }
   .stale { color:var(--warn); }
+  /* Replying from the page. Kept visually quiet until you open it: this is a
+     monitoring view first, and a row that shouts an input box at you on every
+     repaint is a row you stop reading. */
+  .act { background:none; border:1px solid var(--line); color:var(--dim);
+         font:inherit; font-size:12px; padding:0 .45rem; border-radius:3px;
+         cursor:pointer; }
+  .act:hover { color:var(--ink); border-color:var(--dim); }
+  .act.blocked { color:var(--block); border-color:var(--block); }
+  .replyrow td { padding-top:0; }
+  .reply { display:flex; gap:.5rem; align-items:center; }
+  .reply input { flex:1; background:var(--bg); border:1px solid var(--line);
+                 color:var(--ink); font:inherit; padding:.35rem .5rem; border-radius:3px; }
+  .reply input:focus { outline:none; border-color:var(--info); }
+  .reply button { background:var(--info); border:0; color:#fff; font:inherit;
+                  padding:.35rem .8rem; border-radius:3px; cursor:pointer; }
+  .reply button:disabled { opacity:.5; cursor:default; }
+  .outcome { font-size:12px; }
+  .outcome.delivered { color:var(--ok); }
+  .outcome.queued { color:var(--warn); }
+  .outcome.failed { color:var(--bad); }
+  nav a { color:var(--dim); text-decoration:none; margin-right:.75rem; font-size:12px; }
+  nav a.on { color:var(--ink); font-weight:600; }
 </style>
 </head>
 <body>
 <header>
   <h1>ccwatch <span id="counts"></span></h1>
+  <nav><a href="/" class="on">table</a><a href="/map">map</a></nav>
   <div class="gauges" id="gauges"></div>
 </header>
 <main>
@@ -79,6 +102,11 @@
 <footer id="foot"></footer>
 <script>
 const $ = id => document.getElementById(id);
+// Injected by the server into the page it serves. A page that cannot read this
+// HTML cannot obtain it, which is what stops a drive-by POST from another site
+// injecting prompts into your agents.
+const SEND_TOKEN = "__CCWATCH_SEND_TOKEN__";
+const CAN_SEND = SEND_TOKEN && !SEND_TOKEN.startsWith("__");
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const dur = s => { if (s == null) return "-"; s = Math.max(0, s);
   return s < 60 ? Math.floor(s)+"s" : s < 3600 ? Math.floor(s/60)+"m"
@@ -100,7 +128,7 @@ function gauges(u) {
 function sessions(rows) {
   if (!rows.length) return '<p class="empty">No live sessions. After a reboot, run <b>ccwatch resume</b>.</p>';
   let h = '<table><thead><tr><th>Name</th><th>Project</th><th>Status</th><th class="num">Age</th>'
-        + '<th class="num">Ctx</th><th>Last</th></tr></thead><tbody>';
+        + '<th class="num">Ctx</th><th>Last</th><th></th></tr></thead><tbody>';
   for (const r of rows) {
     const sev = Math.max(r.sev, r.psev || 0);
     const last = r.waited != null ? `${r.note} ${dur(r.waited)}`
@@ -110,15 +138,21 @@ function sessions(rows) {
               ? Math.floor(r.context.used_percentage) + "%" : "";
     const ctxColour = !ctx ? "" : (parseInt(ctx) >= 80 ? "color:var(--bad)"
                                  : parseInt(ctx) >= 60 ? "color:var(--warn)" : "");
+    // The reply affordance is emphasised only on a row that is actually
+    // blocked on you — that is the row you came to this page for.
+    const act = CAN_SEND
+      ? `<button class="act${r.sev === 4 ? " blocked" : ""}" data-sid="${esc(r.sid)}"`
+        + ` data-name="${esc(r.name)}">${r.sev === 4 ? "reply" : "say"}</button>`
+      : "";
     h += `<tr><td class="name">${esc(r.name)}</td><td class="dim">${esc(r.project)}</td>`
        + `<td class="sev${r.sev}"><span class="badge">${esc(r.token)}</span></td>`
        + `<td class="num dim">${dur(r.age)}</td>`
        + `<td class="num" style="${ctxColour}">${ctx}</td>`
-       + `<td class="dim">${esc(last)}</td></tr>`;
+       + `<td class="dim">${esc(last)}</td><td>${act}</td></tr>`;
     if (r.pipeline) {
       const p = r.pipeline, st = p.crashed ? "CRASHED" : p.status;
       const cls = (p.crashed || /interrupted|failed|needs_input/.test(p.status)) ? "crash" : "";
-      h += `<tr class="sub"><td></td><td colspan="5">&#8627; ${esc(p.feature)} `
+      h += `<tr class="sub"><td></td><td colspan="6">&#8627; ${esc(p.feature)} `
          + `<span class="${cls}">${esc(p.phase)}/${esc(st)}</span> `
          + `${esc(p.model||"")} $${(p.cost||0).toFixed(2)}</td></tr>`;
     }
@@ -132,7 +166,10 @@ function unfinished(rows, older) {
   let h = "<table><tbody>";
   for (const r of rows)
     h += `<tr><td class="sev3">${esc(r.phase)}/${esc(r.status)}</td>`
-       + `<td class="name">${esc(r.feature)}</td><td class="dim">${esc(r.model||"")}</td>`
+       // The project, which the first version omitted entirely — so two runs
+       // from different repos were indistinguishable.
+       + `<td class="name">${esc(r.project||"")}</td>`
+       + `<td class="dim">${esc(r.feature)}</td><td class="dim">${esc(r.model||"")}</td>`
        + `<td class="num dim">$${(r.cost||0).toFixed(2)}</td>`
        + `<td class="dim">${r.age!=null?dur(r.age)+" ago":""}</td>`
        + `<td class="dim">claude --resume ${esc((r.sid||"").slice(0,8))}</td></tr>`;
@@ -175,6 +212,89 @@ function peers(p) {
   return h;
 }
 
+// An open reply box must survive the 3-second repaint, or you could never
+// finish typing into it. So the row being replied to is tracked and re-opened
+// after each render.
+let replyingTo = null, lastOutcome = null;
+
+function openReply(sid, name) {
+  replyingTo = {sid, name};
+  render_reply();
+}
+
+function render_reply() {
+  document.querySelectorAll(".replyrow").forEach(el => el.remove());
+  if (!replyingTo) return;
+  const btn = document.querySelector(`.act[data-sid="${replyingTo.sid}"]`);
+  if (!btn) return;   // that session is gone; drop the box rather than orphan it
+  const tr = btn.closest("tr");
+  const row = document.createElement("tr");
+  row.className = "replyrow";
+  row.innerHTML = `<td></td><td colspan="6"><div class="reply">`
+    + `<input id="replyText" placeholder="message to ${esc(replyingTo.name)}…" autocomplete="off">`
+    + `<button id="replySend">send</button>`
+    + `<button class="act" id="replyCancel">cancel</button>`
+    + `<span class="outcome" id="replyOut"></span></div></td>`;
+  tr.after(row);
+  const input = row.querySelector("#replyText");
+  if (lastOutcome) {
+    const o = row.querySelector("#replyOut");
+    o.className = "outcome " + lastOutcome.state;
+    o.textContent = lastOutcome.text;
+  }
+  input.value = (replyingTo.draft || "");
+  input.focus();
+  input.addEventListener("input", () => { replyingTo.draft = input.value; });
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter") doSend();
+    if (e.key === "Escape") { replyingTo = null; lastOutcome = null; render_reply(); }
+  });
+  row.querySelector("#replySend").addEventListener("click", doSend);
+  row.querySelector("#replyCancel").addEventListener("click",
+    () => { replyingTo = null; lastOutcome = null; render_reply(); });
+}
+
+async function doSend() {
+  const row = document.querySelector(".replyrow");
+  if (!row || !replyingTo) return;
+  const input = row.querySelector("#replyText");
+  const btn = row.querySelector("#replySend");
+  const out = row.querySelector("#replyOut");
+  const message = input.value.trim();
+  if (!message) return;
+  btn.disabled = true;
+  out.className = "outcome";
+  // Named, because the wait is the delivery check: ccwatch watches the
+  // receiver's transcript rather than reporting success on a socket write.
+  out.textContent = "sending, then checking it arrived…";
+  try {
+    const res = await fetch("/api/send", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-CCWatch-Token": SEND_TOKEN},
+      body: JSON.stringify({target: replyingTo.sid, message}),
+    });
+    const j = await res.json();
+    lastOutcome = {state: j.state || "failed",
+                   text: j.state === "delivered" ? "delivered — it has the message"
+                       : j.state === "queued" ? "queued — it is mid-turn, will read it next turn"
+                       : (j.error || j.detail || "failed")};
+    if (j.state === "delivered" || j.state === "queued") {
+      replyingTo.draft = "";
+      input.value = "";
+    }
+  } catch (e) {
+    lastOutcome = {state: "failed", text: e.message};
+  }
+  btn.disabled = false;
+  out.className = "outcome " + lastOutcome.state;
+  out.textContent = lastOutcome.text;
+}
+
+document.addEventListener("click", e => {
+  const b = e.target.closest(".act[data-sid]");
+  if (b) { lastOutcome = null; openReply(b.dataset.sid, b.dataset.name); }
+});
+
 async function tick() {
   try {
     const s = await (await fetch("/api/state", {cache:"no-store"})).json();
@@ -203,7 +323,9 @@ async function tick() {
     if (a.deploys != null) bits.push(`deploys ${dur(a.deploys)} ago`);
     if (a.peers != null) bits.push(`peers ${dur(a.peers)} ago`);
     if (s.error) bits.push(`<span style="color:var(--bad)">${esc(s.error)}</span>`);
+    if (!CAN_SEND) bits.push('<span class="dim">read-only</span>');
     $("foot").innerHTML = bits.join(" &middot; ");
+    render_reply();
   } catch (e) {
     // A dashboard that silently stops updating is the failure this whole tool
     // exists to prevent, so a dead feed is stated in the page.

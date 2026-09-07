@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ccwatch · map</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%234ec9a5'/%3E%3C/svg%3E">
+<style>
+  /* The same palette and the same words as the table view and the terminal.
+     A second visualisation that invents its own vocabulary for the same states
+     is a second thing to learn, and two things to keep in sync. */
+  :root {
+    --bg:#0f1115; --panel:#161a21; --line:#252b36; --ink:#e6e9ef; --dim:#8b93a3;
+    --ok:#4ec9a5; --warn:#e3b341; --bad:#f07171; --block:#c586e8; --info:#5fa8e8;
+    --ground:#12161d;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#eef1f5; --panel:#fff; --line:#dfe3ea; --ink:#1a1d23; --dim:#6b7280;
+            --ok:#0f8a63; --warn:#8a5d00; --bad:#c0392b; --block:#7c3aed; --info:#1f6fb2;
+            --ground:#f6f8fb; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  header { display:flex; align-items:baseline; gap:1rem; flex-wrap:wrap;
+           padding:.9rem 1.1rem; border-bottom:1px solid var(--line); }
+  h1 { font-size:15px; margin:0; }
+  h1 span { color:var(--dim); font-weight:400; }
+  nav a { color:var(--dim); text-decoration:none; margin-right:.75rem; font-size:12px; }
+  nav a.on { color:var(--ink); font-weight:600; }
+  .gauges { display:flex; gap:1.1rem; margin-left:auto; align-items:baseline; flex-wrap:wrap; }
+  .g-label { color:var(--dim); } .g-val { font-weight:600; }
+  .g-reset { color:var(--dim); font-size:11px; }
+  .stale { color:var(--warn); }
+
+  /* The map itself. Territories are laid out in a normal responsive grid and
+     the message lines are drawn on an SVG layer above them, positioned from
+     measured element geometry. A force-directed graph was the other option and
+     is worse here: with a dozen nodes it moves every time you look at it, and
+     "did that agent move or did I misremember" is not a question a monitoring
+     view should raise. */
+  #wrap { position:relative; padding:1.1rem; }
+  #map { display:grid; gap:1.1rem; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); }
+  #wires { position:absolute; inset:0; pointer-events:none; overflow:visible; z-index:5; }
+  .territory { z-index:1; }
+
+  .territory { position:relative; background:var(--ground); border:1px solid var(--line);
+               border-radius:10px; padding:.7rem .8rem .8rem; min-height:150px; }
+  /* A territory borrows the colour of its most urgent inhabitant, so the thing
+     that needs you is findable without reading any labels. */
+  .territory.t4 { border-color:var(--block); box-shadow:0 0 0 1px var(--block) inset; }
+  .territory.t3 { border-color:var(--bad); }
+  .territory.t2 { border-color:#2b6b57; }
+  .thead { display:flex; align-items:baseline; gap:.5rem; margin-bottom:.55rem; }
+  .tname { font-weight:600; }
+  .tcount { color:var(--dim); font-size:11px; }
+  .tbadges { margin-left:auto; display:flex; gap:.3rem; flex-wrap:wrap; justify-content:flex-end; }
+  .badge { font-size:10px; padding:0 .35rem; border-radius:3px; border:1px solid currentColor;
+           white-space:nowrap; }
+  .b-run { color:var(--warn); } .b-ok { color:var(--ok); } .b-bad { color:var(--bad); }
+
+  .folk { display:flex; flex-wrap:wrap; gap:.45rem; }
+  .agent { position:relative; width:82px; padding:.3rem 0 .1rem; border-radius:6px;
+           text-align:center; cursor:default; }
+  .agent.clickable { cursor:pointer; }
+  .agent.clickable:hover { background:rgba(255,255,255,.04); }
+  .figure { width:100%; height:44px; display:block; }
+  .alabel { font-size:10px; color:var(--dim); overflow:hidden; text-overflow:ellipsis;
+            white-space:nowrap; }
+  .agent.sev4 .alabel { color:var(--block); font-weight:600; }
+  .agent.sev3 .alabel { color:var(--bad); }
+  .agent.sev2 .alabel { color:var(--ink); }
+
+  /* Motion is meaning here, not decoration: it is only ever applied to a state
+     that is actually changing, so a still figure is a still session. */
+  @keyframes bob   { 0%,100%{transform:translateY(0)}   50%{transform:translateY(-2.5px)} }
+  @keyframes wave  { 0%,100%{transform:rotate(-16deg)}  50%{transform:rotate(16deg)} }
+  @keyframes throb { 0%,100%{opacity:.35}               50%{opacity:1} }
+  @keyframes tilt  { 0%,100%{transform:rotate(-2deg)}   50%{transform:rotate(2deg)} }
+  .busy .body { animation:bob .9s ease-in-out infinite; }
+  .waiting .arm { animation:wave .7s ease-in-out infinite; transform-origin:8px 2px; }
+  .waiting .bubble { animation:throb 1.1s ease-in-out infinite; }
+  .hung .body { animation:tilt 3.4s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) {
+    .busy .body, .waiting .arm, .waiting .bubble, .hung .body { animation:none; }
+  }
+
+  /* Wreckage: an unfinished run left lying in the territory it belongs to. */
+  .wreck { margin-top:.55rem; border-top:1px dashed var(--line); padding-top:.45rem;
+           display:flex; flex-direction:column; gap:.25rem; }
+  .wreck div { font-size:11px; color:var(--bad); display:flex; gap:.4rem; }
+  .wreck .feat { color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .wreck .cost { margin-left:auto; color:var(--dim); }
+
+  .legend { display:flex; gap:1rem; flex-wrap:wrap; padding:.2rem 1.1rem 1.4rem;
+            color:var(--dim); font-size:11px; }
+  .legend b { font-weight:600; }
+  footer { padding:0 1.1rem 2rem; color:var(--dim); font-size:11px; }
+
+  /* Reply, same flow and same three outcomes as the table view. */
+  #reply { position:fixed; left:50%; bottom:1.2rem; transform:translateX(-50%);
+           background:var(--panel); border:1px solid var(--line); border-radius:8px;
+           padding:.6rem .7rem; display:none; gap:.5rem; align-items:center;
+           box-shadow:0 8px 30px rgba(0,0,0,.45); z-index:10; width:min(680px,92vw); }
+  #reply.on { display:flex; }
+  #reply input { flex:1; background:var(--bg); border:1px solid var(--line); color:var(--ink);
+                 font:inherit; padding:.4rem .55rem; border-radius:4px; }
+  #reply input:focus { outline:none; border-color:var(--info); }
+  #reply button { background:var(--info); border:0; color:#fff; font:inherit;
+                  padding:.4rem .85rem; border-radius:4px; cursor:pointer; }
+  #reply button.ghost { background:none; border:1px solid var(--line); color:var(--dim); }
+  #reply button:disabled { opacity:.5; cursor:default; }
+  #replyOut { font-size:11px; }
+  #replyOut.delivered { color:var(--ok); } #replyOut.queued { color:var(--warn); }
+  #replyOut.failed { color:var(--bad); }
+  .empty { color:var(--dim); padding:1rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ccwatch <span id="counts"></span></h1>
+  <nav><a href="/">table</a><a href="/map" class="on">map</a></nav>
+  <div class="gauges" id="gauges"></div>
+</header>
+<div id="wrap">
+  <svg id="wires"></svg>
+  <div id="map"></div>
+</div>
+<div class="legend" id="legend"></div>
+<div id="reply">
+  <span id="replyWho" class="dim"></span>
+  <input id="replyText" placeholder="message…" autocomplete="off">
+  <button id="replySend">send</button>
+  <button class="ghost" id="replyCancel">cancel</button>
+  <span id="replyOut"></span>
+</div>
+<footer id="foot"></footer>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const dur = s => { if (s == null) return "-"; s = Math.max(0, s);
+  return s < 60 ? Math.floor(s)+"s" : s < 3600 ? Math.floor(s/60)+"m"
+       : s < 86400 ? Math.floor(s/3600)+"h" : Math.floor(s/86400)+"d"; };
+const SEND_TOKEN = "__CCWATCH_SEND_TOKEN__";
+const CAN_SEND = SEND_TOKEN && !SEND_TOKEN.startsWith("__");
+
+// One mapping from status to appearance, so the figure, the label colour and
+// the territory border can never disagree about how bad something is.
+const KIND = {
+  waiting:          {cls:"waiting", sev:4, colour:"var(--block)"},
+  "HUNG?":          {cls:"hung",    sev:3, colour:"var(--bad)"},
+  "HUNG!!":         {cls:"hung",    sev:3, colour:"var(--bad)"},
+  "SDK STALE?":     {cls:"hung",    sev:3, colour:"var(--bad)"},
+  "NO TRANSCRIPT":  {cls:"hung",    sev:3, colour:"var(--bad)"},
+  busy:             {cls:"busy",    sev:2, colour:"var(--ok)"},
+  sdk:              {cls:"busy",    sev:2, colour:"var(--ok)"},
+  "sdk-ts":         {cls:"quiet",   sev:1, colour:"var(--info)"},
+  shell:            {cls:"quiet",   sev:1, colour:"var(--info)"},
+  unknown:          {cls:"quiet",   sev:1, colour:"var(--dim)"},
+  idle:             {cls:"idle",    sev:0, colour:"var(--dim)"},
+};
+const kindOf = r => KIND[r.token] || {cls:"quiet", sev:r.sev, colour:"var(--dim)"};
+
+// A little standing figure. Drawn as SVG rather than an emoji so the colour
+// tracks the status and the parts can be animated independently — the raised
+// arm on a session that is blocked on you is the whole point of this view.
+function figure(r) {
+  const k = kindOf(r);
+  const c = k.colour;
+  const ctx = r.context && r.context.used_percentage != null
+            ? Math.min(100, Math.max(0, r.context.used_percentage)) : null;
+  // Context fill is drawn as a level inside the body: a session close to
+  // compacting is worth seeing before it happens.
+  const fillH = ctx == null ? 0 : (14 * ctx / 100);
+  return `<svg class="figure" viewBox="0 0 40 44" aria-hidden="true">
+    <g class="body">
+      ${k.cls === "waiting" ? `<g class="bubble">
+        <rect x="24" y="1" width="14" height="11" rx="3" fill="${c}" opacity=".22"/>
+        <text x="31" y="9.5" text-anchor="middle" font-size="8" fill="${c}">!</text></g>` : ""}
+      ${k.cls === "idle" ? `<text x="30" y="9" font-size="7" fill="var(--dim)">z</text>` : ""}
+      <circle cx="20" cy="12" r="5.4" fill="none" stroke="${c}" stroke-width="1.6"/>
+      ${k.cls === "hung" ? `<text x="20" y="15" text-anchor="middle" font-size="7" fill="${c}">?</text>` : ""}
+      <rect x="14.6" y="19" width="10.8" height="15" rx="4"
+            fill="${k.cls === "quiet" ? "none" : c}" fill-opacity="${k.cls === "quiet" ? 0 : .16}"
+            stroke="${c}" stroke-width="1.6"/>
+      ${ctx != null ? `<rect x="15.6" y="${20 + (14 - fillH)}" width="8.8" height="${fillH}"
+            rx="2" fill="${ctx >= 80 ? "var(--bad)" : ctx >= 60 ? "var(--warn)" : c}"
+            opacity=".55"/>` : ""}
+      <g class="arm"><line x1="25.4" y1="22" x2="${k.cls === "waiting" ? 31 : 29}"
+            y2="${k.cls === "waiting" ? 13 : 27}" stroke="${c}" stroke-width="1.6"
+            stroke-linecap="round"/></g>
+      <line x1="14.6" y1="22" x2="10.5" y2="27" stroke="${c}" stroke-width="1.6" stroke-linecap="round"/>
+      <line x1="17.5" y1="34" x2="16" y2="42" stroke="${c}" stroke-width="1.6" stroke-linecap="round"/>
+      <line x1="22.5" y1="34" x2="24" y2="42" stroke="${c}" stroke-width="1.6" stroke-linecap="round"/>
+    </g></svg>`;
+}
+
+// Within a territory the project prefix is redundant and eats the width that
+// would otherwise show what distinguishes one agent from another.
+function shortName(name, project) {
+  const parts = String(project || "").split(":").filter(Boolean)
+                .sort((a, b) => b.length - a.length);
+  for (const p of parts)
+    if (name.startsWith(p + "-")) return name.slice(p.length + 1);
+  return name;
+}
+
+function agentCard(r) {
+  const k = kindOf(r);
+  const bits = [r.token];
+  if (r.waited != null) bits.push(`${r.note} ${dur(r.waited)}`);
+  else if (r.note) bits.push(r.note);
+  if (r.pipeline) bits.push(`${r.pipeline.phase}/${r.pipeline.crashed ? "CRASHED" : r.pipeline.status}`);
+  bits.push(`age ${dur(r.age)}`);
+  if (r.context && r.context.used_percentage != null)
+    bits.push(`ctx ${Math.floor(r.context.used_percentage)}%`);
+  return `<div class="agent sev${k.sev} ${k.cls}${CAN_SEND ? " clickable" : ""}"
+    data-sid="${esc(r.sid)}" data-name="${esc(r.name)}" title="${esc(bits.join(" · "))}">
+    ${figure(r)}<div class="alabel">${esc(shortName(r.name, r.project))}</div></div>`;
+}
+
+function territory(name, rows, unfinished, deploys) {
+  const worst = Math.max(0, ...rows.map(r => Math.max(r.sev, r.psev || 0)),
+                         ...(unfinished.length ? [3] : []));
+  const badges = deploys.map(d => {
+    const state = d.live ? "RUNNING" : String(d.conclusion || "?").toUpperCase();
+    const cls = d.live ? "b-run" : state === "SUCCESS" ? "b-ok" : "b-bad";
+    return `<span class="badge ${cls}" title="${esc(d.workflowName)} · ${esc(d.headBranch)}">`
+         + `${esc(state)}</span>`;
+  }).join("");
+  const wreck = unfinished.length ? `<div class="wreck">` + unfinished.map(u =>
+      `<div><span>${esc(u.phase)}/${esc(u.status)}</span>`
+    + `<span class="feat">${esc(u.feature)}</span>`
+    + `<span class="cost">$${(u.cost||0).toFixed(2)} · ${u.age!=null?dur(u.age)+" ago":""}</span></div>`
+    ).join("") + `</div>` : "";
+  return `<section class="territory t${worst}" data-project="${esc(name)}">
+    <div class="thead"><span class="tname">${esc(name)}</span>
+      <span class="tcount">${rows.length} agent${rows.length===1?"":"s"}</span>
+      <div class="tbadges">${badges}</div></div>
+    <div class="folk">${rows.map(agentCard).join("")}</div>
+    ${wreck}</section>`;
+}
+
+// Message lines are drawn between the two figures involved, wherever they are —
+// including across territories, which is the case worth seeing.
+function wires(peers) {
+  const svg = $("wires");
+  svg.innerHTML = "";
+  if (!peers || !peers.edges) return;
+  const wrap = $("wrap").getBoundingClientRect();
+  const byName = {};
+  document.querySelectorAll(".agent[data-name]").forEach(el => { byName[el.dataset.name] = el; });
+  const centre = el => {
+    const b = el.getBoundingClientRect();
+    return {x: b.left - wrap.left + b.width/2, y: b.top - wrap.top + 22};
+  };
+  let drawn = 0;
+  const defs = `<defs><marker id="ah" viewBox="0 0 8 8" refX="6" refY="4"
+      markerWidth="5" markerHeight="5" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="var(--info)"/></marker></defs>`;
+  let out = defs;
+  for (const e of peers.edges) {
+    const a = byName[e.from], b = byName[e.to];
+    // Only edges where BOTH ends are on the map. A line to a session that has
+    // exited would be a line to nowhere, and the peers panel in the table view
+    // already lists those.
+    if (!a || !b || a === b) continue;
+    const p = centre(a), q = centre(b);
+    // Bowed, so A→B and B→A are two visible lines rather than one overdrawn.
+    const mx = (p.x + q.x)/2, my = (p.y + q.y)/2;
+    const dx = q.x - p.x, dy = q.y - p.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const bow = Math.min(48, len * 0.18);
+    const cx = mx - (dy/len) * bow, cy = my + (dx/len) * bow;
+    const w = Math.min(3.2, 0.7 + Math.log2(1 + e.count) * 0.7);
+    out += `<path d="M${p.x},${p.y} Q${cx},${cy} ${q.x},${q.y}" fill="none"
+      stroke="var(--info)" stroke-width="${w}" opacity=".42" marker-end="url(#ah)"/>`;
+    // Only worth labelling when it is more than one message — a "1" on every
+    // line is clutter that buries the edge that actually has traffic. Placed
+    // near the SENDER rather than at the apex: the apex lands in the middle of
+    // whatever the line crosses, which was reliably a territory's own text.
+    if (e.count > 1) {
+      const t = 0.22;   // quadratic Bézier at t, close to the source
+      const lx = (1-t)*(1-t)*p.x + 2*(1-t)*t*cx + t*t*q.x;
+      const ly = (1-t)*(1-t)*p.y + 2*(1-t)*t*cy + t*t*q.y;
+      out += `<circle cx="${lx}" cy="${ly}" r="8" fill="var(--ground)"
+        stroke="var(--info)" stroke-opacity=".5" stroke-width="1"/>`;
+      out += `<text x="${lx}" y="${ly + 3}" font-size="9" fill="var(--info)"
+        text-anchor="middle">${e.count}</text>`;
+    }
+    drawn++;
+  }
+  svg.innerHTML = out;
+  svg.setAttribute("width", wrap.width);
+  svg.setAttribute("height", $("map").getBoundingClientRect().height);
+  return drawn;
+}
+
+function gauges(u) {
+  if (!u) return '<span class="dim">usage not reporting — run <b>ccwatch install-statusline</b></span>';
+  const now = Date.now()/1000;
+  const band = p => p >= 90 ? "var(--bad)" : p >= 70 ? "var(--warn)" : "var(--ink)";
+  const one = (nm, x) => !x ? "" :
+    `<span><span class="g-label">${nm}</span> <span class="g-val" style="color:${band(x.used_percentage)}">`
+    + `${Math.floor(x.used_percentage)}%</span>`
+    + (x.resets_at ? ` <span class="g-reset">resets ${dur(x.resets_at-now)}</span>` : "") + `</span>`;
+  return [one("5h",u.five_hour), one("7d",u.seven_day), one("7d opus",u.seven_day_opus)].join("")
+    + (u.age > 60 ? ` <span class="stale">[${dur(u.age)} old]</span>` : "");
+}
+
+// ---- reply -----------------------------------------------------------------
+let target = null;
+function openReply(sid, name) {
+  if (!CAN_SEND) return;
+  target = {sid, name};
+  $("replyWho").textContent = "to " + name;
+  $("replyOut").textContent = ""; $("replyOut").className = "";
+  $("reply").classList.add("on");
+  $("replyText").focus();
+}
+function closeReply() { target = null; $("reply").classList.remove("on"); $("replyText").value = ""; }
+async function doSend() {
+  if (!target) return;
+  const msg = $("replyText").value.trim();
+  if (!msg) return;
+  const btn = $("replySend"), out = $("replyOut");
+  btn.disabled = true; out.className = "";
+  out.textContent = "sending, then checking it arrived…";
+  try {
+    const res = await fetch("/api/send", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-CCWatch-Token": SEND_TOKEN},
+      body: JSON.stringify({target: target.sid, message: msg}),
+    });
+    const j = await res.json();
+    out.className = j.state || "failed";
+    out.textContent = j.state === "delivered" ? "delivered — it has the message"
+                    : j.state === "queued" ? "queued — mid-turn, it will read this next turn"
+                    : (j.error || j.detail || "failed");
+    if (j.state === "delivered" || j.state === "queued") $("replyText").value = "";
+  } catch (e) { out.className = "failed"; out.textContent = e.message; }
+  btn.disabled = false;
+}
+$("replySend").addEventListener("click", doSend);
+$("replyCancel").addEventListener("click", closeReply);
+$("replyText").addEventListener("keydown", e => {
+  if (e.key === "Enter") doSend();
+  if (e.key === "Escape") closeReply();
+});
+document.addEventListener("click", e => {
+  const a = e.target.closest(".agent[data-sid]");
+  if (a) openReply(a.dataset.sid, a.dataset.name);
+});
+
+// ---- draw ------------------------------------------------------------------
+async function tick() {
+  try {
+    const s = await (await fetch("/api/state", {cache:"no-store"})).json();
+    if (s.warming) { $("foot").textContent = "taking the first snapshot…"; return; }
+
+    // Grouped by project. Territories that need you sort first, so the map does
+    // not reorder itself into a different arrangement each time you glance at
+    // it for any reason other than something actually changing.
+    const groups = {};
+    for (const r of (s.sessions || [])) {
+      (groups[r.project] = groups[r.project] || {rows:[], unfinished:[], deploys:[]}).rows.push(r);
+    }
+    for (const u of (s.unfinished || [])) {
+      (groups[u.project] = groups[u.project] || {rows:[], unfinished:[], deploys:[]}).unfinished.push(u);
+    }
+    // Deploys are keyed by repo, which is not the project name, so they are
+    // matched on the repo's last path segment.
+    const runs = (s.deploys && s.deploys.runs) || [];
+    for (const d of runs) {
+      const leaf = String(d.repo || "").split("/").pop();
+      for (const name of Object.keys(groups))
+        if (name === leaf || name.startsWith(leaf + ":")) groups[name].deploys.push(d);
+    }
+
+    const order = Object.keys(groups).sort((a, b) => {
+      const w = g => Math.max(0, ...groups[g].rows.map(r => Math.max(r.sev, r.psev||0)),
+                              ...(groups[g].unfinished.length ? [3] : []));
+      return (w(b) - w(a)) || a.localeCompare(b);
+    });
+
+    $("map").innerHTML = order.length
+      ? order.map(n => territory(n, groups[n].rows, groups[n].unfinished, groups[n].deploys)).join("")
+      : '<p class="empty">No live sessions. After a reboot, run <b>ccwatch resume</b>.</p>';
+    $("gauges").innerHTML = gauges(s.usage);
+    const drawn = wires(s.peers) || 0;
+
+    const w = (s.sessions||[]).filter(r => r.sev === 4).length;
+    const q = (s.sessions||[]).filter(r => r.sev === 3).length;
+    $("counts").innerHTML = `<span>${(s.sessions||[]).length} live in ${order.length} project`
+      + `${order.length===1?"":"s"}`
+      + (w ? ` &middot; <b style="color:var(--block)">${w} waiting on you</b>` : "")
+      + (q ? ` &middot; <b style="color:var(--bad)">${q} suspect</b>` : "") + `</span>`;
+    document.title = (w ? `(${w}) ` : "") + "ccwatch · map";
+
+    $("legend").innerHTML = [
+      `<span><b style="color:var(--block)">raised arm</b> blocked on you</span>`,
+      `<span><b style="color:var(--bad)">tilted, ?</b> says busy but has gone quiet</span>`,
+      `<span><b style="color:var(--ok)">bobbing</b> working</span>`,
+      `<span><b style="color:var(--info)">outline</b> alive, nothing to corroborate it</span>`,
+      `<span><b style="color:var(--dim)">z</b> idle</span>`,
+      `<span>fill level inside the body = context used</span>`,
+      CAN_SEND ? `<span>click an agent to send it a message</span>` : `<span>read-only</span>`,
+    ].join("");
+
+    const a = s.ages || {};
+    const bits = ["updated " + new Date().toLocaleTimeString()];
+    if (a.snapshot > 10) bits.push(`<span class="stale">sessions ${dur(a.snapshot)} behind</span>`);
+    const total = (s.peers && s.peers.edges) ? s.peers.edges.length : 0;
+    if (total > drawn)
+      bits.push(`${drawn}/${total} message edges drawn — the rest involve sessions`
+              + ` that have exited (see the table view)`);
+    $("foot").innerHTML = bits.join(" &middot; ");
+  } catch (e) {
+    $("foot").innerHTML = `<span style="color:var(--bad)">feed is down: ${esc(e.message)}`
+      + ` — is \`ccwatch serve\` still running?</span>`;
+  }
+}
+tick();
+setInterval(tick, 3000);
+// The wires are positioned from measured geometry, so they have to be redrawn
+// when the grid reflows.
+addEventListener("resize", () => tick());
+</script>
+</body>
+</html>

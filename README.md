@@ -22,7 +22,7 @@ UNFINISHED RUNS — stopped in the last 24h, and no live session is holding them
 ccwatch                  # live table, refreshed until you quit (q / Ctrl-C)
 ccwatch once             # draw it once — safe in a pipe or a status bar
 ccwatch --json           # the same data, for scripting
-ccwatch serve            # the same data in a browser, on a second monitor
+ccwatch serve            # table + map in a browser, with replies
 ccwatch resume           # what to reopen after a crash or reboot
 ccwatch send <who> <msg> # say something to a session that is already running
 ccwatch deploys          # CI/deploy runs you are waiting on
@@ -31,6 +31,9 @@ ccwatch peers            # which sessions have been talking to each other
 ccwatch daemon           # watch deploys and notify subscribers while you are away
 ccwatch doctor           # check that ccwatch's own view is trustworthy
 ```
+
+`ccwatch serve --read-only` if you would rather the browser could not send.
+
 
 Needs `jq`, plus `git`/`gh` for the deploy panel. Everything else ships with
 macOS. One script, one HTML file.
@@ -230,16 +233,65 @@ survives a reboot.
 ## In a browser
 
 ```bash
-ccwatch serve --open      # http://127.0.0.1:8787
+ccwatch serve --open        # http://127.0.0.1:8787
 ```
 
-Same four panels, same derivation — `/api/state` runs the very same commands the
-terminal does. A dashboard that computes its own version of the status is one
-that will eventually disagree with the terminal, and you would have no way to
-tell which was lying.
+Two views, same data: **`/`** is the table, **`/map`** groups agents into their
+projects.
 
-Loopback only: this exposes which repositories you work in and fragments of
-peer messages.
+```
+┌ agents:ganttlet-platform ─┐ ┌ screened ─────────────┐ ┌ crimeball ─ FAILURE ┐
+│   ☺                       │ │  ☺    ☺──2──☺          │ │   ☺      ☺ᶻ         │
+│   84                      │ │  4f   1f    d9         │ │   f6     d9         │
+│ specify/failed  $55.19    │ │ plan/needs_input       │ │                     │
+└───────────────────────────┘ └───────────────────────┘ └─────────────────────┘
+```
+
+Each project is a territory; each session is a figure inside it. Appearance
+carries the status: a **raised arm and a pulsing `!`** for a session blocked on
+you, a **tilted figure with `?`** for one that says it is busy but has gone
+quiet, a **bobbing** figure for one that is working, an **outline** for a
+session with nothing to corroborate it, and a `z` for idle. The fill level
+inside the body is how full its context window is. Motion is only ever applied
+to a state that is actually changing, so a still figure means a still session.
+
+Unfinished runs lie in the territory they belong to, deploy badges sit in its
+header, and messages between sessions are drawn as arrows between the two
+figures — including across territories, which is the case worth seeing.
+
+Territories are laid out in a plain responsive grid rather than as a
+force-directed graph. With a dozen nodes a spring layout is harder to read than
+the list it is drawn from, and it rearranges itself every time you look at it —
+"did that agent move, or do I misremember" is not a question a monitoring view
+should raise.
+
+### Replying from the page
+
+Click a figure (or the `reply` button in the table view) to send it a message.
+You get the same three honest outcomes the terminal gives, because it is the
+same code path — `ccwatch send`, which waits to see the message land in the
+receiver's transcript:
+
+```
+delivered — it has the message
+queued — mid-turn, it will read this next turn
+failed — <the actual reason>
+```
+
+**The endpoint is gated, and loopback is not the gate.** Any page open in your
+browser can POST to `127.0.0.1`, so without a real check a random site could
+inject prompts into every agent you have running. Two things close that:
+
+1. A **per-run token**, generated at startup and injected into the page
+   `ccwatch` itself serves. Same-origin policy stops another site reading that
+   HTML, so a drive-by request cannot obtain it.
+2. An **Origin check**, because browsers attach `Origin` to cross-origin POSTs.
+
+Both are asserted by tests that were verified to fail with either check
+removed. `ccwatch serve --read-only` drops the endpoint entirely and serves no
+token, and the page then shows itself as read-only.
+
+### Why it refreshes the way it does
 
 Each panel carries **its own age**, which exists because of how the first
 version failed. It shelled out to `ccwatch --json` inside the request handler,
@@ -249,6 +301,10 @@ requests piled up — Chrome showed eleven concurrent `/api/state` requests as
 background threads (sessions every 2s, peers every 45s, deploys every 60s) and
 serves from memory in about 5ms, so a hanging `gh` can only make the deploys
 panel stale, and the page says which panel is behind.
+
+`/api/state` runs the very same commands the terminal does. A dashboard that
+computes its own version of the status is one that will eventually disagree
+with the terminal, and you would have no way to tell which was lying.
 
 ## After a reboot
 
@@ -351,7 +407,7 @@ distinct word, so `ccwatch once | grep HUNG` works, and so does a screen reader.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 101 assertions
+./tests/run.sh          # shellcheck + 118 assertions
 ```
 
 **Hermetic.** Every assertion runs against a fabricated `~/.claude`: a suite
@@ -381,6 +437,9 @@ implementation broken in the specific way it describes:
 | never drop a stale context reading | 1 |
 | drop the deploy-notification de-duplication | 1 |
 | let a failed send kill the daemon | 2 |
+| drop the send endpoint's token check | 1 |
+| drop the send endpoint's Origin check | 1 |
+| run the web server in the foreground, orphaning it on kill | 1 |
 
 That last table is not decoration. Two of those mutations are bugs that were
 actually **in** the code and were found this way, and one entry started life as
@@ -394,6 +453,15 @@ Two flakes were found and fixed the same way: a backup-file count that depended
 on whether two writes landed in the same second, and a `serve` warm-up that
 competes with whatever else the machine is doing — the latter now skips rather
 than failing, because a slow machine is not a defect.
+
+And one dirty-environment bug worth naming, because it produced a failure that
+looked exactly like a missing feature. `serve` ran its HTTP server in the
+foreground of the shell, so Ctrl-C reached it but any other kill **orphaned**
+it. Seven leaked servers accumulated across runs; one of them held a port a
+later run picked at random, so that run's own server failed to bind and the
+stale one — predating the route under test — answered `404`. The suite now
+picks a port nothing is listening on, asserts it got the port it asked for,
+and reaps its servers on every exit path; `serve` reaps its own child.
 
 ## Performance
 

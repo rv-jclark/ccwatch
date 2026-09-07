@@ -654,6 +654,14 @@ snapshot() {
     --argjson ctx "$ctx" \
     --argjson usage "$usage" \
     --argjson ctx_stale "$CCWATCH_CTX_STALE" '
+    # Shared by session rows and unfinished-run rows. The basename of a
+    # worktree is its branch, which is meaningless without the repo it belongs
+    # to, so both parts are shown.
+    def project(cwd):
+      (cwd // "?")
+      | if test("/\\.claude/worktrees/") then
+          (capture("(?<repo>[^/]+)/\\.claude/worktrees/(?<wt>[^/]+)") | .repo + ":" + .wt)
+        else ((split("/") | last) | if . == "" then "/" else . end) end;
     ( $t | map({ key: .sid, value: .mtime }) | from_entries ) as $T
     # One entry per session id that spec-run recorded, so a phase can be
     # attached to the session that actually ran it. `crashed` is decided once,
@@ -765,14 +773,7 @@ snapshot() {
             cwd:  ($s.cwd // "?"),
             # The basename of a worktree is the branch, useless without
             # the repo it belongs to — show both.
-            project: (($s.cwd // "?") | if test("/\\.claude/worktrees/") then
-                          (capture("(?<repo>[^/]+)/\\.claude/worktrees/(?<wt>[^/]+)")
-                           | .repo + ":" + .wt)
-                        else ((split("/") | last)
-                              # A cwd of "/" has an empty basename. A blank cell
-                              # reads as a broken tool rather than as a fact
-                              # about the session, so it is named.
-                              | if . == "" then "/" else . end) end),
+            project: project($s.cwd),
             entrypoint: ($s.entrypoint // ""),
             version: ($s.version // ""),
             status_raw: ($st // null),
@@ -834,7 +835,7 @@ snapshot() {
                       # Anything a live row already shows is not repeated here.
                       | select( [ $ph.sids[] ] - [ $rows[].sid ] | length > 0
                                 or ($ph.sids | length) == 0 )
-                      | { feature: $f, cwd: $c, phase: $ph.name,
+                      | { feature: $f, cwd: $c, project: project($c), phase: $ph.name,
                           status: (if $ph.status == "running" then "CRASHED" else $ph.status end),
                           model: $ph.model, cost: $rc,
                           started_at: $ph.started_at,
@@ -973,14 +974,17 @@ render() {
         elif s < 86400 then "\((s/3600)|floor)h"
         else                "\((s/86400)|floor)d" end;
       .unfinished[]
-      | [ .feature, "\(.phase)/\(.status)", (.model // ""),
+      | [ "\(.project) \(.feature)", "\(.phase)/\(.status)", (.model // ""),
           .cost,
           (if .age == null then "" else "\(dur(.age)) ago" end),
           (.sid // ""), .cwd ] | @tsv' \
     | awk -F'\t' -v red="$_c_red" -v mag="$_c_magenta" -v cyn="$_c_cyan" \
                  -v dim="$_c_dim" -v rst="$_c_reset" '
       { c = ($2 ~ /needs_input/) ? mag : red
-        printf "  %s%-22s%s  %s%-30s%s  %s%-7s $%.2f%s\n", c,$2,rst, dim,$1,rst, dim,$3, $4,rst
+        # Project first, then feature: the project is what you scan for.
+        n = split($1, pf, " ")
+        printf "  %s%-22s%s  %s%-16s%s %s%-30s%s  %s%-7s $%.2f%s\n", \
+          c,$2,rst, "",pf[1],"", dim,pf[2],rst, dim,$3, $4,rst
         if ($5 != "") printf "      %s%s%s", dim,$5,rst
         if ($6 != "") printf "  %sclaude --resume %s%s", cyn,$6,rst
         if ($5 != "" || $6 != "") printf "\n"
@@ -1897,14 +1901,36 @@ peers_graph() { # peers_graph <edges.jsonl> <live.json>
 # Binds to loopback only. This exposes which repositories you are working in
 # and fragments of peer messages; that is not something to serve on 0.0.0.0.
 cmd_serve() {
-  local port="${CCWATCH_PORT:-8787}" open=0
+  local port="${CCWATCH_PORT:-8787}" open=0 readonly=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --port) port="${2:-8787}"; shift 2 || exit 3;;
-      --open) open=1; shift;;
-      *) die "serve: unrecognised argument '$1'" "usage: ccwatch serve [--port N] [--open]";;
+      --port)      port="${2:-8787}"; shift 2 || exit 3;;
+      --open)      open=1; shift;;
+      --read-only) readonly=1; shift;;
+      *) die "serve: unrecognised argument '$1'" \
+             "usage: ccwatch serve [--port N] [--open] [--read-only]";;
     esac
   done
+
+  # ⚠️ Sending from the browser is a real capability, so it is gated.
+  #
+  # Binding to loopback is NOT sufficient on its own: any page open in your
+  # browser can POST to 127.0.0.1, so without a gate a random site could
+  # inject prompts into every agent you have running. Two checks close that:
+  #
+  #   1. A per-run token, generated here and embedded in the page ccwatch
+  #      itself serves. A drive-by request cannot read it (same-origin policy
+  #      keeps another page from fetching our HTML).
+  #   2. An Origin check. Browsers attach Origin to cross-origin POSTs, so one
+  #      that does not match this server is refused.
+  #
+  # --read-only drops the endpoint entirely for anyone who would rather not
+  # have it at all.
+  local send_token=""
+  if [ "$readonly" -eq 0 ]; then
+    send_token=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n') \
+      || die "could not generate a session token" "is /dev/urandom readable?"
+  fi
 
   local root
   root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -1913,16 +1939,30 @@ cmd_serve() {
 
   need python3
   say "${_c_bold}ccwatch serve${_c_reset} ${_c_dim}on${_c_reset} http://127.0.0.1:$port"
-  say "${_c_dim}loopback only. Ctrl-C to stop.${_c_reset}"
+  if [ "$readonly" -eq 1 ]; then
+    say "${_c_dim}loopback only, read-only. Ctrl-C to stop.${_c_reset}"
+  else
+    say "${_c_dim}loopback only. Replies from the page are enabled (token-gated).${_c_reset}"
+    say "${_c_dim}Use --read-only to disable them. Ctrl-C to stop.${_c_reset}"
+  fi
   [ "$open" -eq 1 ] && command -v open >/dev/null 2>&1 && open "http://127.0.0.1:$port" 2>/dev/null
 
+  local srv_pid=""
+  # shellcheck disable=SC2064
+  trap 'if [ -n "$srv_pid" ]; then kill "$srv_pid" 2>/dev/null; wait "$srv_pid" 2>/dev/null; fi' \
+    EXIT INT TERM
+
   CCWATCH_SELF="$root/bin/ccwatch" CCWATCH_WEB="$root/web" CCWATCH_BIND_PORT="$port" \
+  CCWATCH_SEND_TOKEN="$send_token" \
   python3 -c '
 import http.server, json, os, socketserver, subprocess, sys, threading, time
 
 SELF = os.environ["CCWATCH_SELF"]
 WEB  = os.environ["CCWATCH_WEB"]
 PORT = int(os.environ["CCWATCH_BIND_PORT"])
+SEND_TOKEN = os.environ.get("CCWATCH_SEND_TOKEN", "")
+ALLOWED_ORIGINS = {"http://127.0.0.1:%d" % PORT, "http://localhost:%d" % PORT}
+MAX_MESSAGE = 4000
 
 # ⚠️ The state is refreshed by ONE background thread and served from memory.
 #
@@ -1987,7 +2027,100 @@ class H(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=WEB, **kw)
 
+    def serve_page(self, name):
+        # The token is injected into the page ccwatch serves, which is what
+        # makes it a secret a drive-by page cannot obtain: same-origin policy
+        # stops another site reading this HTML.
+        try:
+            with open(os.path.join(WEB, name), "rb") as fh:
+                body = fh.read()
+        except OSError:
+            self.send_error(404)
+            return
+        body = body.replace(b"__CCWATCH_SEND_TOKEN__", SEND_TOKEN.encode())
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def reply_json(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        if not self.path.startswith("/api/send"):
+            self.send_error(404)
+            return
+        if not SEND_TOKEN:
+            self.reply_json(403, {"error": "this server was started --read-only"})
+            return
+        # Both checks, not either: the token stops a page that cannot read our
+        # HTML, and the Origin check stops one that somehow could.
+        origin = self.headers.get("Origin")
+        if origin is not None and origin not in ALLOWED_ORIGINS:
+            self.reply_json(403, {"error": "refused: unexpected Origin %s" % origin})
+            return
+        if self.headers.get("X-CCWatch-Token", "") != SEND_TOKEN:
+            self.reply_json(403, {"error": "refused: bad or missing token"})
+            return
+        # Two separate limits, and they have to give separate reasons. The byte
+        # cap exists so an unbounded body is never read at all; the message cap
+        # is about content. The first version let the byte cap fire first and
+        # report "bad request", so an oversized message got a reason that did
+        # not mention size — the caller could not tell what to shorten.
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self.reply_json(400, {"error": "bad request: unreadable Content-Length"})
+            return
+        if length <= 0:
+            self.reply_json(400, {"error": "bad request: empty body"})
+            return
+        if length > MAX_MESSAGE + 512:
+            self.reply_json(413, {"error": "message too long (limit %d characters)" % MAX_MESSAGE})
+            return
+        try:
+            req = json.loads(self.rfile.read(length))
+            target = str(req["target"]).strip()
+            message = str(req["message"]).strip()
+        except Exception as e:
+            self.reply_json(400, {"error": "bad request: %s" % e})
+            return
+        if not target or not message:
+            self.reply_json(400, {"error": "target and message are both required"})
+            return
+        if len(message) > MAX_MESSAGE:
+            self.reply_json(413, {"error": "message too long (limit %d characters)" % MAX_MESSAGE})
+            return
+
+        # `ccwatch send` waits to SEE the message land in the receiver, so the
+        # page gets the same three honest outcomes the terminal does rather
+        # than an optimistic "sent".
+        try:
+            out = subprocess.run([SELF, "send", target, message],
+                                 capture_output=True, text=True, timeout=45,
+                                 env={**os.environ, "NO_COLOR": "1"})
+            text = (out.stdout + out.stderr).strip()
+            state = ("delivered" if "delivered" in out.stdout
+                     else "queued" if "queued" in text
+                     else "failed")
+            self.reply_json(200 if out.returncode == 0 else 502,
+                            {"state": state, "detail": text})
+        except Exception as e:
+            self.reply_json(504, {"state": "failed", "detail": str(e)})
+
     def do_GET(self):
+        if self.path in ("/", "/index.html"):
+            return self.serve_page("index.html")
+        if self.path in ("/map", "/map.html"):
+            return self.serve_page("map.html")
         if self.path.startswith("/api/state"):
             now = time.time()
             with LOCK:
@@ -2033,7 +2166,9 @@ except KeyboardInterrupt:
 except OSError as e:
     sys.stderr.write("could not bind 127.0.0.1:%d — %s\n" % (PORT, e))
     sys.exit(1)
-'
+' &
+  srv_pid=$!
+  wait "$srv_pid"
 }
 
 # ============================================================== doctor ======
