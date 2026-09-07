@@ -121,6 +121,11 @@ function gauges(u) {
     `<span><span class="g-label">${nm}</span> <span class="g-val" style="color:${band(x.used_percentage)}">`
     + `${Math.floor(x.used_percentage)}%</span>`
     + (x.resets_at ? ` <span class="g-reset">resets ${dur(x.resets_at-now)}</span>` : "") + `</span>`;
+  // Withheld rather than annotated past the staleness limit. A percentage on
+  // screen is read as current whatever is printed beside it — a fixture left
+  // over from an earlier run showed 52% while the real figure was 7%.
+  if (u.age > (u.stale_after || 600))
+    return `<span class="stale">usage: last reading ${dur(u.age)} old — not shown</span>`;
   return [one("5h",u.five_hour), one("7d",u.seven_day), one("7d opus",u.seven_day_opus)].join("")
     + (u.age > 60 ? ` <span class="stale">[${dur(u.age)} old]</span>` : "");
 }

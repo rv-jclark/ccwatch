@@ -53,6 +53,12 @@
   .territory.t2 { border-color:#2b6b57; }
   .thead { display:flex; align-items:baseline; gap:.5rem; margin-bottom:.55rem; }
   .tname { font-weight:600; }
+  .towner { color:var(--dim); font-weight:400; margin-right:-.35rem; }
+  .norepo { color:var(--warn); font-size:10px; border:1px solid currentColor;
+            border-radius:3px; padding:0 .25rem; }
+  .branchgroup { margin-bottom:.35rem; }
+  .bname { font-size:10px; color:var(--dim); margin:.15rem 0 .1rem;
+           overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .tcount { color:var(--dim); font-size:11px; }
   .tbadges { margin-left:auto; display:flex; gap:.3rem; flex-wrap:wrap; justify-content:flex-end; }
   .badge { font-size:10px; padding:0 .35rem; border-radius:3px; border:1px solid currentColor;
@@ -97,12 +103,49 @@
   .legend b { font-weight:600; }
   footer { padding:0 1.1rem 2rem; color:var(--dim); font-size:11px; }
 
-  /* Reply, same flow and same three outcomes as the table view. */
-  #reply { position:fixed; left:50%; bottom:1.2rem; transform:translateX(-50%);
+  /* The inspector: the conversation, then the reply box. Reading before
+     writing is the normal order — you rarely want to message an agent without
+     first seeing what it is doing. */
+  #reply { position:fixed; right:1rem; bottom:1rem; top:4.5rem;
            background:var(--panel); border:1px solid var(--line); border-radius:8px;
-           padding:.6rem .7rem; display:none; gap:.5rem; align-items:center;
-           box-shadow:0 8px 30px rgba(0,0,0,.45); z-index:10; width:min(680px,92vw); }
+           padding:.7rem; display:none; flex-direction:column; gap:.5rem;
+           box-shadow:0 8px 40px rgba(0,0,0,.5); z-index:10; width:min(560px,94vw); }
   #reply.on { display:flex; }
+  #ihead { display:flex; align-items:baseline; gap:.5rem; flex-wrap:wrap;
+           padding-bottom:.5rem; border-bottom:1px solid var(--line); }
+  #iname { font-weight:600; }
+  #imeta { color:var(--dim); font-size:11px; }
+  #iclose { margin-left:auto; }
+  #convo { flex:1; overflow-y:auto; font-size:12px; display:flex;
+           flex-direction:column; gap:.5rem; padding:.2rem 0; }
+  .turn { display:grid; grid-template-columns:64px 1fr; gap:.5rem; }
+  .turn .who { color:var(--dim); font-size:10px; text-align:right; padding-top:.1rem; }
+  .turn .what { white-space:pre-wrap; word-break:break-word; }
+  .turn.said .who { color:var(--info); }
+  .turn.said.peer .who { color:var(--block); }
+  .turn.assistant .who { color:var(--ok); }
+  .turn.system .what, .turn.tool_result .what { color:var(--dim); }
+  .turn.system .what { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+                       overflow:hidden; }
+  #ifoot { display:flex; gap:.5rem; align-items:center; }
+  /* The pending question. Given the most prominent place in the inspector
+     because it is the reason the session stopped, and the reason you opened
+     this panel. */
+  #ask { border:1px solid var(--block); border-radius:6px; padding:.55rem .6rem;
+         display:none; flex-direction:column; gap:.4rem;
+         background:color-mix(in srgb, var(--block) 8%, transparent); }
+  #ask.on { display:flex; }
+  #ask .q { font-weight:600; color:var(--block); }
+  #ask ol { margin:0; padding-left:1.3rem; display:flex; flex-direction:column; gap:.3rem; }
+  #ask li::marker { color:var(--block); }
+  #ask .odesc { color:var(--dim); font-size:11px; }
+  /* Stated, not implied: a sent message is queued behind the dialog, it does
+     not answer it. Claiming otherwise would be the worst kind of lie this
+     tool could tell — you would think an agent was unblocked when it is not. */
+  #ask .how { font-size:11px; color:var(--dim); border-top:1px solid var(--line);
+              padding-top:.35rem; }
+  #ask code { background:var(--bg); border:1px solid var(--line); border-radius:3px;
+              padding:0 .25rem; user-select:all; }
   #reply input { flex:1; background:var(--bg); border:1px solid var(--line); color:var(--ink);
                  font:inherit; padding:.4rem .55rem; border-radius:4px; }
   #reply input:focus { outline:none; border-color:var(--info); }
@@ -128,10 +171,16 @@
 </div>
 <div class="legend" id="legend"></div>
 <div id="reply">
-  <span id="replyWho" class="dim"></span>
-  <input id="replyText" placeholder="message…" autocomplete="off">
-  <button id="replySend">send</button>
-  <button class="ghost" id="replyCancel">cancel</button>
+  <div id="ihead">
+    <span id="iname"></span><span id="imeta"></span>
+    <button class="ghost" id="iclose">close</button>
+  </div>
+  <div id="ask"></div>
+  <div id="convo"></div>
+  <div id="ifoot">
+    <input id="replyText" placeholder="message…" autocomplete="off">
+    <button id="replySend">send</button>
+  </div>
   <span id="replyOut"></span>
 </div>
 <footer id="foot"></footer>
@@ -197,29 +246,37 @@ function figure(r) {
 
 // Within a territory the project prefix is redundant and eats the width that
 // would otherwise show what distinguishes one agent from another.
-function shortName(name, project) {
-  const parts = String(project || "").split(":").filter(Boolean)
-                .sort((a, b) => b.length - a.length);
-  for (const p of parts)
-    if (name.startsWith(p + "-")) return name.slice(p.length + 1);
-  return name;
+// Inside a territory the repo name is redundant and eats the width that would
+// otherwise show what distinguishes one agent from another. Session names are
+// derived from the DIRECTORY, which may differ from the repo, so both are
+// tried.
+function shortName(r) {
+  const cands = [r.project, (r.repo || "").split("/").pop(),
+                 (r.cwd || "").split("/").filter(Boolean).pop()]
+                .filter(Boolean).sort((a, b) => b.length - a.length);
+  for (const p of cands)
+    if (r.name.startsWith(p + "-")) return r.name.slice(p.length + 1);
+  return r.name;
 }
 
 function agentCard(r) {
   const k = kindOf(r);
   const bits = [r.token];
+  if (r.questions && r.questions.length) bits.push("ASKS: " + r.questions[0].question);
   if (r.waited != null) bits.push(`${r.note} ${dur(r.waited)}`);
   else if (r.note) bits.push(r.note);
   if (r.pipeline) bits.push(`${r.pipeline.phase}/${r.pipeline.crashed ? "CRASHED" : r.pipeline.status}`);
   bits.push(`age ${dur(r.age)}`);
   if (r.context && r.context.used_percentage != null)
     bits.push(`ctx ${Math.floor(r.context.used_percentage)}%`);
-  return `<div class="agent sev${k.sev} ${k.cls}${CAN_SEND ? " clickable" : ""}"
+  return `<div class="agent sev${k.sev} ${k.cls} clickable"
     data-sid="${esc(r.sid)}" data-name="${esc(r.name)}" title="${esc(bits.join(" · "))}">
-    ${figure(r)}<div class="alabel">${esc(shortName(r.name, r.project))}</div></div>`;
+    ${figure(r)}<div class="alabel">${esc(shortName(r))}</div></div>`;
 }
 
-function territory(name, rows, unfinished, deploys) {
+function territory(g) {
+  const {label, repo, rows, unfinished, deploys} = g;
+  const owner = repo && repo.includes("/") ? repo.split("/")[0] : null;
   const worst = Math.max(0, ...rows.map(r => Math.max(r.sev, r.psev || 0)),
                          ...(unfinished.length ? [3] : []));
   const badges = deploys.map(d => {
@@ -233,12 +290,24 @@ function territory(name, rows, unfinished, deploys) {
     + `<span class="feat">${esc(u.feature)}</span>`
     + `<span class="cost">$${(u.cost||0).toFixed(2)} · ${u.age!=null?dur(u.age)+" ago":""}</span></div>`
     ).join("") + `</div>` : "";
-  return `<section class="territory t${worst}" data-project="${esc(name)}">
-    <div class="thead"><span class="tname">${esc(name)}</span>
+  // Worktrees of one repository now live in the SAME territory, which is
+  // correct — they are one repo — but then the branch is the only thing
+  // telling two of them apart. So agents are grouped by it, and the grouping
+  // only appears when there is more than one.
+  const byBranch = {};
+  for (const r of rows) (byBranch[r.branch || "?"] = byBranch[r.branch || "?"] || []).push(r);
+  const branches = Object.keys(byBranch).sort();
+  const folk = branches.length > 1
+    ? branches.map(b => `<div class="branchgroup"><div class="bname">${esc(b)}</div>`
+        + `<div class="folk">${byBranch[b].map(agentCard).join("")}</div></div>`).join("")
+    : `<div class="folk">${rows.map(agentCard).join("")}</div>`;
+  return `<section class="territory t${worst}" data-repo="${esc(repo || label)}">
+    <div class="thead">
+      ${owner ? `<span class="towner">${esc(owner)}/</span>` : ""}<span class="tname">${esc(label)}</span>
+      ${!repo ? `<span class="norepo" title="no git remote — grouped by directory">no repo</span>` : ""}
       <span class="tcount">${rows.length} agent${rows.length===1?"":"s"}</span>
       <div class="tbadges">${badges}</div></div>
-    <div class="folk">${rows.map(agentCard).join("")}</div>
-    ${wreck}</section>`;
+    ${folk}${wreck}</section>`;
 }
 
 // Message lines are drawn between the two figures involved, wherever they are —
@@ -304,21 +373,108 @@ function gauges(u) {
     `<span><span class="g-label">${nm}</span> <span class="g-val" style="color:${band(x.used_percentage)}">`
     + `${Math.floor(x.used_percentage)}%</span>`
     + (x.resets_at ? ` <span class="g-reset">resets ${dur(x.resets_at-now)}</span>` : "") + `</span>`;
+  // Withheld rather than annotated past the staleness limit. A percentage on
+  // screen is read as current whatever is printed beside it — a fixture left
+  // over from an earlier run showed 52% while the real figure was 7%.
+  if (u.age > (u.stale_after || 600))
+    return `<span class="stale">usage: last reading ${dur(u.age)} old — not shown</span>`;
   return [one("5h",u.five_hour), one("7d",u.seven_day), one("7d opus",u.seven_day_opus)].join("")
     + (u.age > 60 ? ` <span class="stale">[${dur(u.age)} old]</span>` : "");
 }
 
-// ---- reply -----------------------------------------------------------------
-let target = null;
-function openReply(sid, name) {
-  if (!CAN_SEND) return;
-  target = {sid, name};
-  $("replyWho").textContent = "to " + name;
-  $("replyOut").textContent = ""; $("replyOut").className = "";
-  $("reply").classList.add("on");
-  $("replyText").focus();
+// ---- inspector -------------------------------------------------------------
+let target = null, convoTimer = null;
+
+const WHO = {said:"you", assistant:"claude", system:"system", tool_result:"result"};
+
+function renderConvo(data) {
+  const box = $("convo");
+  if (!data || !data.turns || !data.turns.length) {
+    box.innerHTML = '<div class="dim">No transcript yet. Embedded-SDK sessions never write one.</div>';
+    return;
+  }
+  // Scroll position is preserved only when already at the bottom, so a
+  // conversation you have scrolled back through does not yank itself away on
+  // the next refresh.
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  box.innerHTML = data.turns.map(t => {
+    const who = t.origin === "peer" ? (t.from || "peer") : (WHO[t.kind] || t.kind);
+    const cls = "turn " + t.kind + (t.origin === "peer" ? " peer" : "");
+    return `<div class="${cls}"><div class="who">${esc(who)}</div>`
+         + `<div class="what">${esc(t.text || "")}</div></div>`;
+  }).join("");
+  if (atBottom) box.scrollTop = box.scrollHeight;
 }
-function closeReply() { target = null; $("reply").classList.remove("on"); $("replyText").value = ""; }
+
+async function loadConvo() {
+  if (!target) return;
+  try {
+    const res = await fetch(`/api/transcript?sid=${encodeURIComponent(target.sid)}&n=40`,
+                            {cache:"no-store"});
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      $("convo").innerHTML = `<div class="dim">${esc(j.error || "no transcript")}</div>`;
+      return;
+    }
+    renderConvo(await res.json());
+  } catch (e) {
+    $("convo").innerHTML = `<div style="color:var(--bad)">could not read the transcript: ${esc(e.message)}</div>`;
+  }
+}
+
+function renderAsk(row) {
+  const box = $("ask");
+  const qs = row && row.questions;
+  if (!qs || !qs.length) {
+    // A waiting session with no recorded question is a different kind of
+    // dialog — a permission prompt, say — whose text lives only in the TUI.
+    // Saying so beats an empty box that looks like a loading failure.
+    if (row && row.sev === 4) {
+      box.className = "on";
+      box.innerHTML = `<div class="q">Waiting on you: ${esc(row.note || "input needed")}</div>`
+        + `<div class="how">No question is recorded in the transcript, so this is a dialog `
+        + `(a permission prompt, for example). Its text is only in that session's terminal.</div>`;
+    } else {
+      box.className = ""; box.innerHTML = "";
+    }
+    return;
+  }
+  box.className = "on";
+  box.innerHTML = qs.map(q =>
+      `<div class="q">${esc(q.question)}</div>`
+    + `<ol>` + (q.options || []).map(o =>
+        `<li>${esc(o.label)}`
+        + (o.description ? `<div class="odesc">${esc(o.description)}</div>` : "")
+        + `</li>`).join("") + `</ol>`
+    ).join("")
+    + `<div class="how">This is a dialog: it can only be answered in that session's own`
+    + ` terminal. A message sent from here is <b>queued behind it</b> and read once the`
+    + ` dialog is resolved — it does not answer it.</div>`;
+}
+
+function openReply(sid, name, row) {
+  target = {sid, name};
+  $("iname").textContent = name;
+  $("imeta").textContent = row
+    ? [row.repo, row.branch, row.token].filter(Boolean).join(" · ") : "";
+  renderAsk(row);
+  $("replyOut").textContent = ""; $("replyOut").className = "";
+  $("convo").innerHTML = '<div class="dim">reading the transcript…</div>';
+  $("ifoot").style.display = CAN_SEND ? "flex" : "none";
+  $("reply").classList.add("on");
+  loadConvo();
+  // Followed live while open, on its own slower cadence — the transcript is
+  // read from disk per request and is much heavier than the roster poll.
+  if (convoTimer) clearInterval(convoTimer);
+  convoTimer = setInterval(loadConvo, 5000);
+  if (CAN_SEND) $("replyText").focus();
+}
+function closeReply() {
+  target = null;
+  if (convoTimer) { clearInterval(convoTimer); convoTimer = null; }
+  $("reply").classList.remove("on");
+  $("replyText").value = "";
+}
 async function doSend() {
   if (!target) return;
   const msg = $("replyText").value.trim();
@@ -342,14 +498,17 @@ async function doSend() {
   btn.disabled = false;
 }
 $("replySend").addEventListener("click", doSend);
-$("replyCancel").addEventListener("click", closeReply);
+$("iclose").addEventListener("click", closeReply);
 $("replyText").addEventListener("keydown", e => {
   if (e.key === "Enter") doSend();
   if (e.key === "Escape") closeReply();
 });
+let lastRows = {};
 document.addEventListener("click", e => {
   const a = e.target.closest(".agent[data-sid]");
-  if (a) openReply(a.dataset.sid, a.dataset.name);
+  // Clicking is worth doing even in --read-only: seeing the conversation is
+  // the more common reason to click an agent than messaging it.
+  if (a) openReply(a.dataset.sid, a.dataset.name, lastRows[a.dataset.sid]);
 });
 
 // ---- draw ------------------------------------------------------------------
@@ -361,30 +520,41 @@ async function tick() {
     // Grouped by project. Territories that need you sort first, so the map does
     // not reorder itself into a different arrangement each time you glance at
     // it for any reason other than something actually changing.
+    // Keyed by the repo slug where there is one. A directory with no remote
+    // keys on its own path, so a scratch directory is never silently merged
+    // into a real repository.
+    lastRows = {};
+    for (const r of (s.sessions || [])) lastRows[r.sid] = r;
+    // If the inspector is open, keep its question panel current — a dialog
+    // answered elsewhere should stop being shown here.
+    if (target && lastRows[target.sid]) {
+      renderAsk(lastRows[target.sid]);
+      const row = lastRows[target.sid];
+      $("imeta").textContent = [row.repo, row.branch, row.token].filter(Boolean).join(" · ");
+    }
+    const keyOf = r => r.repo || ("dir:" + (r.project || "?"));
     const groups = {};
-    for (const r of (s.sessions || [])) {
-      (groups[r.project] = groups[r.project] || {rows:[], unfinished:[], deploys:[]}).rows.push(r);
-    }
-    for (const u of (s.unfinished || [])) {
-      (groups[u.project] = groups[u.project] || {rows:[], unfinished:[], deploys:[]}).unfinished.push(u);
-    }
-    // Deploys are keyed by repo, which is not the project name, so they are
-    // matched on the repo's last path segment.
-    const runs = (s.deploys && s.deploys.runs) || [];
-    for (const d of runs) {
-      const leaf = String(d.repo || "").split("/").pop();
-      for (const name of Object.keys(groups))
-        if (name === leaf || name.startsWith(leaf + ":")) groups[name].deploys.push(d);
+    const bucket = r => (groups[keyOf(r)] = groups[keyOf(r)]
+      || {repo:r.repo || null, label:r.project || "?", rows:[], unfinished:[], deploys:[]});
+    for (const r of (s.sessions || [])) bucket(r).rows.push(r);
+    for (const u of (s.unfinished || [])) bucket(u).unfinished.push(u);
+    // Exact match on owner/name. The previous version matched on the last path
+    // segment of the repo against the directory basename, so a deploy on
+    // rvohealth/ppc-agents-workspace never found the territory shown as
+    // "agents" — those badges simply never appeared.
+    for (const d of ((s.deploys && s.deploys.runs) || [])) {
+      const g = groups[d.repo];
+      if (g) g.deploys.push(d);
     }
 
     const order = Object.keys(groups).sort((a, b) => {
       const w = g => Math.max(0, ...groups[g].rows.map(r => Math.max(r.sev, r.psev||0)),
                               ...(groups[g].unfinished.length ? [3] : []));
-      return (w(b) - w(a)) || a.localeCompare(b);
+      return (w(b) - w(a)) || groups[a].label.localeCompare(groups[b].label);
     });
 
     $("map").innerHTML = order.length
-      ? order.map(n => territory(n, groups[n].rows, groups[n].unfinished, groups[n].deploys)).join("")
+      ? order.map(k => territory(groups[k])).join("")
       : '<p class="empty">No live sessions. After a reboot, run <b>ccwatch resume</b>.</p>';
     $("gauges").innerHTML = gauges(s.usage);
     const drawn = wires(s.peers) || 0;
@@ -398,13 +568,14 @@ async function tick() {
     document.title = (w ? `(${w}) ` : "") + "ccwatch · map";
 
     $("legend").innerHTML = [
-      `<span><b style="color:var(--block)">raised arm</b> blocked on you</span>`,
+      `<span><b style="color:var(--block)">raised arm</b> blocked on you — click to read the question</span>`,
       `<span><b style="color:var(--bad)">tilted, ?</b> says busy but has gone quiet</span>`,
       `<span><b style="color:var(--ok)">bobbing</b> working</span>`,
       `<span><b style="color:var(--info)">outline</b> alive, nothing to corroborate it</span>`,
       `<span><b style="color:var(--dim)">z</b> idle</span>`,
       `<span>fill level inside the body = context used</span>`,
-      CAN_SEND ? `<span>click an agent to send it a message</span>` : `<span>read-only</span>`,
+      CAN_SEND ? `<span>click an agent to read its conversation and reply</span>`
+               : `<span>click an agent to read its conversation (read-only)</span>`,
     ].join("");
 
     const a = s.ages || {};

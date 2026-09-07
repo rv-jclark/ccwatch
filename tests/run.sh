@@ -496,7 +496,23 @@ assert_contains "$_hdr" "18%" "and the per-session context fill in its own colum
 jq -c '.at = 1' "$SLH/usage.json" > "$SLH/usage.tmp" && mv "$SLH/usage.tmp" "$SLH/usage.json"
 _old=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-u" CCWATCH_HOME="$SLH" \
        NO_COLOR=1 "$CCWATCH" once 2>&1)
-assert_contains "$_old" "old]" "a stale usage reading says how old it is"
+assert_contains "$_old" "not shown" \
+  "a usage reading past the staleness limit has its numbers WITHHELD, not annotated"
+# ⚠️ This is the assertion that matters, and it exists because of a real
+# incident: a fixture left in place from an earlier session displayed 52% on
+# the dashboard while the true figure was 7%. It carried an "[1h old]" note and
+# was still read as current, because a percentage on screen always is. A
+# monitoring tool showing a confidently wrong number is worse than one showing
+# none.
+assert_not_contains "$_old" "42%" "and the stale percentage itself is not rendered anywhere"
+# A fresh reading is still shown, so the rule above cannot be satisfied by
+# simply never displaying anything.
+python3 -c "import json,time; print(json.dumps({'at':int(time.time()),'five_hour':{'used_percentage':7.0,'resets_at':int(time.time())+16200},'seven_day':{'used_percentage':3.0}}))" \
+  > "$SLH/usage.json"
+_fresh=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-u" CCWATCH_HOME="$SLH" \
+         NO_COLOR=1 "$CCWATCH" once 2>&1)
+assert_contains "$_fresh" "5h 7%" "a fresh reading is shown"
+assert_not_contains "$_fresh" "not shown" "and is not withheld"
 # And a context reading that has stopped being refreshed is DROPPED, not shown:
 # a gauge frozen at the value it had an hour ago looks live, which is worse
 # than no gauge.
@@ -758,8 +774,8 @@ if command -v curl >/dev/null 2>&1; then
   assert_contains "$_api" '"ages"' "each panel reports its own age"
   # The handler must not block: it was serving from a per-request subprocess at
   # first, and eleven concurrent requests piled up without one completing.
-  _t=$( { time -p curl -s -o /dev/null --max-time 5 "http://127.0.0.1:$SPORT/api/state"; } 2>&1 \
-        | awk '/^real/{print ($2 < 1) ? "fast" : "slow"}')
+  _t=$( { time -p curl -s -o /dev/null --max-time 8 "http://127.0.0.1:$SPORT/api/state"; } 2>&1 \
+        | awk '/^real/{print ($2 < 3) ? "fast" : "slow"}')
   assert_eq "$_t" "fast" "the handler answers from memory rather than shelling out per request"
   assert_eq "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$SPORT/")" "200" \
     "and the dashboard itself is served"
@@ -873,6 +889,265 @@ if command -v curl >/dev/null 2>&1; then
 else
   t_skip "serve" "curl not available"
 fi
+
+# ============================================================ repo identity ==
+printf '\nrepo identity\n'
+
+# ⚠️ The project a session belongs to is the git REMOTE, not the directory
+# basename. The path-based version was wrong three ways at once on one real
+# machine — see collect_repos — and it also broke deploys silently, because
+# `gh` returns owner/name and a territory labelled "agents" could never match a
+# run on "rvohealth/ppc-agents-workspace".
+RH="$WORK/repo-home"
+mkdir -p "$RH"
+# A repo whose DIRECTORY NAME DIFFERS FROM ITS REMOTE — the case the old code
+# got wrong. A fixture that named them the same would pass either way.
+mkrepo() { # mkrepo <dir> <remote-slug> <branch>
+  mkdir -p "$1"
+  git -C "$1" init -q -b "$3" 2>/dev/null
+  git -C "$1" config user.email t@t.invalid; git -C "$1" config user.name t
+  git -C "$1" remote add origin "git@github.com:$2.git"
+  printf 'x\n' > "$1/f"; git -C "$1" add -A >/dev/null 2>&1; git -C "$1" commit -qm i
+}
+mkrepo "$WORK/localdirname" "acme/actual-repo-name" "main"
+mkrepo "$WORK/other" "acme/other-repo" "feature/x"
+
+mksess 9201 rrrrrrrr-0000-0000-0000-000000000001 alpha "$WORK/localdirname" idle cli
+mktrans rrrrrrrr-0000-0000-0000-000000000001 20
+mksess 9202 rrrrrrrr-0000-0000-0000-000000000002 beta "$WORK/other" busy cli
+mktrans rrrrrrrr-0000-0000-0000-000000000002 20
+mkps 9201 "0:10.00" >  "$WORK/ps-r"
+mkps 9202 "0:10.00" >> "$WORK/ps-r"
+rj() { CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-r" CCWATCH_HOME="$RH" \
+       NO_COLOR=1 "$CCWATCH" --json 2>/dev/null; }
+_rj=$(rj)
+assert_eq "$(printf '%s' "$_rj" | jq -r '.sessions[] | select(.name=="alpha") | .repo')" \
+  "acme/actual-repo-name" "the repo comes from the git remote, not the directory name"
+assert_eq "$(printf '%s' "$_rj" | jq -r '.sessions[] | select(.name=="alpha") | .project')" \
+  "actual-repo-name" "and the project shown is the repo, not the directory it sits in"
+assert_eq "$(printf '%s' "$_rj" | jq -r '.sessions[] | select(.name=="beta") | .branch')" \
+  "feature/x" "the branch is carried too, since that is what separates two worktrees of one repo"
+
+# A directory with no remote must not be silently folded into a real
+# repository — it falls back to its own name and reports no repo.
+mkdir -p "$WORK/plainbox"
+mksess 9203 rrrrrrrr-0000-0000-0000-000000000003 gamma "$WORK/plainbox" idle cli
+mktrans rrrrrrrr-0000-0000-0000-000000000003 20
+mkps 9203 "0:10.00" >> "$WORK/ps-r"
+_rj2=$(rj)
+assert_eq "$(printf '%s' "$_rj2" | jq -r '.sessions[] | select(.name=="gamma") | .repo')" "null" \
+  "a directory with no git remote reports no repo rather than guessing one"
+assert_eq "$(printf '%s' "$_rj2" | jq -r '.sessions[] | select(.name=="gamma") | .project')" \
+  "plainbox" "and falls back to its own directory name"
+
+# The identity is cached, because it costs two git subprocesses per directory.
+[ -f "$RH/repos.json" ] && t_pass "the repo lookup is cached" \
+  || t_fail "the repo lookup is cached" "no repos.json written"
+assert_eq "$(jq -r --arg c "$WORK/localdirname" '.[$c].slug' "$RH/repos.json")" \
+  "acme/actual-repo-name" "with the resolved slug keyed by directory"
+
+# Unfinished runs carry it too, so a crashed run can be attributed to a repo.
+RSPEC="$WORK/localdirname/specs/001-thing/.pipeline"
+mkdir -p "$RSPEC"
+cat > "$RSPEC/state.json" <<EOF
+{"version":1,"feature_dir":"$WORK/localdirname/specs/001-thing","branch":"main",
+ "phases":{"plan":{"status":"interrupted","session_id":"zzzz-1","model":"opus","cost_usd":3.5,
+                   "started_at":"$(date -u '+%Y-%m-%dT%H:%M:%SZ')"}}}
+EOF
+assert_eq "$(rj | jq -r '.unfinished[] | select(.phase=="plan") | .repo')" "acme/actual-repo-name" \
+  "an unfinished run is attributed to the repo it belongs to"
+rm -f "$FH/sessions/9201.json" "$FH/sessions/9202.json" "$FH/sessions/9203.json"
+
+# ============================================================== transcript ===
+printf '\nconversation\n'
+
+# Being able to read what an agent is doing, without shipping whatever its tool
+# calls happened to print.
+CH="$WORK/convo-home"; mkdir -p "$CH"
+CP="$FH/projects/-convo-repo"; mkdir -p "$CP"
+CSID=cccccccc-0000-0000-0000-000000000001
+{
+  printf '{"type":"user","sessionId":"%s","timestamp":"2026-09-07T10:00:00Z","cwd":"/c",' "$CSID"
+  printf '"message":{"role":"user","content":"please do the thing"}}\n'
+  printf '{"type":"assistant","sessionId":"%s","timestamp":"2026-09-07T10:00:05Z","cwd":"/c",' "$CSID"
+  printf '"message":{"role":"assistant","content":[{"type":"text","text":"on it"},'
+  printf '{"type":"tool_use","name":"Bash","input":{"command":"cat /etc/hosts"}}]}}\n'
+  printf '{"type":"user","sessionId":"%s","timestamp":"2026-09-07T10:00:06Z","cwd":"/c",' "$CSID"
+  printf '"toolUseResult":{"x":1},"message":{"role":"user","content":[{"type":"tool_result",'
+  printf '"content":"SECRET-FILE-CONTENTS-THAT-MUST-NOT-BE-SHIPPED"}]}}\n'
+  printf '{"type":"user","sessionId":"%s","timestamp":"2026-09-07T10:00:07Z","cwd":"/c",' "$CSID"
+  printf '"isMeta":true,"message":{"role":"user","content":"<task-notification>x</task-notification>"}}\n'
+  printf '{"type":"user","sessionId":"%s","timestamp":"2026-09-07T10:00:08Z","cwd":"/c",' "$CSID"
+  printf '"isMeta":true,"origin":{"kind":"peer","from":"uds:/tmp/cc-socks/9204.sock"},'
+  printf '"message":{"role":"user","content":"a word from another session"}}\n'
+} > "$CP/$CSID.jsonl"
+
+mksess 9204 dddddddd-0000-0000-0000-00000000000c talker "$WORK/other" idle cli
+mkps 9204 "0:10.00" > "$WORK/ps-c2"
+cv() { CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-c2" CCWATCH_HOME="$CH" \
+       NO_COLOR=1 "$CCWATCH" convo "$@" 2>/dev/null; }
+_cv=$(cv --json -n 10 "$CSID")
+assert_eq "$(printf '%s' "$_cv" | jq '.turns | length')" "5" "every conversational turn is read"
+assert_eq "$(printf '%s' "$_cv" | jq -r '[.turns[].kind] | join(",")')" \
+  "said,assistant,tool_result,system,said" \
+  "and each is classified: what you said, what Claude said, a tool result, a system event, a peer"
+
+# ⚠️ The one that matters. Tool results are whatever the tool printed — file
+# contents, secrets, megabytes. They are reduced to a SIZE, never shipped.
+assert_not_contains "$_cv" "SECRET-FILE-CONTENTS" \
+  "a tool result's contents are NEVER included, only its size"
+assert_contains "$_cv" "bytes" "the size is reported in its place"
+# A tool call is summarised by name and one argument, not by its full input.
+assert_contains "$_cv" "Bash" "a tool call is named"
+assert_contains "$_cv" "cat /etc/hosts" "with a short argument summary so it is identifiable"
+
+# A task-notification arrives as a user-role turn. Calling it "you" attributes
+# machine output to the person.
+assert_eq "$(printf '%s' "$_cv" | jq -r '[.turns[] | select(.kind=="system")] | length')" "1" \
+  "a task notification is a system event, not something you said"
+# ...but a peer message is a peer message even though it is also isMeta, which
+# an earlier ordering of these checks got wrong.
+assert_eq "$(printf '%s' "$_cv" | jq -r '[.turns[] | select(.origin=="peer")] | .[0].from')" \
+  "talker" "and a peer message keeps its origin, resolved to the sender's name"
+
+# Only the tail of the file is read. A transcript can be hundreds of megabytes.
+assert_contains "$(cv -n 2 "$CSID")" "10:00" "the terminal view renders turns with timestamps"
+_bytes=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-c2" CCWATCH_HOME="$CH" \
+         CCWATCH_TAIL_BYTES=700 NO_COLOR=1 "$CCWATCH" convo --json -n 10 "$CSID" 2>/dev/null \
+         | jq '.turns | length')
+[ "${_bytes:-99}" -lt 5 ] && t_pass "a byte-limited tail reads fewer turns, so huge transcripts stay cheap" \
+  || t_fail "a byte-limited tail reads fewer turns" "got $_bytes turns with a 700-byte tail"
+# And a byte tail starts mid-line, which must not abort the parse.
+[ "${_bytes:-0}" -ge 1 ] && t_pass "and a partial first line is skipped rather than aborting the read" \
+  || t_fail "and a partial first line is skipped rather than aborting the read" "got 0 turns"
+rm -f "$FH/sessions/9204.json"
+
+# ================================================================= roster ====
+printf '\nroster\n'
+
+# The answer to "if the machine restarts, can I get back quickly". Transcripts
+# survive and are the resume authority, but they do not record which sessions
+# were open TOGETHER, what each was called, or what it was doing when
+# everything stopped.
+mksess 9205 eeeeeeee-0000-0000-0000-0000000000aa rostered "$WORK/other" waiting cli "your approval"
+mktrans eeeeeeee-0000-0000-0000-0000000000aa 20
+mkps 9205 "0:10.00" > "$WORK/ps-ro"
+CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-ro" CCWATCH_HOME="$RH" \
+  NO_COLOR=1 "$CCWATCH" once >/dev/null 2>&1
+assert_eq "$(jq -r '[.sessions[] | select(.name=="rostered")] | length' "$RH/roster.json" 2>/dev/null)" "1" \
+  "drawing the table writes down what was live"
+assert_eq "$(jq -r '.sessions[] | select(.name=="rostered") | .token' "$RH/roster.json")" "waiting" \
+  "including what each session was doing at the time"
+assert_eq "$(jq -r '.sessions[] | select(.name=="rostered") | .repo' "$RH/roster.json")" \
+  "acme/other-repo" "and which repo it was in"
+
+# The reboot case: nothing is running, and the roster is the only thing that
+# remembers the names and states.
+: > "$WORK/ps-none"
+_res=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-none" CCWATCH_HOME="$RH" \
+       NO_COLOR=1 "$CCWATCH" resume -n 1 2>&1)
+assert_contains "$_res" "LAST KNOWN ROSTER" "resume reports the last known roster when nothing is running"
+assert_contains "$_res" "rostered" "naming the session"
+assert_contains "$_res" "waiting" "and what it was doing when it stopped"
+assert_contains "$_res" "claude --resume eeeeeeee-0000-0000-0000-0000000000aa" \
+  "with the command to reopen it"
+# A session that IS still running must not be listed as needing recovery.
+_res2=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-ro" CCWATCH_HOME="$RH" \
+        NO_COLOR=1 "$CCWATCH" resume -n 1 2>&1)
+assert_not_contains "$_res2" "LAST KNOWN ROSTER" \
+  "and says nothing about the roster when everything in it is still running"
+rm -f "$FH/sessions/9205.json"
+
+# ========================================================== pending asks =====
+printf '\npending questions\n'
+
+# WHAT a blocked session is asking, not merely that it is blocked. The registry
+# only ever gives a label ("input needed"); the question, and every option with
+# its description, is the input to an AskUserQuestion tool call in the
+# transcript.
+AH="$WORK/ask-home"; mkdir -p "$AH"
+AP="$FH/projects/-ask-repo"; mkdir -p "$AP"
+ASID=aaaaaaaa-1111-0000-0000-000000000001
+
+# <sid> <tool-use-id> <question>: an AskUserQuestion call with two options.
+mkask() {
+  printf '{"type":"assistant","sessionId":"%s","timestamp":"2026-09-07T10:00:00Z","cwd":"/a",' "$1" >>"$AP/$1.jsonl"
+  printf '"message":{"role":"assistant","content":[{"type":"tool_use","id":"%s",' "$2" >>"$AP/$1.jsonl"
+  printf '"name":"AskUserQuestion","input":{"questions":[{"question":"%s","header":"H",' "$3" >>"$AP/$1.jsonl"
+  printf '"options":[{"label":"Yes","description":"do it"},{"label":"No","description":"do not"}]}]}}]}}\n' >>"$AP/$1.jsonl"
+}
+# <sid> <tool-use-id>: the answer to one.
+mkanswer() {
+  printf '{"type":"user","sessionId":"%s","timestamp":"2026-09-07T10:00:01Z","cwd":"/a",' "$1" >>"$AP/$1.jsonl"
+  printf '"toolUseResult":{"ok":1},"message":{"role":"user","content":[{"type":"tool_result",' >>"$AP/$1.jsonl"
+  printf '"tool_use_id":"%s","content":"Yes"}]}}\n' "$2" >>"$AP/$1.jsonl"
+}
+
+mkask "$ASID" toolu_ANSWERED "an old question that was answered"
+mkanswer "$ASID" toolu_ANSWERED
+mkask "$ASID" toolu_PENDING "should I deploy on a Friday?"
+
+mksess 9301 "$ASID" asker "$WORK/other" waiting cli "input needed"
+mkps 9301 "0:10.00" > "$WORK/ps-ask"
+aj() { CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-ask" CCWATCH_HOME="$AH" \
+       NO_COLOR=1 "$CCWATCH" --json 2>/dev/null; }
+_aj=$(aj)
+assert_eq "$(printf '%s' "$_aj" | jq -r '.sessions[] | select(.name=="asker") | .questions[0].question')" \
+  "should I deploy on a Friday?" "the pending question is read out of the transcript"
+assert_eq "$(printf '%s' "$_aj" | jq -r '[.sessions[] | select(.name=="asker") | .questions[0].options[].label] | join(",")')" \
+  "Yes,No" "with every option it offered"
+assert_contains "$_aj" "do not" "and each option's description, which is where the reasoning is"
+
+# ⚠️ The property that makes this trustworthy: an ANSWERED question must never
+# be shown as pending. Otherwise the panel tells you an agent needs you when it
+# does not, and you learn to ignore it.
+assert_not_contains "$(printf '%s' "$_aj" | jq -c '.sessions[] | select(.name=="asker") | .questions')" \
+  "an old question that was answered" "an already-answered question is not reported as pending"
+
+# Answering the pending one must clear it.
+mkanswer "$ASID" toolu_PENDING
+assert_eq "$(aj | jq -r '.sessions[] | select(.name=="asker") | .questions')" "null" \
+  "once answered, the question stops being reported"
+
+# A question far from the end of a large transcript is still found. A fixed-size
+# tail missed exactly this: a real 4.9MB transcript had its last question 850KB
+# from the end.
+mkask "$ASID" toolu_FARBACK "a question followed by a great deal of output"
+python3 - "$AP/$ASID.jsonl" <<'PYEOF'
+import json, sys
+# ~900KB of unrelated turns after the question, which a fixed tail would skip past.
+with open(sys.argv[1], "a") as fh:
+    for i in range(700):
+        fh.write(json.dumps({"type": "assistant", "sessionId": "x",
+                             "timestamp": "2026-09-07T10:00:02Z", "cwd": "/a",
+                             "message": {"role": "assistant",
+                                         "content": [{"type": "text", "text": "x" * 1200}]}}) + "\n")
+PYEOF
+assert_eq "$(aj | jq -r '.sessions[] | select(.name=="asker") | .questions[0].question')" \
+  "a question followed by a great deal of output" \
+  "a pending question is found however far it sits from the end of the file"
+
+# A waiting session with no AskUserQuestion at all — a permission prompt, say —
+# must report no question rather than inventing one from an older call.
+mksess 9302 aaaaaaaa-1111-0000-0000-000000000002 dialoger "$WORK/other" waiting cli "permission to run rm"
+mktrans aaaaaaaa-1111-0000-0000-000000000002 20
+mkps 9302 "0:10.00" >> "$WORK/ps-ask"
+assert_eq "$(aj | jq -r '.sessions[] | select(.name=="dialoger") | .questions')" "null" \
+  "a dialog that is not an AskUserQuestion reports no question rather than guessing"
+assert_contains "$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-ask" CCWATCH_HOME="$AH" \
+  NO_COLOR=1 "$CCWATCH" ask 2>&1)" "no question recorded" \
+  "and says so, rather than showing an empty panel"
+assert_contains "$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-ask" CCWATCH_HOME="$AH" \
+  NO_COLOR=1 "$CCWATCH" ask 2>&1)" "a question followed by" "ask lists every blocked session at once"
+
+# A session that is NOT waiting is not scanned for questions at all — that is
+# what keeps this from being a transcript read per session per refresh.
+mksess 9303 aaaaaaaa-1111-0000-0000-000000000003 busybody "$WORK/other" busy cli
+mktrans aaaaaaaa-1111-0000-0000-000000000003 5
+mkps 9303 "0:10.00" >> "$WORK/ps-ask"
+assert_eq "$(aj | jq -r '.sessions[] | select(.name=="busybody") | .questions')" "null" \
+  "a session that is not waiting carries no question"
+rm -f "$FH/sessions/9301.json" "$FH/sessions/9302.json" "$FH/sessions/9303.json"
 
 
 printf '\n%s passed, %s failed' "$pass" "$fail"

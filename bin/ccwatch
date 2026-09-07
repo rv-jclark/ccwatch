@@ -94,6 +94,16 @@ CCWATCH_UNFINISHED_HOURS="${CCWATCH_UNFINISHED_HOURS:-24}"
 # still repaints; a reading older than this means the session is gone from the
 # status line entirely, and a frozen gauge that looks live is worse than none.
 CCWATCH_CTX_STALE="${CCWATCH_CTX_STALE:-120}"
+# How old a usage reading may be before its NUMBERS are withheld.
+#
+# ⚠️ Generous next to a 10s statusline refresh, and deliberately not unlimited.
+# An hour-old rate-limit percentage is not a slightly-stale fact, it is a wrong
+# one: the five-hour window has moved and possibly reset underneath it. The
+# first version rendered any reading with an "[1h old]" note beside it, and a
+# test fixture from an earlier session sat on the dashboard reading 52% while
+# the real figure was 7% — a monitoring tool showing a confidently wrong number
+# is worse than one showing none.
+CCWATCH_USAGE_STALE="${CCWATCH_USAGE_STALE:-600}"
 # How long `ccwatch send` waits to OBSERVE its message in the target's
 # transcript before reporting it as merely queued. Writing to the socket is not
 # evidence of delivery — that was proven the hard way, see cmd_send.
@@ -537,7 +547,8 @@ cmd_install_statusline() {
 # knows whether it is.
 collect_usage() {
   [ -f "$USAGE_FILE" ] || { printf 'null'; return 0; }
-  jq -c --argjson now "$(date '+%s')" '. + { age: ($now - .at) }' "$USAGE_FILE" 2>/dev/null \
+  jq -c --argjson now "$(date '+%s')" --argjson stale "$CCWATCH_USAGE_STALE" \
+    '. + { age: ($now - .at), stale_after: $stale }' "$USAGE_FILE" 2>/dev/null \
     || printf 'null'
 }
 
@@ -614,6 +625,28 @@ snapshot() {
   fi
   prof collect_pipelines
 
+  # What the blocked sessions are actually asking. Only for sessions the
+  # registry says are waiting — normally none or one — so this is not a
+  # transcript read per session.
+  local waiting_sids asks
+  waiting_sids=$(printf '%s' "$live_sessions" | jq -r '.[] | select(.status == "waiting") | .sessionId // empty')
+  asks='{}'
+  if [ -n "$waiting_sids" ]; then
+    # shellcheck disable=SC2086
+    asks=$(collect_asks $waiting_sids)
+  fi
+  prof collect_asks
+
+  # Which repository each directory actually belongs to. Needed by both the
+  # session rows and the unfinished-run rows, so it covers both sets of cwds.
+  local repos allcwds
+  allcwds=$( { printf '%s\n' "$cwds"
+               printf '%s' "$pipelines" | jq -r '.[].cwd // empty'; } | sort -u )
+  local -a rcwda=()
+  while IFS= read -r c; do [ -n "$c" ] && rcwda+=("$c"); done <<<"$allcwds"
+  if [ ${#rcwda[@]} -gt 0 ]; then repos=$(collect_repos "${rcwda[@]}"); else repos='{}'; fi
+  prof collect_repos
+
   # Which of spec-run's recorded runner pids are still up.
   local runners runners_alive
   runners=$(printf '%s' "$pipelines" | jq -r '[.[].phases[].runner_pid // empty] | unique | join(" ")')
@@ -653,15 +686,22 @@ snapshot() {
     --argjson unfinished_hours "$CCWATCH_UNFINISHED_HOURS" \
     --argjson ctx "$ctx" \
     --argjson usage "$usage" \
-    --argjson ctx_stale "$CCWATCH_CTX_STALE" '
-    # Shared by session rows and unfinished-run rows. The basename of a
-    # worktree is its branch, which is meaningless without the repo it belongs
-    # to, so both parts are shown.
+    --argjson ctx_stale "$CCWATCH_CTX_STALE" \
+    --argjson repos "$repos" \
+    --argjson asks "${asks:-\{\}}" '
+    # Shared by session rows and unfinished-run rows, and derived from the git
+    # REMOTE rather than the path — see collect_repos for why the path version
+    # was wrong three different ways.
+    #
+    # A directory with no remote (a scratch dir, /tmp) falls back to its
+    # basename and is marked so, rather than being silently lumped in with a
+    # real repository.
+    def repo_of(cwd): ($repos[cwd // ""] // {});
     def project(cwd):
-      (cwd // "?")
-      | if test("/\\.claude/worktrees/") then
-          (capture("(?<repo>[^/]+)/\\.claude/worktrees/(?<wt>[^/]+)") | .repo + ":" + .wt)
-        else ((split("/") | last) | if . == "" then "/" else . end) end;
+      (repo_of(cwd)) as $r
+      | if ($r.slug // "") != "" then ($r.slug | split("/") | last)
+        else ((cwd // "?") | split("/") | last | if . == "" then "/" else . end)
+        end;
     ( $t | map({ key: .sid, value: .mtime }) | from_entries ) as $T
     # One entry per session id that spec-run recorded, so a phase can be
     # attached to the session that actually ran it. `crashed` is decided once,
@@ -774,6 +814,12 @@ snapshot() {
             # The basename of a worktree is the branch, useless without
             # the repo it belongs to — show both.
             project: project($s.cwd),
+            # The full owner/name, which is what `gh` returns for a deploy, so
+            # the two can be matched exactly instead of by a guessed leaf name.
+            repo: ((repo_of($s.cwd).slug) | if (. // "") == "" then null else . end),
+            # What distinguishes two sessions in different worktrees of one
+            # repository. The repo alone cannot.
+            branch: ((repo_of($s.cwd).branch) | if (. // "") == "" then null else . end),
             entrypoint: ($s.entrypoint // ""),
             version: ($s.version // ""),
             status_raw: ($st // null),
@@ -794,6 +840,9 @@ snapshot() {
                                 age: $c.age } end ),
             # For a waiting session the number you want is not transcript
             # silence but how long it has been blocked on you.
+            # The question itself, when there is one. `waitingFor` only ever
+            # gives a label; this is what it wants.
+            questions: ($asks[$sid] // null),
             waited: (if $st == "waiting" and ($s.statusUpdatedAt // 0) > 0
                      then ([($now - ($s.statusUpdatedAt / 1000)), 0] | max | floor)
                      else null end),
@@ -835,7 +884,10 @@ snapshot() {
                       # Anything a live row already shows is not repeated here.
                       | select( [ $ph.sids[] ] - [ $rows[].sid ] | length > 0
                                 or ($ph.sids | length) == 0 )
-                      | { feature: $f, cwd: $c, project: project($c), phase: $ph.name,
+                      | { feature: $f, cwd: $c, project: project($c),
+                          repo: ((repo_of($c).slug)
+                                 | if (. // "") == "" then null else . end),
+                          phase: $ph.name,
                           status: (if $ph.status == "running" then "CRASHED" else $ph.status end),
                           model: $ph.model, cost: $rc,
                           started_at: $ph.started_at,
@@ -850,8 +902,25 @@ snapshot() {
 
 # ============================================================== rendering ====
 
+# write_roster — remember what was live. Called from the places that take a
+# snapshot for display, not from snapshot() itself, so that a --json consumer
+# reading the state does not rewrite history as a side effect.
+write_roster() { # write_roster <snapshot-json>
+  mkdir -p "$CCWATCH_HOME" 2>/dev/null || return 0
+  printf '%s' "$1" | jq -c --argjson at "$(date '+%s')" '
+    { at: $at,
+      sessions: [ .sessions[]
+                  | { sid, name, project, repo, branch, cwd, token, note,
+                      sev, age, cost: (.context.cost_usd // null),
+                      pipeline: (if .pipeline == null then null
+                                 else {feature: .pipeline.feature, phase: .pipeline.phase,
+                                       status: .pipeline.status, cost: .pipeline.cost} end) } ] }'     >"$ROSTER.tmp" 2>/dev/null && mv "$ROSTER.tmp" "$ROSTER" 2>/dev/null
+  return 0
+}
+
 render() {
   local snap="$1"
+  write_roster "$snap"
   local count
   count=$(printf '%s' "$snap" | jq '.sessions | length')
 
@@ -859,7 +928,8 @@ render() {
   # about any single row. Absent until `ccwatch install-statusline` is wired,
   # and it says which rather than showing nothing.
   printf '%s' "$snap" | jq -r --argjson now "$(date '+%s')" \
-    --arg d "$_c_dim" --arg b "$_c_bold" --arg y "$_c_yellow" --arg r "$_c_red" --arg z "$_c_reset" '
+    --arg d "$_c_dim" --arg b "$_c_bold" --arg y "$_c_yellow" --arg r "$_c_red" --arg z "$_c_reset" \
+    --argjson usage_stale "$CCWATCH_USAGE_STALE" '
     def dur(s): if s == null then "?"
       elif s < 60    then "\(s|floor)s"
       elif s < 3600  then "\((s/60)|floor)m"
@@ -875,6 +945,11 @@ render() {
       end;
     if .usage == null then
       "\($d)usage: not reporting — run: ccwatch install-statusline\($z)"
+    elif (.usage.age // 0) > $usage_stale then
+      # The numbers are withheld, not annotated. A percentage on screen is read
+      # as current no matter what is printed next to it.
+      "\($y)usage: last reading is \(dur(.usage.age)) old — not shown\($z)"
+      + " \($d)(is the statusline still running? ccwatch doctor)\($z)"
     else
       ( [ gauge("5h"; .usage.five_hour),
           gauge("7d"; .usage.seven_day),
@@ -1046,6 +1121,42 @@ cmd_resume() {
   local snap
   snap=$(snapshot)
   printf '%s' "$snap" | jq -r '.sessions[].sid' | sort >"$TMP/live.txt"
+
+  # What was live the last time anything looked. After a reboot the registry is
+  # empty and transcripts alone cannot tell you which sessions were open
+  # TOGETHER, what each was called, or what it was doing when everything
+  # stopped. That is the part you would otherwise reconstruct from memory.
+  if [ -f "$ROSTER" ]; then
+    local rage rn
+    rage=$(jq -r --argjson now "$(date '+%s')" '($now - (.at // 0))' "$ROSTER" 2>/dev/null) || rage=""
+    rn=$(jq -r '.sessions | length' "$ROSTER" 2>/dev/null) || rn=0
+    if [ -n "$rage" ] && [ "${rn:-0}" -gt 0 ]; then
+      local gone
+      gone=$(jq -c --slurpfile live <(printf '%s' "$snap" | jq -c '[.sessions[].sid]') '
+        ( $live[0] // [] ) as $l
+        | [ .sessions[] | select( ([.sid] | inside($l)) | not ) ]' "$ROSTER" 2>/dev/null)
+      if [ "$(printf '%s' "${gone:-[]}" | jq 'length')" -gt 0 ]; then
+        say "${_c_bold}LAST KNOWN ROSTER${_c_reset} ${_c_dim}— $rn session(s) were live $(
+          awk -v s="$rage" 'BEGIN{ if (s<60) printf "%ds", s; else if (s<3600) printf "%dm", s/60;
+            else if (s<86400) printf "%dh", s/3600; else printf "%dd", s/86400 }'
+        ) ago; these are not running now${_c_reset}"
+        say ""
+        printf '%s' "$gone" | jq -r --arg c "$_c_cyan" --arg d "$_c_dim" \
+            --arg m "$_c_magenta" --arg r "$_c_red" --arg z "$_c_reset" '
+          .[]
+          | ( if .sev == 4 then $m elif .sev == 3 then $r else $d end ) as $col
+          | "  \($col)\(.name)\($z) \($d)\(.project // "?")\($z)"
+            + " \($col)\(.token // "?")\($z)"
+            + (if .note != null and .note != "" then " \($d)(\(.note))\($z)" else "" end)
+            + (if .pipeline != null then
+                 " \($d)· \(.pipeline.feature) \(.pipeline.phase)/\(.pipeline.status)\($z)"
+               else "" end)
+            + "
+      \($c)claude --resume \(.sid)\($z)  \($d)(\(.cwd))\($z)"'
+        say ""
+      fi
+    fi
+  fi
 
   local window=()
   [ "$all" -eq 1 ] || window=(-mtime "-$CCWATCH_RESUME_DAYS")
@@ -1234,6 +1345,299 @@ cmd_install_hooks() {
   say "${_c_dim}New sessions pick the hooks up; existing ones need a restart.${_c_reset}"
 }
 
+
+
+# ============================================================ transcript ====
+#
+# The recent conversation for one session, so you can see what an agent is
+# actually doing before deciding what to say to it.
+#
+# ⚠️ Transcripts contain entire tool outputs and file contents. Reading one
+# whole and shipping it to a browser would mean megabytes per poll and would
+# put whatever those files contain on a socket. So:
+#   - only the tail of the file is read, by bytes, never the whole thing
+#   - assistant text and user turns are kept in full-ish (truncated)
+#   - tool USE is reduced to the tool name and a short argument summary
+#   - tool RESULTS are reduced to a size, not the content
+# What survives is enough to see what is going on and nothing more.
+CCWATCH_TAIL_BYTES="${CCWATCH_TAIL_BYTES:-400000}"
+CCWATCH_TAIL_TEXT="${CCWATCH_TAIL_TEXT:-1200}"
+
+transcript_path() { # transcript_path <sid>
+  ls -t "$PROJ_DIR"/*/"$1".jsonl 2>/dev/null | head -1
+}
+
+cmd_convo() {
+  local as_json=0 n=25 target=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) as_json=1; shift;;
+      -n)     n="${2:-25}"; shift 2 || exit 3;;
+      -*) die "convo: unrecognised option '$1'" "usage: ccwatch convo [-n N] [--json] <name|session-id|pid>";;
+      *) target="$1"; shift;;
+    esac
+  done
+  [ -n "$target" ] || die "convo: no session given" \
+    "usage: ccwatch convo [-n N] <name|session-id|pid>"
+
+  local t sid name file
+  # A session id is accepted directly so an exited session can still be read —
+  # resolve_target only knows about live ones.
+  if [ -f "$(transcript_path "$target")" ]; then
+    sid="$target"; name="$target"
+  else
+    t=$(resolve_target "$target") || exit 1
+    sid=$(printf '%s' "$t" | jq -r .sid)
+    name=$(printf '%s' "$t" | jq -r .name)
+  fi
+  file=$(transcript_path "$sid")
+  [ -n "$file" ] || die "no transcript for $name" \
+    "the session may be too new to have written one, or an embedded-SDK session, which never does"
+
+  local turns
+  # -R with fromjson?, not plain jq. A byte-tail starts mid-line, so the first
+  # line is invalid JSON — and parsing the stream as JSON makes jq abort the
+  # WHOLE thing on it. The comment about this was here before the code was.
+  turns=$(tail -c "$CCWATCH_TAIL_BYTES" "$file" \
+    | jq -R -c --argjson lim "$CCWATCH_TAIL_TEXT" '
+        (fromjson? // empty)
+        | select(.type == "user" or .type == "assistant")
+        | { at: .timestamp,
+            role: .type,
+            origin: (.origin.kind // null),
+            from: (.origin.from // null),
+            # A tool result arrives as a user-role turn. It is not something
+            # the user said, and showing it as one is actively misleading.
+            # A user-role turn is not necessarily something the user SAID. Tool
+            # results, task notifications and system reminders all arrive that
+            # way, and labelling them "you" misattributes machine output to the
+            # person — which matters most in exactly the situation you opened
+            # this view for.
+            kind: (( [ (.message.content
+                        | if type == "string" then [{type:"text", text:.}] else . end)[]?
+                       | select(.type == "text") | .text ] | first // "") as $first
+                   | if .toolUseResult != null then "tool_result"
+                     elif .type != "user" then "assistant"
+                     # Origin first. A message from another session is a peer
+                     # message whatever else is true of the record — checking
+                     # the system heuristics ahead of this relabelled real
+                     # agent-to-agent traffic as "system", which hides exactly
+                     # the thing the peer graph exists to surface.
+                     elif (.origin.kind == "peer") then "said"
+                     elif ($first | startswith("<task-notification>")) then "system"
+                     elif ($first | startswith("<system-reminder>")) then "system"
+                     elif ($first | startswith("<local-command")) then "system"
+                     elif (.isMeta // false) then "system"
+                     else "said" end),
+            text: ( [ (.message.content
+                       | if type == "string" then [{type:"text", text:.}] else . end)[]?
+                      | if .type == "text" then .text
+                        elif .type == "tool_use" then
+                          "→ \(.name)" +
+                          ( (.input // {}) | if type == "object" then
+                              ( [ .command?, .file_path?, .path?, .pattern?, .description? ]
+                                | map(select(. != null) | tostring) | first
+                                | if . == null then "" else ": \(.[0:120])" end )
+                            else "" end )
+                        elif .type == "tool_result" then
+                          "  ← \((.content // "" | tostring | length)) bytes"
+                        elif .type == "thinking" then "· thinking"
+                        else "· \(.type)" end ] | join("\n") | .[0:$lim] ) }' \
+    2>/dev/null | jq -s --argjson n "$n" '.[-$n:]')
+
+  # `from` on a peer message is a socket path like uds:/tmp/cc-socks/74260.sock.
+  # The pid in it is the only useful part, so it is resolved to the name you
+  # know that session by. Cheap: the registry is one jq now.
+  local names
+  names=$(collect_sessions | jq -c '[ .[] | {key: (.pid|tostring), value: .name} ] | from_entries')
+  turns=$(printf '%s' "${turns:-[]}" | jq -c --argjson names "${names:-\{\}}" '
+    map(if .from == null then .
+        else .from = ( (.from | capture("(?<pid>[0-9]+)\\.sock$") | .pid) as $pid
+                       | $names[$pid] // ("pid " + $pid) ) end)' 2>/dev/null)     || turns="${turns:-[]}"
+
+  if [ "$as_json" -eq 1 ]; then
+    jq -cn --arg sid "$sid" --arg name "$name" --argjson turns "${turns:-[]}" \
+      '{session_id: $sid, name: $name, turns: $turns}'
+    return 0
+  fi
+
+  say "${_c_bold}$name${_c_reset} ${_c_dim}${sid:0:8} — last $(printf '%s' "${turns:-[]}" | jq 'length') turns${_c_reset}"
+  say ""
+  printf '%s' "${turns:-[]}" | jq -r --arg d "$_c_dim" --arg c "$_c_cyan" \
+      --arg g "$_c_green" --arg m "$_c_magenta" --arg z "$_c_reset" '
+    .[]
+    | ( if .kind == "said" then
+            (if .origin == "peer" then $m + "peer(" + (.from // "?") + ")" else $c + "you" end)
+        elif .kind == "system" then $d + "system"
+        elif .kind == "tool_result" then $d + "result"
+        else $g + "claude" end ) as $who
+    | "\($d)\(.at[11:19])\($z) \($who)\($z)  "
+      + ((.text // "") | gsub("\n"; "\n                   ") )'
+}
+
+
+# ============================================================ pending asks ==
+#
+# WHAT a blocked session is asking, not merely that it is blocked.
+#
+# `waitingFor` in the registry gives a label ("input needed"). The actual
+# question — its text, and every option with its description — is in the
+# transcript, as the input to an `AskUserQuestion` tool call. It is the single
+# most valuable thing this tool can show: a session has stopped, and here is
+# exactly what it wants.
+#
+# The pending one is the tool_use with NO matching tool_result. An answered
+# question has a result referencing its id, so "unanswered" is a fact in the
+# file rather than a guess from position or recency.
+CCWATCH_ASK_BYTES="${CCWATCH_ASK_BYTES:-600000}"
+
+# collect_asks — pending questions for the given session ids.
+#
+# Only called for sessions the registry says are waiting, so this is normally
+# zero or one file reads, not one per session.
+collect_asks() { # collect_asks <sid>...
+  local sid file
+  [ $# -gt 0 ] || { printf '{}'; return 0; }
+  {
+    for sid in "$@"; do
+      file=$(transcript_path "$sid")
+      [ -n "$file" ] || continue
+      # ⚠️ Seeks to the LAST AskUserQuestion by byte offset rather than reading
+      # a fixed-size tail.
+      #
+      # A fixed tail is wrong in both directions. Too small and a pending
+      # question just outside the window is missed — measured on a real 4.9MB
+      # transcript whose last question sat 850KB from the end. Too small the
+      # other way and a tool_result can fall outside the window while its
+      # tool_use is inside it, which makes an ANSWERED question look pending.
+      #
+      # A result always appears after its call, so reading from the last call
+      # to EOF is both sufficient and bounded, whatever the file size.
+      python3 -c '
+import json, sys
+
+path, sid = sys.argv[1], sys.argv[2]
+try:
+    with open(path, "rb") as fh:
+        data = fh.read()
+except OSError:
+    sys.exit(0)
+
+i = data.rfind(b"\"AskUserQuestion\"")
+if i < 0:
+    sys.exit(0)
+# Back up to the start of that line so the record parses.
+start = data.rfind(b"\n", 0, i) + 1
+
+asked_id = None
+asked_input = None
+answered = set()
+for line in data[start:].split(b"\n"):
+    if not line.strip():
+        continue
+    try:
+        rec = json.loads(line)
+    except ValueError:
+        continue
+    msg = rec.get("message") or {}
+    content = msg.get("content")
+    if not isinstance(content, list):
+        continue
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if (block.get("type") == "tool_use"
+                and block.get("name") == "AskUserQuestion"
+                and asked_id is None):
+            asked_id = block.get("id")
+            asked_input = block.get("input") or {}
+        elif block.get("type") == "tool_result" and block.get("tool_use_id"):
+            answered.add(block["tool_use_id"])
+
+if asked_id is None or asked_id in answered:
+    sys.exit(0)
+
+qs = []
+for q in (asked_input.get("questions") or []):
+    qs.append({
+        "question": q.get("question"),
+        "header": q.get("header"),
+        "options": [{"label": o.get("label"), "description": o.get("description")}
+                    for o in (q.get("options") or [])],
+    })
+if qs:
+    print(json.dumps({"key": sid, "value": qs}))
+' "$file" "$sid" 2>/dev/null
+    done
+  } | jq -s 'from_entries'
+}
+
+cmd_ask() {
+  local as_json=0 target=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) as_json=1; shift;;
+      -*) die "ask: unrecognised option '$1'" "usage: ccwatch ask [--json] [<name|session-id>]";;
+      *) target="$1"; shift;;
+    esac
+  done
+
+  local snap waiting
+  snap=$(snapshot)
+  if [ -n "$target" ]; then
+    local t
+    t=$(resolve_target "$target") || exit 1
+    waiting=$(printf '%s' "$t" | jq -c '[.]')
+  else
+    # No target: everything currently blocked on you, which is the question you
+    # are actually asking when you run this.
+    waiting=$(printf '%s' "$snap" | jq -c '[ .sessions[] | select(.sev == 4) ]')
+  fi
+
+  local n
+  n=$(printf '%s' "$waiting" | jq 'length')
+  if [ "${n:-0}" -eq 0 ]; then
+    say "${_c_dim}Nothing is waiting on you.${_c_reset}"
+    return 0
+  fi
+
+  local sids asks
+  sids=$(printf '%s' "$waiting" | jq -r '.[].sid')
+  # shellcheck disable=SC2086
+  asks=$(collect_asks $sids)
+
+  if [ "$as_json" -eq 1 ]; then
+    jq -cn --argjson w "$waiting" --argjson a "${asks:-\{\}}" \
+      '[ $w[] | . + {questions: ($a[.sid] // null)} ]'
+    return 0
+  fi
+
+  printf '%s' "$waiting" | jq -r --argjson a "${asks:-\{\}}" \
+      --arg b "$_c_bold" --arg m "$_c_magenta" --arg c "$_c_cyan" \
+      --arg d "$_c_dim" --arg z "$_c_reset" '
+    .[]
+    | ($a[.sid]) as $qs
+    | "\($m)\($b)\(.name)\($z) \($d)\(.project // "?")\($z)"
+      + " \($d)waiting \(if .waited == null then "" else "\(.waited | floor)s" end) — \(.note // "input needed")\($z)"
+      + ( if $qs == null then
+            # A permission prompt is not an AskUserQuestion and has no options
+            # in the transcript. Saying so beats printing nothing.
+            "\n  \($d)(no question recorded — this is a dialog, e.g. a permission"
+            + " prompt. Its label is above.)\($z)"
+          else
+            ( $qs | to_entries | map(
+                "\n  \($b)\(.value.question)\($z)"
+                + ( .value.options | to_entries
+                    | map("\n    \($c)\(.key + 1).\($z) \(.value.label)"
+                          + (if (.value.description // "") == "" then ""
+                             else "\n       \($d)\(.value.description)\($z)" end))
+                    | join("") )
+              ) | join("\n") )
+          end )
+      + "\n"'
+  [ -z "$target" ] && say "${_c_dim}Answer with:${_c_reset} ccwatch send <name> \"<your answer>\""
+  return 0
+}
 
 # ============================================================ send ==========
 #
@@ -1492,9 +1896,77 @@ record_send() { # record_send <target-json> <message> <outcome>
 # agent does not poll and does not hold a connection open — which is the only
 # design that survives the agent being mid-turn, compacting, or restarted.
 
+# cwd -> repo identity. Cached because it needs two git subprocesses per
+# directory and the answer essentially never changes.
+REPO_CACHE="$CCWATCH_HOME/repos.json"
+CCWATCH_REPO_TTL="${CCWATCH_REPO_TTL:-21600}"
+
+# What was live, last time anything looked.
+#
+# This is the answer to "if the machine restarts, can I get back quickly".
+# Transcripts survive and are the resume AUTHORITY, but they do not record
+# which sessions were open together, what each was named, or what it was doing
+# at the moment everything stopped — and that is the part you have to
+# reconstruct from memory otherwise. So every snapshot writes the roster down.
+ROSTER="$CCWATCH_HOME/roster.json"
+
 SUBS="$CCWATCH_HOME/subscriptions.jsonl"
 DEPLOY_CACHE="$CCWATCH_HOME/deploys.json"
 DEPLOY_SEEN="$CCWATCH_HOME/deploys-seen.json"
+
+
+# collect_repos — which repository each working directory actually belongs to.
+#
+# ⚠️ NOT the directory basename. That was the first version and it was wrong in
+# three ways at once, all visible on one real machine:
+#
+#   ~/code/agents                      is rvohealth/ppc-agents-workspace, so a
+#                                      territory labelled "agents" named nothing
+#                                      that exists on GitHub.
+#   ~/code/agents/.claude/worktrees/X  is the SAME repo as above, but was shown
+#                                      as a separate project "agents:X".
+#   .../worktrees/X/services/ppc-agent-context
+#                                      is a DIFFERENT repo nested inside that
+#                                      worktree, and was grouped under the
+#                                      outer one — merging two repositories.
+#
+# It also broke deploys silently: runs come back from `gh` keyed by owner/name,
+# so a deploy on ppc-agents-workspace could never match a territory called
+# "agents", and those badges simply never appeared.
+#
+# The remote is the identity. The branch is carried separately, because that is
+# what distinguishes two worktrees of one repo.
+collect_repos() { # collect_repos <cwd>...
+  local cwd cached fresh now
+  now=$(date '+%s')
+  mkdir -p "$CCWATCH_HOME" 2>/dev/null
+
+  cached='{}'
+  if [ -f "$REPO_CACHE" ]; then
+    cached=$(jq -c --argjson now "$now" --argjson ttl "$CCWATCH_REPO_TTL" \
+      'if type == "object" then with_entries(select(($now - (.value.at // 0)) < $ttl)) else {} end' \
+      "$REPO_CACHE" 2>/dev/null) || cached='{}'
+    [ -n "$cached" ] || cached='{}'
+  fi
+
+  fresh=$( for cwd in "$@"; do
+      [ -n "$cwd" ] || continue
+      # Already known and still fresh: no subprocess at all.
+      printf '%s' "$cached" | jq -e --arg c "$cwd" 'has($c)' >/dev/null 2>&1 && continue
+      local slug branch root
+      root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) || root=""
+      slug=$(git -C "$cwd" remote get-url origin 2>/dev/null \
+             | sed -E 's#^git@[^:]+:##; s#^ssh://[^/]+/##; s#^https?://[^/]+/##; s#\.git$##') || slug=""
+      branch=$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null) || branch=""
+      jq -cn --arg c "$cwd" --arg slug "$slug" --arg branch "$branch" \
+             --arg root "$root" --argjson at "$now" \
+        '{key: $c, value: {slug: $slug, branch: $branch, root: $root, at: $at}}'
+    done | jq -s 'from_entries' )
+
+  jq -cn --argjson a "$cached" --argjson b "${fresh:-\{\}}" '$a + $b' >"$REPO_CACHE.tmp" 2>/dev/null \
+    && mv "$REPO_CACHE.tmp" "$REPO_CACHE" 2>/dev/null
+  jq -c '.' "$REPO_CACHE" 2>/dev/null || printf '{}'
+}
 
 # repo_slug — owner/name for a working directory, or nothing.
 #
@@ -2121,6 +2593,33 @@ class H(http.server.SimpleHTTPRequestHandler):
             return self.serve_page("index.html")
         if self.path in ("/map", "/map.html"):
             return self.serve_page("map.html")
+        if self.path.startswith("/api/transcript"):
+            from urllib.parse import urlparse, parse_qs
+            q = parse_qs(urlparse(self.path).query)
+            sid = (q.get("sid") or [""])[0]
+            n = (q.get("n") or ["30"])[0]
+            # Fetched on demand rather than folded into /api/state: it is only
+            # wanted for the one session you clicked, and putting every
+            # transcript in the polled payload would ship megabytes of tool
+            # output every three seconds.
+            if not sid or not all(c in "0123456789abcdef-" for c in sid.lower()):
+                self.reply_json(400, {"error": "sid must be a session id"})
+                return
+            try:
+                nn = max(1, min(200, int(n)))
+            except ValueError:
+                nn = 30
+            out = subprocess.run([SELF, "convo", "-n", str(nn), "--json", sid],
+                                 capture_output=True, text=True, timeout=30,
+                                 env={**os.environ, "NO_COLOR": "1"})
+            if out.returncode != 0 or not out.stdout.strip():
+                self.reply_json(404, {"error": (out.stderr or "no transcript").strip()[:300]})
+                return
+            try:
+                self.reply_json(200, json.loads(out.stdout))
+            except ValueError as e:
+                self.reply_json(500, {"error": "unparseable transcript: %s" % e})
+            return
         if self.path.startswith("/api/state"):
             now = time.time()
             with LOCK:
@@ -2252,6 +2751,21 @@ cmd_doctor() {
   fi
 
   # Hooks: without them, a prompt that opens and closes between polls is lost.
+  say ""
+  if [ -f "$USAGE_FILE" ]; then
+    local uage
+    uage=$(jq -r --argjson now "$(date '+%s')" '($now - (.at // 0))' "$USAGE_FILE" 2>/dev/null) || uage=999999
+    if [ "${uage:-999999}" -le "$CCWATCH_USAGE_STALE" ]; then
+      ok "usage feed is live (${uage}s old)"
+    else
+      meh "usage feed has not reported in ${uage}s — the numbers are being withheld"
+      printf '      %sis your statusline still running? re-run: ccwatch install-statusline%s\n' \
+        "$_c_cyan" "$_c_reset"
+    fi
+  else
+    meh "no usage feed — run: ccwatch install-statusline (rate limits and context will be blank)"
+  fi
+
   say ""
   if [ -f "$CLAUDE_HOME/settings.json" ] \
      && jq -e '[ .hooks // {} | .[]? | .[]? | .hooks[]?.command? // "" ] | map(contains("ccwatch hook")) | any' \
@@ -2393,6 +2907,8 @@ case "${1:-}" in
   unsubscribe)     shift; cmd_unsubscribe "$@";;
   subs)            cmd_subs;;
   peers)           shift; cmd_peers "$@";;
+  convo)           shift; cmd_convo "$@";;
+  ask)             shift; cmd_ask "$@";;
   serve)           shift; cmd_serve "$@";;
   daemon)          cmd_daemon;;
   tick)            daemon_tick;;

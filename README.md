@@ -70,6 +70,7 @@ independent signal:
 | the transcript's mtime | whether the conversation is still growing | embedded-SDK sessions never write one |
 | the process's CPU time | whether *any* work is happening, for any session | a long network wait looks idle |
 | `.pipeline/state.json` + runner pid | a phase marked `running` whose runner is dead — a crash, as a fact | only exists for [spec-run](https://github.com/rv-jclark/speckit-pipeline) phases |
+| the git remote | which repository a session is really in | nothing, for a directory with no remote — and it says so |
 
 The corroboration cuts **both** ways, which matters more than the flagging. A
 quiet transcript is reported as `HUNG?` only when CPU has also stopped moving —
@@ -109,10 +110,40 @@ Two consequences, both stated in the output rather than hidden:
 - Only sessions with a statusline report, which means only interactive ones.
   Fine for rate limits (they are account-wide, so one reporter is enough), and
   the reason the `CTX` column is blank for headless rows.
-- A reading has an age. Past a minute the header says so, and a context reading
-  that has stopped being refreshed is **dropped rather than shown** — a gauge
-  frozen at the value it had an hour ago looks live, which is worse than no
-  gauge at all.
+- **A stale reading has its numbers withheld, not annotated.** Past
+  `CCWATCH_USAGE_STALE` (10 minutes, against a 10-second refresh) the header
+  says how old the last reading is and shows nothing else.
+
+That last rule is not caution for its own sake. An earlier version rendered any
+reading with an `[1h old]` note beside it, and a leftover test fixture sat on
+the dashboard reading **52%** while the real figure was **7%** — a whole
+five-hour window had passed and reset underneath it. A percentage on screen is
+read as current no matter what is printed next to it, so a monitoring tool
+showing a confidently wrong number is worse than one showing none. The same
+rule already applied to the context gauge; it should have applied here from the
+start.
+
+### Projects are repositories, not directory names
+
+A session's project comes from its **git remote**, not the name of the folder
+it sits in. Using the folder name was wrong three ways at once on one real
+machine:
+
+| Directory | Shown as | Actually |
+|---|---|---|
+| `~/code/agents` | `agents` | `rvohealth/ppc-agents-workspace` |
+| `~/code/agents/.claude/worktrees/X` | `agents:X`, a separate project | the **same** repo, on another branch |
+| `.../worktrees/X/services/ppc-agent-context` | grouped under the outer one | a **different** repo nested inside |
+
+It also broke deploys silently. Runs come back from `gh` keyed `owner/name`, so
+a deploy on `ppc-agents-workspace` could never match a territory labelled
+`agents` — those badges simply never appeared, and nothing said so.
+
+Worktrees of one repository now share a territory, with the branch shown, since
+that is what actually distinguishes them. A directory with **no** remote keys on
+its own path and is marked `no repo`, rather than being quietly folded into a
+real repository. The lookup is cached, because it costs two `git` subprocesses
+per directory.
 
 ### The status column
 
@@ -139,6 +170,51 @@ Two things are deliberately **not** claimed:
 - A session's own status and its run's status are kept separate. A session can
   be honestly `idle` while the run it drove has crashed. Collapsing those
   produced rows reading `! idle`, which is not a sentence.
+
+## What a blocked session is asking
+
+```bash
+ccwatch ask              # every session waiting on you, and what for
+ccwatch convo <who>      # the recent conversation
+```
+
+`waitingFor` in the registry only gives a label — "input needed". The actual
+question, with every option and its description, is in the transcript as the
+input to an `AskUserQuestion` call:
+
+```
+ganttlet-web-fc  ganttlet-web  waiting 1013s — input needed
+  Should the release ship today or wait for the audit?
+    1. Ship today
+       Proceed with the release immediately without waiting for audit completion
+    2. Wait for audit
+       Hold the release until the audit is complete and findings are addressed
+```
+
+The pending one is the tool call with **no matching `tool_result`** — an
+answered question has a result referencing its id, so "unanswered" is a fact in
+the file rather than a guess from recency. Finding it seeks to the last such
+call by byte offset instead of reading a fixed-size tail, because a fixed tail
+is wrong in both directions: one real 4.9MB transcript had its last question
+850KB from the end, and a window that clips a `tool_result` while keeping its
+`tool_use` makes an **answered** question look pending.
+
+### You can read the question. You cannot answer it from here.
+
+This was tested rather than assumed, and the result is a limitation worth
+stating plainly: injecting a message into a session with an open dialog does
+**not** answer that dialog. The session stays `waiting`, no `tool_result`
+appears, and the message is queued behind it — read only once the dialog is
+resolved in the session's own terminal. There is no socket frame for answering
+an elicitation (the `elicitation` type in Claude Code is an MCP control-protocol
+path, not the peer socket).
+
+So the UI shows the question and its options, and says exactly that. It does not
+offer buttons that look like answers.
+
+A waiting session with **no** recorded question — a permission prompt, say —
+reports that there is none rather than showing an older question or an empty
+panel.
 
 ## Talking to a session that is already running
 
@@ -388,6 +464,9 @@ All environment variables, all optional.
 | `CCWATCH_SDK_STALE` | `900` | the same for headless `claude -p` sessions |
 | `CCWATCH_CPU_MIN_GAP` | `1.5` | minimum seconds between CPU samples for a delta to count |
 | `CCWATCH_CTX_STALE` | `120` | how old a context reading may be before it is dropped |
+| `CCWATCH_USAGE_STALE` | `600` | how old a usage reading may be before its numbers are withheld |
+| `CCWATCH_REPO_TTL` | `21600` | how long a directory's resolved repo is cached |
+| `CCWATCH_TAIL_BYTES` | `400000` | how much of a transcript `convo` reads |
 | `CCWATCH_REFRESH` | `2` | seconds between repaints |
 | `CCWATCH_RESUME_DAYS` | `14` | how far back `ccwatch resume` looks |
 | `CCWATCH_UNFINISHED_HOURS` | `24` | how recent an unfinished run must be to appear in the live table |
@@ -407,7 +486,7 @@ distinct word, so `ccwatch once | grep HUNG` works, and so does a screen reader.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 118 assertions
+./tests/run.sh          # shellcheck + 158 assertions
 ```
 
 **Hermetic.** Every assertion runs against a fabricated `~/.claude`: a suite
@@ -440,6 +519,11 @@ implementation broken in the specific way it describes:
 | drop the send endpoint's token check | 1 |
 | drop the send endpoint's Origin check | 1 |
 | run the web server in the foreground, orphaning it on kill | 1 |
+| render a stale usage reading instead of withholding it | 2 |
+| report an already-answered question as still pending | 1 |
+| read a fixed tail instead of seeking to the last question | 1 |
+| derive the project from the directory name instead of the git remote | 3 |
+| ship a tool result's contents instead of only its size | 1 |
 
 That last table is not decoration. Two of those mutations are bugs that were
 actually **in** the code and were found this way, and one entry started life as
