@@ -42,11 +42,36 @@ When you add an assertion, add a row to the mutation table at the bottom of
   names, repository slugs, feature ids or costs from your own machine into the
   README or into fixtures.
 
+## Commits
+
+**[Conventional Commits](https://www.conventionalcommits.org), always** —
+`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `perf:`, `chore:`, `ci:`,
+`build:`, and `feat!:` or a `BREAKING CHANGE:` footer for a break. This is not
+housekeeping: the log is the input to versioning, so a `feat:` that should have
+been a `fix:` ships the wrong number, and your subject line becomes the
+changelog entry a stranger reads. Write it in the imperative, about the change
+someone using the tool would notice.
+
+**Small, logically grouped commits.** One reason-to-change per commit, with
+everything that belongs to that reason inside it — the implementation, its
+assertion, and its row in the mutation table. Unrelated changes that happened in
+the same sitting are still separate commits; an implementation without its
+assertion is not a smaller commit, it is half of one. Large reformatting or
+renames go on their own, so the behavioural change beside them stays readable.
+
+Releases are automatic: merging the release PR that `release-please` maintains
+bumps `CCWATCH_VERSION`, writes `CHANGELOG.md`, tags and publishes. Please do
+not edit the version or the changelog by hand in a PR.
+
 ## Tests
 
 ```bash
 ./tests/run.sh
 ```
+
+The markdown assertions run `web/md.js` under `node`, which is the one optional
+tool here: without it that section skips with the reason, and the rest of the
+suite is unaffected.
 
 Everything runs against a fabricated `~/.claude`, because a suite that reads
 your live sessions asserts on whatever happened to be open. If you are running

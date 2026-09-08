@@ -11,8 +11,13 @@ way it is, and most of the rules below are only sensible in light of that.
 bin/ccwatch      the whole tool (~2900 lines of bash + embedded python3/jq)
 web/index.html   the table view, served by `ccwatch serve`
 web/map.html     the map view — projects as territories, sessions as figures
+web/md.js        markdown for the transcript inspector; escapes, never links
 tests/run.sh     shellcheck + the assertion suite; the only test entry point
 ```
+
+`web/md.js` is a separate file rather than inline script so that `tests/run.sh`
+can run it under node and assert on the HTML — including the escaping. It is
+served by the static fallback in `serve`, so it needs no route of its own.
 
 `bin/ccwatch` is organised in banner-commented sections — `collection`,
 `statusline`, `the join`, `rendering`, `resume`, `events`, `transcript`,
@@ -28,6 +33,10 @@ entry in `usage()`.
 ./bin/ccwatch doctor            # is ccwatch's own view still trustworthy
 CCWATCH_PROFILE=1 ./bin/ccwatch --json >/dev/null   # per-stage timings
 ```
+
+The `markdown` section runs `web/md.js` under `node`. That is the only optional
+tool the suite uses: with no `node` the section skips with the reason and
+nothing else is affected.
 
 The suite starts real HTTP servers on loopback and creates temp directories, so
 it needs `mktemp -d` to work. **In a restricted sandbox it will fail ~13
@@ -76,7 +85,12 @@ produced a specific wrong output that someone believed.
     contents. `convo` reads a bounded byte tail, keeps assistant/user text
     truncated, reduces a tool *use* to its name and a short argument summary,
     and a tool *result* to its size — never its content. Nothing may put that
-    content on a socket.
+    content on a socket. It follows that transcript text reaching the page is
+    **escaped before it is formatted, and never linked**: `web/md.js` escapes
+    first and adds tags second, and renders a markdown link as text, because an
+    anchor here would be a one-click outbound request carrying transcript
+    content. There is no sanitise-the-HTML-afterwards path — that is the path
+    with the hole in it.
 11. **The dashboard runs the same code path as the terminal.** `/api/state`
     invokes the commands the CLI does. Two renderings that compute status
     separately will eventually disagree, and there is no way to tell which is
@@ -138,6 +152,54 @@ costs from the machine this is developed on into documentation or fixtures.
 
 ## Commits
 
-Conventional prefixes (`feat:`, `fix:`, `docs:`, `test:`), subject in the
-imperative describing the user-visible change. Do not commit or push unless
-asked. `~/.claude/ccwatch/` is runtime state and is never committed.
+**Conventional Commits, always.** `<type>: <subject>` with the subject in the
+imperative, describing the user-visible change rather than the diff. The types
+in use are `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `chore`, `ci`,
+`build`. A breaking change is `feat!:` or a `BREAKING CHANGE:` footer.
+
+This is no longer only a convention: **the commit log is the input to
+versioning and to the changelog** (see Releases below). A `feat:` that should
+have been a `fix:` ships the wrong version number, and a subject that describes
+the diff ("update transcript.js") becomes a changelog line that tells a reader
+nothing.
+
+**Small, logically grouped commits.** One reason-to-change per commit, and
+everything belonging to that reason in it — the implementation, its assertion,
+its `README.md` row. A reviewer should be able to read the subject, then the
+diff, and find nothing in the diff that the subject did not promise.
+
+- Do not batch unrelated changes because they happened in the same sitting; a
+  renderer change and a `doctor` fix are two commits, in either order.
+- Do not split one change across commits such that the tree is broken in the
+  middle. An implementation without its assertion is not a smaller commit, it is
+  half a commit.
+- Formatting or renames that touch a lot of lines go in their own commit, so the
+  behavioural change beside them stays reviewable.
+
+Do not commit or push unless asked. `~/.claude/ccwatch/` is runtime state and is
+never committed.
+
+## Releases
+
+`release-please` owns the version. On every push to `main` it reads the
+conventional commits since the last release and keeps a release PR up to date;
+merging that PR bumps `CCWATCH_VERSION`, writes the `CHANGELOG.md` entry, tags
+`vX.Y.Z` and cuts the GitHub release.
+
+```
+.github/workflows/release.yml   the job (ubuntu — it runs no ccwatch code)
+release-please-config.json      release type, changelog sections, extra-files
+.release-please-manifest.json   the current version, as release-please sees it
+```
+
+- **Never edit `CCWATCH_VERSION` by hand.** It is bumped in `bin/ccwatch` by the
+  `# x-release-please-version` marker on that line. A hand-edit makes the tag
+  and the script disagree about what shipped, which is the one thing a version
+  number exists to prevent.
+- **Never edit `.release-please-manifest.json` by hand** either. It is the
+  tool's record of the last release, not a place to declare a wanted version.
+- `bootstrap-sha` in the config pins where history starts being read, because
+  1.0.0 shipped before any of this and has no tag. Leave it.
+- Generated entries land in `CHANGELOG.md` above the hand-written 1.0.0 prose.
+  Editing the release PR's changelog text is fine and expected; editing the
+  version in it is not.

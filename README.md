@@ -420,6 +420,54 @@ the list it is drawn from, and it rearranges itself every time you look at it �
 "did that agent move, or do I misremember" is not a question a monitoring view
 should raise.
 
+### The transcript inspector renders markdown
+
+Clicking a figure opens the recent conversation before it offers the reply box,
+because reading comes before writing. Claude writes markdown, so the panel
+renders it: a numbered plan is a numbered list, a pasted diff is a scrolling
+code block, and the sentence with the conclusion in it is bold. Unrendered, the
+turn you opened the drawer for arrives as a wall of asterisks in a 560px column.
+
+The renderer is deliberately small, and every rule in it is a rule about
+untrusted input, because transcript text *is* file contents and tool output:
+
+- **Escape first, then add tags.** No branch puts a substring of a transcript
+  into the page unescaped, and there is no sanitise-afterwards pass — that is
+  the pass with the hole in it. A `<script>` or an `<img onerror=…>` in a file
+  someone read shows as the text it is, inside a code fence as much as outside.
+- **Code spans are handled by splitting the line on them**, not by swapping in
+  a placeholder. A placeholder is a string the input can also contain, which
+  makes it forgeable.
+- **No anchors, for any scheme.** A link here would be a one-click outbound
+  request carrying content derived from a transcript. `[PR 12](https://…)`
+  renders as its label with the URL beside it as dimmed text: readable and
+  copyable, and nothing leaves the machine because you clicked a conversation.
+- **`ccwatch`'s own words stay verbatim.** A reduced tool use (`→ Grep: *TODO*`)
+  is not the model's prose, and its argument is a shell glob rather than a
+  formatting instruction.
+- **Identifiers are not emphasis.** `_` pairs only around text containing a
+  space, because a transcript is full of `file_path` and `__init__`, and
+  `file<em>path</em>` does not just look wrong, it changes what the text says.
+  An asterisk with a space beside it is left alone too — `2 * 3 * 4` is
+  arithmetic, and this tool talks about token counts constantly.
+- **Nesting is bounded at four.** A turn that is all `> ` is 600 levels at the
+  1200-character cap, and following it builds 600 nested elements for one turn
+  on a panel that repaints every five seconds. Past the cap the markers show as
+  text. (Measured rather than assumed: node renders that depth without
+  complaining, so the cap is about bounded output, not a crash.)
+- **If `md.js` fails to load, the text is still there**, escaped and wrapped as
+  before. A missing renderer must not present itself as a session with nothing
+  to say.
+
+System reminders and `← 4821 bytes` results are *not* run through it. They are
+already-reduced machine text, and a markdown pass over them would find headings
+in XML-ish tags and emphasis in paths — inventing structure that was never in
+the transcript.
+
+`web/md.js` is a separate file rather than an inline script so the suite can run
+it under node and assert on the HTML, escaping included. An XSS assertion you
+cannot execute is a comment, not a test.
+
 ### Replying from the page
 
 Click a figure (or the `reply` button in the table view) to send it a message.
@@ -674,14 +722,35 @@ implementation broken in the specific way it describes:
 | enable the kill endpoint without an explicit flag | 2 |
 | read only the last transcript line when rebuilding the resume list | 1 |
 | resolve the script's own location without following the install symlink | 2 |
+| drop the HTML escaping in the transcript renderer | 4 |
+| render a markdown link as an anchor | 2 |
+| put a reduced tool-use line through the markdown pass | 3 |
+| emphasise underscores without requiring a space inside | 2 |
+| let an emphasis delimiter hug a space | 1 |
+| flatten a nested list instead of nesting it inside its item | 1 |
+| drop an unterminated code fence instead of closing it | 1 |
+| remove the fenced-code branch from the block renderer | 2 |
+| remove the heading branch from the block renderer | 1 |
+| render a numbered list as bullets | 1 |
+| follow blockquote nesting as deep as the input goes | 1 |
+| remove `web/md.js` from the web directory | 1 |
 
 That last table is not decoration. Two of those mutations are bugs that were
-actually **in** the code and were found this way, and one entry started life as
-a *test* defect: the de-duplication assertion passed against an implementation
-with the de-duplication removed, because in the fixture the send could not
-succeed anyway and the assertion only looked for the success message. An
-assertion that passes against a broken implementation is worse than no
-assertion, because it is counted as coverage.
+actually **in** the code and were found this way, and two entries started life
+as *test* defects. The de-duplication assertion passed against an
+implementation with the de-duplication removed, because in the fixture the send
+could not succeed anyway and the assertion only looked for the success message.
+The tool-use row is the second: its fixture was `→ Grep: **/*.ts`, which the
+inline pass leaves alone regardless, so the assertion passed with the verbatim
+handling deleted — the fixture now uses an argument that would actually come
+back in italics. An assertion that passes against a broken implementation is
+worse than no assertion, because it is counted as coverage.
+
+The blockquote row is a third kind of correction, and a cheaper one. The cap was
+written with a comment claiming an uncapped renderer would overflow the stack;
+the mutation was caught by **nothing**, because 600 levels render fine. The
+guard is worth keeping for bounded output, but the assertion and the comment now
+say what it actually does.
 
 Two flakes were found and fixed the same way: a backup-file count that depended
 on whether two writes landed in the same second, and a `serve` warm-up that
@@ -726,6 +795,36 @@ from an empty table.
 
 It writes nothing except its own event log, its CPU-sample cache in `$TMPDIR`,
 and — only when you run `install-hooks` and confirm — your `settings.json`.
+
+## Releases
+
+The version comes from the commit log rather than from someone remembering to
+bump it. Every push to `main` is read as [Conventional
+Commits](https://www.conventionalcommits.org): `fix:` moves the patch, `feat:`
+the minor, a `!` or a `BREAKING CHANGE:` footer the major.
+[release-please](https://github.com/googleapis/release-please) keeps a release PR
+up to date with the pending number and the changelog entry it would write, and
+merging that PR is what patches `CCWATCH_VERSION`, tags `vX.Y.Z` and cuts the
+GitHub release.
+
+A PR rather than a tag straight off `main`, because the number in the script and
+the tag on the commit have to agree, and the PR is where that pairing is visible
+while it is still free to change. It is also the last point at which the
+generated changelog can be edited.
+
+Two consequences worth knowing before committing:
+
+- **The commit subject is the changelog line.** "update transcript.js" tells a
+  reader nothing; the subject is expected to describe the user-visible change,
+  which is the same standard the rest of this repo applies to its comments.
+- **`CCWATCH_VERSION` is never edited by hand.** It carries an
+  `x-release-please-version` marker and is rewritten by the release PR. A
+  hand-edit makes the tag and the script disagree about what shipped, which is
+  the one thing a version number exists to prevent.
+
+`CHANGELOG.md` entries from 1.1.0 onward are generated. The 1.0.0 entry predates
+all of this and is written by hand, which is why `bootstrap-sha` in
+`release-please-config.json` pins where history starts being read.
 
 ## Contributing
 

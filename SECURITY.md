@@ -46,6 +46,17 @@ places had to be designed around that:
 - `ccwatch serve` binds `127.0.0.1` only. What it serves still discloses which
   repositories you work in and fragments of messages between sessions, so treat
   the page as you would your terminal.
+- The transcript panel **renders that text as markdown**, which makes it markup
+  handling over untrusted input, so: `web/md.js` escapes every character before
+  it adds a single tag, has no sanitise-afterwards pass, and splits lines on
+  code spans rather than using a placeholder a transcript could forge. A
+  `<script>` or `<img onerror=…>` in a file an agent read is displayed as the
+  text it is. The escaping is asserted by tests verified to fail with it
+  removed.
+- **A markdown link is rendered as text, never as an anchor.** A clickable link
+  in that panel would be a one-click outbound request carrying content derived
+  from a transcript; the label and the URL are shown so you can read and copy
+  them, and no scheme is exempted.
 
 ## The send endpoint
 
