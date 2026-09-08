@@ -704,6 +704,7 @@ All environment variables, all optional.
 | `CCWATCH_PORT` | `8787` | port for `ccwatch serve` |
 | `CCWATCH_IDLE_GRACE` | `15` | seconds `/api/state` may go unread before `ccwatch serve` stops collecting |
 | `CCWATCH_SNAPSHOT_TIMEOUT` | `90` | seconds the snapshot collector may run before it is reported as a failed collection |
+| `CCWATCH_SNAPSHOT_CADENCE` | `2` | seconds between snapshot collections while the feed is being read; settable so an assertion can make the cadence longer than the exchange it measures |
 | `CCWATCH_HOME` | `~/.claude/ccwatch` | where the event log and usage feed live |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | which Claude Code config directory to read |
 | `CCWATCH_PROFILE` | | print per-stage timings to stderr |
@@ -797,6 +798,8 @@ implementation broken in the specific way it describes:
 | let `/api/state` disagree with `--json` about `parse_failed` for the same registry | 1 |
 | reintroduce a wholesale `innerHTML =` on a refresh-reachable container in `map.html` | 1 |
 | add a second `setInterval` or a `requestAnimationFrame` call to the rewritten `map.html` | 1 |
+| restore the silent fall-through in `resolve_target`, so a failed snapshot is described as an ambiguous match with a blank count | 2 |
+| check a collector's output with `jq -e .` instead of `jq empty`, so a legitimate `null` reads as a failed collector | 1 |
 | drop or alter the `SEND_TOKEN` placeholder in the served `map.html` | 1 |
 
 That last table is not decoration. Two of those mutations are bugs that were
