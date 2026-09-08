@@ -451,11 +451,43 @@ selection all survive a refresh — the only remaining wholesale `innerHTML`
 write is a turn's rendered markdown body inside an already-reconciled
 container.
 
-The whole occupied city is fit to the viewport — `k = min(vw/W, vh/H)` clamped
-to a scale of 3.0, the extent centred in the available space — recomputed only
-when the occupied set actually changes or the window resizes. There is no pan,
-no zoom, no level of detail, and no persisted viewport: fitting is a pure
-function of the extent and the window size, not state.
+The whole occupied city fits to the viewport on load — `k = min(vw/W, vh/H)`
+clamped to the ladder's rungs, the extent centred in the available space — and
+from there the camera is yours: drag or the arrow keys pan, the wheel or
+`+`/`-` zoom in discrete steps, `0` refits, and the viewport survives a
+reload.
+
+### Zoom is a ladder, and each rung is a fixed scale, not a smooth number
+
+`web/camera.js`'s `LADDER` is `[0.25, 0.5, 1, 2, 3, 4, 6, 8]` — eight fixed
+scales, never a continuously dragged number. A discrete ladder is what gives
+"which level am I at" an unambiguous answer: a scale of 2.999 and a scale of 3
+would otherwise be the same rung read two different ways, and a boundary that
+can only be crossed by a whole step is a boundary a hysteresis band can be
+drawn around cleanly (`levelFor`, contracts/camera-js.md §8).
+
+Three named detail levels — `far`, `mid`, `near` — sit on that ladder and
+control **what is drawn, never a coordinate**. Nothing moves or resizes in
+world space when the level changes; the level only toggles which elements are
+in the DOM at all:
+
+- **`far`** (ladder rungs 0–2, scale ≤ 1): each district collapses to its
+  aggregate — a session count and its worst status word (`DistrictSummary`,
+  data-model.md §5). Buildings, branch zones, figures and district labels are
+  hidden; only the aggregate is legible at a scale where a building's own
+  label would not be.
+- **`mid`** (rungs 3–4, scale 2–3): buildings and their branch zones appear,
+  each carrying its own label; the district aggregate is hidden in favour of
+  the district label. Figures are drawn but unlabelled — legible as shapes,
+  too small yet for a name.
+- **`near`** (rungs 5–7, scale ≥ 4): figures gain their name labels
+  (`.alabel`) on top of everything `mid` already shows.
+
+Level of detail is semantic rather than a scale factor because the three
+things it is standing in for — a count, a shape, a name — are legible at
+different sizes and become clutter before they become readable at any smaller
+one; fading them in continuously would just mean redrawing the same decision
+every frame for no benefit over toggling it once at a threshold crossing.
 
 A snapshot that is not `ok` — the feed down, a snapshot never taken, or a
 registry file that would not parse — is a different sentence in each of those
@@ -801,6 +833,19 @@ implementation broken in the specific way it describes:
 | restore the silent fall-through in `resolve_target`, so a failed snapshot is described as an ambiguous match with a blank count | 2 |
 | check a collector's output with `jq -e .` instead of `jq empty`, so a legitimate `null` reads as a failed collector | 1 |
 | drop or alter the `SEND_TOKEN` placeholder in the served `map.html` | 1 |
+| let `clampIdx`/`scaleFor` fall through the ladder's ends instead of clamping | 2 |
+| drop the delta from `panBy` | 1 |
+| unclamp `clampPan`'s axis interval | 2 |
+| iterate `fitIndex`'s ladder ascending instead of from the largest rung down | 1 |
+| drop the centring translation from `centreOn` | 1 |
+| resolve `levelFor`'s cold mapping upward instead of downward | 2 |
+| let `wheelStep` unwind a reversed gesture instead of resetting on a sign change | 1 |
+| let `zoomTo` drift the anchor point instead of solving for the pixel it must land on | 2 |
+| accept a stored viewport with the wrong storage version | 1 |
+| accept a stored viewport with a non-integer or out-of-range `idx` | 2 |
+| accept a stored viewport with a non-finite `tx`/`ty` | 2 |
+| skip the once-only latch and re-flip `persistence` on a second throwing storage call | 2 |
+| let `intersects` report an overlap for a viewport far outside the world | 1 |
 
 That last table is not decoration. Two of those mutations are bugs that were
 actually **in** the code and were found this way, and two entries started life
