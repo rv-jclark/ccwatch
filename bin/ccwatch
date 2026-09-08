@@ -625,16 +625,46 @@ pids_alive() {
   ps_out "$csv" | awk '{print $1}' | jq -R 'select(length>0) | tonumber' | jq -s '.'
 }
 
+# require_json — a collector's output really is JSON, or say which one failed.
+#
+# ⚠️ An empty collector output must never reach `jq --argjson`. jq dies with
+# "invalid JSON text passed to --argjson", which names no stage and reads like
+# a bug in ccwatch rather than what it is: a collector that returned nothing.
+# Found when the host ran out of memory mid-snapshot — `ccwatch kill` then
+# reported the resulting failure as an ambiguous name match, so the visible
+# symptom pointed at the wrong thing entirely.
+#
+# Defaulting an empty producer to `[]` or `{}` would be worse than the crash.
+# A collector that failed would be presented as a host with nothing to show,
+# which is the single thing this tool exists not to do.
+# ⚠️ The check is `jq empty`, which asks only "does this parse". `jq -e .` looks
+# equivalent and is not: it exits 1 for `null` and `false`, and `null` is a
+# legitimate value here — `collect_usage` returns it when no statusline has ever
+# reported, and `host` is passed as `${host:-null}`. Using `-e` made a machine
+# with no usage feed report "collect_usage produced no usable JSON", turning a
+# normal condition into a failure, which is the same mistake in the opposite
+# direction as the bug this function exists to fix.
+require_json() { # require_json <stage> <value>
+  if [ -n "$2" ] && printf '%s' "$2" | jq empty >/dev/null 2>&1; then
+    return 0
+  fi
+  err "snapshot: $1 produced no usable JSON — it failed or was killed"
+  printf '  %s\n' "if the host is under memory pressure, the OS may have killed it mid-run" >&2
+  return 1
+}
+
 snapshot() {
   local sessions_obj sessions parse_failed live transcripts pipelines sids cwds now
   now=$(date '+%s')
   prof start
   sessions_obj=$(collect_sessions)
+  require_json collect_sessions "$sessions_obj" || return 1
   sessions=$(printf '%s' "$sessions_obj" | jq -c '.rows')
   parse_failed=$(printf '%s' "$sessions_obj" | jq -r '.parse_failed // 0')
   prof collect_sessions
 
   live=$(collect_live "$sessions")
+  require_json collect_live "$live" || return 1
   prof collect_live
 
   # Only live sessions are worth gathering the expensive signals for. A dead
@@ -658,11 +688,14 @@ snapshot() {
 
   # shellcheck disable=SC2086
   transcripts=$(collect_transcripts $sids)
+  require_json collect_transcripts "$transcripts" || return 1
   prof collect_transcripts
   local ctx usage
   # shellcheck disable=SC2086
   ctx=$(collect_context $sids)
+  require_json collect_context "$ctx" || return 1
   usage=$(collect_usage)
+  require_json collect_usage "$usage" || return 1
   local host
   host=$(collect_host)
   prof collect_host
@@ -1941,7 +1974,18 @@ cmd_ask() {
 # only because an assertion checked the exit code as well as the message.
 resolve_target() { # resolve_target <needle>  -> JSON on stdout, non-zero on failure
   local needle="$1" snap matches n
-  snap=$(snapshot)
+  # A non-zero snapshot and an empty snapshot are the same fact here, and both
+  # go through require_json so the reason is always printed. `|| return 1` on
+  # the assignment alone returned silently, which is a refusal with no reason.
+  snap=$(snapshot) || snap=""
+  # ⚠️ A failed snapshot is its own fact, not an ambiguous match. Without this,
+  # an empty `$snap` gave an empty `$matches`, `jq length` printed nothing, `$n`
+  # was the empty string, and the `case` below fell through to its `*)` arm —
+  # so `ccwatch kill` reported "'<pid>' matches  live sessions — be specific:"
+  # with a blank where the count belongs, and listed nothing. Observed for real
+  # while the host was out of memory: eight kills, five of them refused with a
+  # message that described a completely different problem.
+  require_json snapshot "$snap" || return 1
   matches=$(printf '%s' "$snap" | jq -c --arg n "$needle" '
     [ .sessions[]
       | select( .name == $n
@@ -1953,6 +1997,13 @@ resolve_target() { # resolve_target <needle>  -> JSON on stdout, non-zero on fai
                 or (($n | length) >= 8 and (.sid | startswith($n))) ) ]')
   n=$(printf '%s' "$matches" | jq 'length')
   case "$n" in
+    # An unreadable count is a failure of the match itself, and is never
+    # allowed to fall through to the ambiguity arm below and be described as
+    # a count of sessions that was never obtained (constitution V).
+    ''|*[!0-9]*)
+       err "could not match '$needle' against the live sessions"
+       printf '  %s\n' "the session list could not be read; 'ccwatch doctor' reports why" >&2
+       return 1;;
     0) err "no live session matches '$needle'"
        printf '  %s\n' "run 'ccwatch once' for the names, or 'ccwatch resume' if it has exited" >&2
        return 1;;
@@ -2643,6 +2694,7 @@ peers_graph() { # peers_graph <edges.jsonl> <live.json>
 cmd_serve() {
   local port="${CCWATCH_PORT:-8787}" open=0 readonly=0 allowkill=0
   local idle_grace="${CCWATCH_IDLE_GRACE:-15}" snapshot_timeout="${CCWATCH_SNAPSHOT_TIMEOUT:-90}"
+  local snapshot_cadence="${CCWATCH_SNAPSHOT_CADENCE:-2}"
   while [ $# -gt 0 ]; do
     case "$1" in
       --port)      port="${2:-8787}"; shift 2 || exit 3;;
@@ -2702,6 +2754,7 @@ cmd_serve() {
   CCWATCH_SELF="$root/bin/ccwatch" CCWATCH_WEB="$root/web" CCWATCH_BIND_PORT="$port" \
   CCWATCH_SEND_TOKEN="$send_token" CCWATCH_ALLOW_KILL="$allowkill" \
   CCWATCH_IDLE_GRACE="$idle_grace" CCWATCH_SNAPSHOT_TIMEOUT="$snapshot_timeout" \
+  CCWATCH_SNAPSHOT_CADENCE="$snapshot_cadence" \
   python3 -c '
 import hashlib, http.server, json, os, socketserver, subprocess, sys, threading, time
 
@@ -3048,8 +3101,16 @@ class S(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 SNAPSHOT_TIMEOUT = float(os.environ.get("CCWATCH_SNAPSHOT_TIMEOUT", "90"))
+# ⚠️ Settable so a test can make the snapshot cadence longer than the exchange
+# it is measuring. The ETag assertions compare two reads that must not have a
+# collection between them; at the 2s default on a loaded machine each `curl`
+# takes longer than the cadence, so a collection ALWAYS lands in between and
+# the assertion fails for a reason that has nothing to do with the validator.
+# Retrying could not fix that — the race was not unlucky, it was certain — so
+# the cadence is a knob and the test removes the race instead of re-rolling it.
+SNAPSHOT_CADENCE = float(os.environ.get("CCWATCH_SNAPSHOT_CADENCE", "2"))
 for _key, _args, _to, _every, _tf in (
-        ("snapshot", ["--json"], SNAPSHOT_TIMEOUT, 2, None),
+        ("snapshot", ["--json"], SNAPSHOT_TIMEOUT, SNAPSHOT_CADENCE, None),
         ("deploys",  ["deploys", "--json"], 120, 60, None),
         ("peers",    ["peers", "--days", "2", "--json"], 120, 45, None)):
     threading.Thread(target=refresh_loop(_key, _args, _to, _every, _tf), daemon=True).start()

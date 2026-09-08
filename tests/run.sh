@@ -597,6 +597,53 @@ _gone=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-s2" CCWATCH_HOME="$SLH
         NO_COLOR=1 "$CCWATCH" send nonexistent-name "hi" 2>&1; echo "rc=$?")
 assert_contains "$_gone" "no live session matches" "an unknown target is named, not ignored"
 assert_contains "$_gone" "rc=1" "and is a failure"
+
+# ⚠️ A snapshot that FAILED must not be reported as an ambiguous name match.
+# Before this, an empty snapshot gave an empty match list, `jq length` printed
+# nothing, `$n` was the empty string, and the `case` fell through to its
+# ambiguity arm — so the tool said "'<pid>' matches  live sessions — be
+# specific:" with a blank where the count belongs and nothing listed after it.
+# Seen for real on a host that had run out of memory: of eight kills, five were
+# refused with a message describing a completely different problem.
+#
+# The failure is injected with a `jq` shim that fails only for the final join
+# (identified by an argument name unique to it), because that is what an
+# OOM-killed collector does — returns nothing, mid-pipeline.
+_realjq=$(command -v jq)
+if [ -n "$_realjq" ]; then
+  mkdir -p "$WORK/shim"
+  {
+    printf '#!/bin/sh\n'
+    printf 'for a in "$@"; do [ "$a" = "swap_warn" ] && exit 1; done\n'
+    printf 'exec %s "$@"\n' "$_realjq"
+  } > "$WORK/shim/jq"
+  chmod +x "$WORK/shim/jq"
+  _snapfail=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-s2" CCWATCH_HOME="$SLH" \
+              PATH="$WORK/shim:$PATH" NO_COLOR=1 \
+              "$CCWATCH" send target-b "hi" 2>&1; echo "rc=$?")
+  assert_contains "$_snapfail" "produced no usable JSON" \
+    "a snapshot that failed says so, naming the stage that produced nothing"
+  assert_not_contains "$_snapfail" "matches  live sessions" \
+    "and never reports a failed snapshot as an ambiguous match with a blank count"
+  assert_contains "$_snapfail" "rc=1" "and refusing is a failure, not a silent no-op"
+  rm -rf "$WORK/shim"
+else
+  t_skip "a snapshot that failed says so" "no jq on PATH to shim"
+fi
+
+# ⚠️ The other direction of the same mistake. A collector may legitimately
+# return `null` — `collect_usage` does whenever no statusline has ever
+# reported, which is most machines. The guard must accept that. Checking with
+# `jq -e .` instead of `jq empty` looks equivalent and is not: `-e` exits 1 for
+# `null` and `false`, so the first version of the guard reported
+# "collect_usage produced no usable JSON" on any host without a usage feed,
+# turning a normal condition into a failure (constitution XII).
+mkdir -p "$WORK/nofeed-cfg"
+_nofeed=$(CLAUDE_CONFIG_DIR="$WORK/nofeed-cfg" CCWATCH_HOME="$WORK/nofeed-home" \
+          CCWATCH_FAKE_PS="$WORK/ps-s2" NO_COLOR=1 "$CCWATCH" --json 2>&1)
+assert_not_contains "$_nofeed" "produced no usable JSON" \
+  "a collector that legitimately returns null is not reported as having failed"
+
 rm -f "$FH/sessions/9102.json"
 
 # ================================================================ deploys ====
@@ -1109,38 +1156,42 @@ if command -v curl >/dev/null 2>&1; then
     mksess 9701 eeeeeeee-0000-0000-0000-000000000001 etagrow /fake/repo idle cli
     mktrans eeeeeeee-0000-0000-0000-000000000001 5
     mkps 9701 "0:10.00" > "$WORK/ps-etag"
+    # ⚠️ A 120s snapshot cadence, so no collection can land between the two
+    # reads this section compares. At the 2s default the assertion was a race
+    # the machine decided: each `curl` under load takes longer than the
+    # cadence, a collection lands in between, and the ETag differs for a reason
+    # that has nothing to do with the validator. It failed here for real while
+    # another pipeline was running. Removing the race beats re-rolling it.
     ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-etag" CCWATCH_HOME="$DH" \
-      CCWATCH_DEPLOY_TTL=999999 "$CCWATCH" serve --port "$SPORT6" >"$WORK/serve-etag.log" 2>&1 & )
+      CCWATCH_DEPLOY_TTL=999999 CCWATCH_SNAPSHOT_CADENCE=120 \
+      "$CCWATCH" serve --port "$SPORT6" >"$WORK/serve-etag.log" 2>&1 & )
     _e=0
     while [ "$_e" -lt 40 ]; do
       [ "$(curl -s --max-time 3 "http://127.0.0.1:$SPORT6/api/state" 2>/dev/null | jq -r '.warming' 2>/dev/null)" = "false" ] && break
       sleep 1; _e=$((_e + 1))
     done
     # ⚠️ The contract is that the same collected data yields the same validator.
-    # This was two back-to-back reads plus the assumption that no collection
-    # could land between them — true on an idle machine, false on a busy one,
-    # where a collection on the 2s cadence slipping between the two reads
-    # changes the ETag legitimately. It passed twice and then failed once the
-    # host was loaded, which is a test reporting the machine rather than the
-    # code. So the pair is now confirmed against the collection instant that
-    # produced it, and retried when a collection did intervene.
+    # The cadence above is 120s, so the two reads below are guaranteed to see
+    # one collection — no retry loop, no timing assumption, and the same
+    # outcome on an idle machine and a loaded one.
     #
-    # Exhausting the retries fails rather than skips, deliberately: a validator
-    # that never repeats across two reads is exactly the bug this section
-    # exists to catch — it is what hashing `ages` into the ETag would produce.
-    _try=0
-    while [ "$_try" -lt 20 ]; do
-      _try=$((_try + 1))
-      curl -s --max-time 10 -D "$WORK/hdr1" -o "$WORK/body1" "http://127.0.0.1:$SPORT6/api/state"
-      _etag1=$(tr -d '\r' < "$WORK/hdr1" | awk -F': ' 'tolower($1)=="etag"{print $2}')
-      _ages1=$(jq -r '.ages.snapshot' "$WORK/body1")
-      _ca1=$(jq -r '.collected_at.snapshot' "$WORK/body1")
-      curl -s --max-time 10 -D "$WORK/hdr2" -o "$WORK/body2" "http://127.0.0.1:$SPORT6/api/state"
-      _etag2=$(tr -d '\r' < "$WORK/hdr2" | awk -F': ' 'tolower($1)=="etag"{print $2}')
-      _ages2=$(jq -r '.ages.snapshot' "$WORK/body2")
-      _ca2=$(jq -r '.collected_at.snapshot' "$WORK/body2")
-      [ -n "$_ca1" ] && [ "$_ca1" = "$_ca2" ] && break
-    done
+    # An earlier attempt retried until it observed two reads sharing a
+    # `collected_at`. That was still wrong: under load each request takes
+    # longer than the 2s cadence, so a collection lands between EVERY pair and
+    # no number of retries finds one. A race that is certain rather than
+    # unlucky has to be removed, not re-rolled.
+    #
+    # `collected_at` is still compared, as the check that the premise held.
+    curl -s --max-time 10 -D "$WORK/hdr1" -o "$WORK/body1" "http://127.0.0.1:$SPORT6/api/state"
+    _etag1=$(tr -d '\r' < "$WORK/hdr1" | awk -F': ' 'tolower($1)=="etag"{print $2}')
+    _ages1=$(jq -r '.ages.snapshot' "$WORK/body1")
+    _ca1=$(jq -r '.collected_at.snapshot' "$WORK/body1")
+    curl -s --max-time 10 -D "$WORK/hdr2" -o "$WORK/body2" "http://127.0.0.1:$SPORT6/api/state"
+    _etag2=$(tr -d '\r' < "$WORK/hdr2" | awk -F': ' 'tolower($1)=="etag"{print $2}')
+    _ages2=$(jq -r '.ages.snapshot' "$WORK/body2")
+    _ca2=$(jq -r '.collected_at.snapshot' "$WORK/body2")
+    assert_eq "$_ca2" "$_ca1" \
+      "a 120s cadence means the two reads really did see one collection"
     assert_eq "$_etag2" "$_etag1" \
       "the ETag is unchanged across two reads with no intervening collection"
     [ "$_ages1" != "$_ages2" ] \
