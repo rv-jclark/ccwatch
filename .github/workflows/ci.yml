@@ -26,11 +26,20 @@ jobs:
           jq --version
           shellcheck --version | awk '/^version:/{print}'
 
-      - name: Record the shell and python the suite will use
+      # ⚠️ Pinned rather than relying on the runner image, because the markdown
+      # assertions SKIP when node is missing. A skip is quiet by design, so an
+      # image that stopped shipping node would silently drop the escaping
+      # assertions and the suite would still go green.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Record the shell, python and node the suite will use
         run: |
           # bash 3.2 is the constraint being honoured, so print what ran.
           /bin/bash --version | head -1
           python3 --version
+          node --version
 
       # The suite is hermetic: it fabricates its own ~/.claude and substitutes
       # the `ps` probe, so it needs no Claude Code installation and no network.
