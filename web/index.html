@@ -316,12 +316,44 @@ document.addEventListener("click", e => {
   if (b) { lastOutcome = null; openReply(b.dataset.sid, b.dataset.name); }
 });
 
+// The age of the data, not the age of the request: computed from the
+// absolute collected_at instants in the body we hold, never from a stored
+// `ages` value, so a repaint after a 304 or a resumed collection still shows
+// the true elapsed time rather than freezing it at the moment the body
+// arrived.
+function repaintFooter() {
+  if (!lastBody) return;
+  const s = lastBody;
+  if (s.warming) {
+    $("foot").textContent = "taking the first snapshot…";
+    $("counts").innerHTML = '<span>warming up</span>';
+    return;
+  }
+  const ca = s.collected_at || {};
+  const ageOf = k => ca[k] != null ? (Date.now() / 1000 - ca[k]) : null;
+  const snapAge = ageOf("snapshot"), depAge = ageOf("deploys"), peerAge = ageOf("peers");
+  const bits = ["updated " + new Date().toLocaleTimeString()];
+  if (snapAge > 10) bits.push(`<span class="stale">sessions ${dur(snapAge)} behind</span>`);
+  if (depAge != null) bits.push(`deploys ${dur(depAge)} ago`);
+  if (peerAge != null) bits.push(`peers ${dur(peerAge)} ago`);
+  if (s.error) bits.push(`<span style="color:var(--bad)">${esc(s.error)}</span>`);
+  if (!CAN_SEND) bits.push('<span class="dim">read-only</span>');
+  $("foot").innerHTML = bits.join(" &middot; ");
+}
+
+let lastEtag = null, lastBody = null;
 async function tick() {
   try {
-    const s = await (await fetch("/api/state", {cache:"no-store"})).json();
+    const res = await fetch("/api/state", lastEtag ? {headers: {"If-None-Match": lastEtag}} : {});
+    if (res.status === 304) {
+      repaintFooter();
+      return;
+    }
+    lastEtag = res.headers.get("ETag");
+    const s = await res.json();
+    lastBody = s;
     if (s.warming) {
-      $("foot").textContent = "taking the first snapshot…";
-      $("counts").innerHTML = '<span>warming up</span>';
+      repaintFooter();
       return;
     }
     $("gauges").innerHTML  = gauges(s.usage);
@@ -336,17 +368,7 @@ async function tick() {
       + (w ? ` &middot; <b style="color:var(--block)">${w} waiting on you</b>` : "")
       + (q ? ` &middot; <b style="color:var(--bad)">${q} suspect</b>` : "") + `</span>`;
     document.title = (w ? `(${w}) ` : "") + "ccwatch";
-    // The age of the data, not the age of the request. A dashboard that
-    // repaints on schedule while the feed behind it has stopped is the exact
-    // failure this tool exists to prevent.
-    const bits = ["updated " + new Date().toLocaleTimeString()];
-    const a = s.ages || {};
-    if (a.snapshot > 10) bits.push(`<span class="stale">sessions ${dur(a.snapshot)} behind</span>`);
-    if (a.deploys != null) bits.push(`deploys ${dur(a.deploys)} ago`);
-    if (a.peers != null) bits.push(`peers ${dur(a.peers)} ago`);
-    if (s.error) bits.push(`<span style="color:var(--bad)">${esc(s.error)}</span>`);
-    if (!CAN_SEND) bits.push('<span class="dim">read-only</span>');
-    $("foot").innerHTML = bits.join(" &middot; ");
+    repaintFooter();
     render_reply();
   } catch (e) {
     // A dashboard that silently stops updating is the failure this whole tool
@@ -355,8 +377,25 @@ async function tick() {
       + ` — is \`ccwatch serve\` still running?</span>`;
   }
 }
-tick();
-setInterval(tick, 3000);
+// The one and only setInterval in this file: everything periodic routes
+// through here so a page that is hidden (backgrounded tab) does no work at
+// all, and a page that becomes visible fires once immediately rather than
+// waiting out whatever was left of the old interval.
+let timer = null;
+function every(ms, fn) {
+  if (timer) clearInterval(timer);
+  timer = setInterval(fn, ms);
+}
+function resume() {
+  if (document.hidden) {
+    if (timer) { clearInterval(timer); timer = null; }
+    return;
+  }
+  tick();
+  every(3000, tick);
+}
+document.addEventListener("visibilitychange", resume);
+resume();
 </script>
 </body>
 </html>

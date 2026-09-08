@@ -657,6 +657,8 @@ All environment variables, all optional.
 | `CCWATCH_DEPLOY_PATTERN` | `deploy\|release\|rollback\|publish\|promote` | which workflows count as deploys |
 | `CCWATCH_DEPLOY_TTL` | `60` | seconds to cache `gh` results |
 | `CCWATCH_PORT` | `8787` | port for `ccwatch serve` |
+| `CCWATCH_IDLE_GRACE` | `15` | seconds `/api/state` may go unread before `ccwatch serve` stops collecting |
+| `CCWATCH_SNAPSHOT_TIMEOUT` | `90` | seconds the snapshot collector may run before it is reported as a failed collection |
 | `CCWATCH_HOME` | `~/.claude/ccwatch` | where the event log and usage feed live |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | which Claude Code config directory to read |
 | `CCWATCH_PROFILE` | | print per-stage timings to stderr |
@@ -734,6 +736,11 @@ implementation broken in the specific way it describes:
 | render a numbered list as bullets | 1 |
 | follow blockquote nesting as deep as the input goes | 1 |
 | remove `web/md.js` from the web directory | 1 |
+| revert the idle gate so collection never stops when nobody reads `/api/state` | 4 |
+| latch the idle gate, so collection stops but a read never resumes it | 2 |
+| add a second `setInterval` to a page instead of routing through the shared scheduler | 1 |
+| include `ages` in the ETag hash, so no two reads ever share a validator | 1 |
+| restore the old `snapshot_ok()` fabrication of an empty result on failure | 3 |
 
 That last table is not decoration. Two of those mutations are bugs that were
 actually **in** the code and were found this way, and two entries started life
@@ -783,6 +790,32 @@ how the actual cost was found rather than guessed at.
 The first round of this was guesswork and made things *slower*. The fork
 overhead that looked obviously expensive turned out to be a fraction of the
 cost; the real expense was filesystem traversal. Hence the profile flag.
+
+### The feed's duty cycle
+
+Before the idle-aware feed, `ccwatch serve` collected on a fixed cadence
+regardless of whether anyone was reading `/api/state` — the visible-tab column
+below is what every condition cost. Measured with `times` over a 60s window
+(the whole subshell's reaped children, not just the python pid, which misses
+the transient `jq`/`ps`/`git` forks) against this machine's real
+`~/.claude` — 34 live sessions across 94 projects, a heavier population than a
+typical dev box:
+
+| Condition | Before | After |
+|---|---|---|
+| no client at all | ~37% of one core | ~14% of one core |
+| a page open in a hidden tab | ~37% of one core | same as no client — a hidden tab issues zero `/api/state` requests, so nothing distinguishes it |
+| a page open and visible | ~37% of one core | ~37% of one core — reported, not improved; panel freshness and update interval are unchanged |
+
+The "after, no client" figure is not near-zero the way SC-001 expects on a
+lighter host: `LAST_READ` is seeded at server start (so the very first paint
+is warm without requiring a real reader first), which lets each collector run
+its normal cadence for the first `CCWATCH_IDLE_GRACE` (15s) before going idle
+for the rest of the window — on this population a single snapshot collection
+costs close to a second, so several fit in that warm-up. Over a window longer
+than the grace period the idle share dominates and the duty cycle keeps
+falling; the reduction shown here is the warm-up amortized over the fixed 60s
+the measurement method calls for, not the steady-state idle cost.
 
 ## A note on what this reads
 
