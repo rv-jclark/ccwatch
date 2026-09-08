@@ -414,11 +414,56 @@ Unfinished runs lie in the territory they belong to, deploy badges sit in its
 header, and messages between sessions are drawn as arrows between the two
 figures — including across territories, which is the case worth seeing.
 
-Territories are laid out in a plain responsive grid rather than as a
-force-directed graph. With a dozen nodes a spring layout is harder to read than
-the list it is drawn from, and it rearranges itself every time you look at it —
-"did that agent move, or do I misremember" is not a question a monitoring view
-should raise.
+### The city's geography comes from identity, not from a layout pass
+
+Districts, buildings, zones and figures each get their world coordinate from
+what they *are* — an org, a repository, a branch, a session id — never from
+their position in the payload or from a force-directed graph. A dozen nodes
+under a spring layout is harder to read than the list it is drawn from, and it
+rearranges itself every time you look at it: "did that agent move, or do I
+misremember" is not a question a monitoring view should raise. This entry
+replaced an earlier CSS grid that answered that question with "sometimes,
+whenever the severity sort changes" — a district reordered on a status change
+alone, a refresh rebuilt the whole tree and dropped whatever you had open, and
+a stopped feed rendered no differently from a machine with nothing running on
+it.
+
+`web/plots.js` is the pure identity→coordinate module (loaded by both
+`map.html` and, under `node`, `tests/run.sh`, the same way `web/md.js` is).
+Each level — district, building, zone, figure — is a fixed-column raster keyed
+by hash: `i = h1(key) mod C`, then `i = (i + h2(key)) mod C` on a collision,
+with `h2` odd and coprime to the column count, for up to `C` probes. A
+**persisted assignment always wins and is never recomputed**, which is what
+makes a coordinate survive every future refresh once it exists. When a
+parent's capacity is exhausted, the identity claims an annex plot — `<key>#2`,
+`<key>#3`, … — in the grandparent's space by the same rule, under the same
+label, rather than displacing anything already placed. A district's capacity
+doubles, never shrinks, when a new district cannot be placed; doubling is safe
+because existing districts are read back from storage, not re-derived, so the
+modulus changing cannot move them.
+
+Every draw is now **reconciled by key**, one `<g>` per identity, rather than
+rebuilt wholesale: an element whose key is still wanted gets its attributes
+updated in place, one absent from this tick's wanted set is removed, and
+nothing already onscreen that is still wanted is ever destroyed and recreated.
+That is what lets an open inspector, a hover, a focus ring and a text
+selection all survive a refresh — the only remaining wholesale `innerHTML`
+write is a turn's rendered markdown body inside an already-reconciled
+container.
+
+The whole occupied city is fit to the viewport — `k = min(vw/W, vh/H)` clamped
+to a scale of 3.0, the extent centred in the available space — recomputed only
+when the occupied set actually changes or the window resizes. There is no pan,
+no zoom, no level of detail, and no persisted viewport: fitting is a pure
+function of the extent and the window size, not state.
+
+A snapshot that is not `ok` — the feed down, a snapshot never taken, or a
+registry file that would not parse — is a different sentence in each of those
+three cases, not a variation in wording on the same one. Districts, buildings
+and zones stay drawn with their age marked stale; only the readings that
+change every tick (context fill, gauge percentages, host-pressure numbers) are
+withheld, because a stale percentage read as current is a false claim, and
+"no sessions" and "can't tell" are different facts that must read differently.
 
 ### The transcript inspector renders markdown
 
@@ -741,6 +786,18 @@ implementation broken in the specific way it describes:
 | add a second `setInterval` to a page instead of routing through the shared scheduler | 1 |
 | include `ages` in the ETag hash, so no two reads ever share a validator | 1 |
 | restore the old `snapshot_ok()` fabrication of an empty result on failure | 3 |
+| let `assign` re-hash a key already in storage instead of returning its stored slot | 1 |
+| make the probe step a call counter instead of deriving it from the key | 1 |
+| let `place` read `sev`/`cost`/`age` when computing a coordinate | 1 |
+| include a remembered-but-unoccupied plot in the extent | 1 |
+| drop the `liveKeys` guard from `save`'s eviction | 1 |
+| remove the version check from `load` | 1 |
+| drop the max-scale clamp from `fit` | 1 |
+| stop propagating `parse_failed` from `collect_sessions` through the snapshot and the footer | 2 |
+| let `/api/state` disagree with `--json` about `parse_failed` for the same registry | 1 |
+| reintroduce a wholesale `innerHTML =` on a refresh-reachable container in `map.html` | 1 |
+| add a second `setInterval` or a `requestAnimationFrame` call to the rewritten `map.html` | 1 |
+| drop or alter the `SEND_TOKEN` placeholder in the served `map.html` | 1 |
 
 That last table is not decoration. Two of those mutations are bugs that were
 actually **in** the code and were found this way, and two entries started life
