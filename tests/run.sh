@@ -30,7 +30,12 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # A floor on the tally, because "assertions ran but were never counted" is
 # invisible by construction: nothing else in a passing run distinguishes it from
 # a full run.
-TALLY_FLOOR=205
+#
+# 242 assertions run on a host with `node` and free loopback ports. 26 of those
+# are the node-gated markdown block, so a host without `node` counts 216 — the
+# floor has to sit below that, not below the full count, or the suite fails on
+# a machine that is merely missing an optional tool.
+TALLY_FLOOR=210
 
 assert_contains() { case "$1" in *"$2"*) t_pass "$3";; *) t_fail "$3" "expected to contain: $2";; esac; }
 assert_not_contains() { case "$1" in *"$2"*) t_fail "$3" "should NOT contain: $2";; *) t_pass "$3";; esac; }
@@ -45,7 +50,8 @@ cleanup_suite() {
   [ -n "${SPORT2:-}" ] && pkill -f "ccwatch serve --port $SPORT2" 2>/dev/null
   [ -n "${SPORT3:-}" ] && pkill -f "ccwatch serve --port $SPORT3" 2>/dev/null
   [ -n "${SPORT4:-}" ] && pkill -f "ccwatch serve --port $SPORT4" 2>/dev/null
-  [ -n "${SPORT4:-}" ] && pkill -f "ccwatch serve --port $SPORT4" 2>/dev/null
+  [ -n "${SPORT5:-}" ] && pkill -f "ccwatch serve --port $SPORT5" 2>/dev/null
+  [ -n "${SPORT6:-}" ] && pkill -f "ccwatch serve --port $SPORT6" 2>/dev/null
   rm -rf "$WORK"
   return 0
 }
@@ -726,6 +732,20 @@ assert_eq "$(peers --days 1 --json | jq '.messages')" "4" \
 # ================================================================== serve ====
 printf '\nserve\n'
 
+# FR-020-FR-022: no animation loop, and every periodic thing on a page routes
+# through exactly one setInterval — the shared visibility-aware scheduler.
+# This is a static, no-browser-needed guard for a property no other assertion
+# here can check.
+for _pf in "$ROOT/web/index.html" "$ROOT/web/map.html"; do
+  assert_eq "$(grep -c requestAnimationFrame "$_pf")" "0" \
+    "$_pf has no animation-frame loop"
+  assert_eq "$(grep -c 'setInterval(' "$_pf")" "1" \
+    "$_pf has exactly one setInterval — the shared scheduler"
+  _pfvc=$(grep -c visibilitychange "$_pf")
+  assert_eq "$(awk -v n="$_pfvc" 'BEGIN{print (n >= 1) ? "yes" : "no"}')" "yes" \
+    "$_pf listens for visibilitychange"
+done
+
 # The dashboard must never derive its own version of the status: two renderings
 # that compute it separately will eventually disagree, and the one you are not
 # looking at is the one that is wrong. So /api/state is asserted to be the same
@@ -967,6 +987,260 @@ if command -v curl >/dev/null 2>&1; then
   fi
   pkill -f "ccwatch serve --port $SPORT" 2>/dev/null || true
   rm -f "$FH/sessions/9107.json"
+
+  # --- idle-aware collection: no reader, no work (FR-001, FR-002, SC-001) --
+  #
+  # With a short grace period and nobody reading /api/state, a single read
+  # after the grace has lapsed must show the snapshot age tracking the whole
+  # idle span (collection stopped), not the ~2s cadence it would show if
+  # collection had kept running unread. A following read must show collection
+  # resuming, so this first post-idle read reports feed=idle.
+  SPORT5=$(free_port) || SPORT5=""
+  if [ -n "$SPORT5" ]; then
+    mksess 9601 iiiiiiii-0000-0000-0000-000000000001 idlerow /fake/repo idle cli
+    mktrans iiiiiiii-0000-0000-0000-000000000001 5
+    mkps 9601 "0:10.00" > "$WORK/ps-idle"
+    ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-idle" CCWATCH_HOME="$DH" \
+      CCWATCH_DEPLOY_TTL=999999 CCWATCH_IDLE_GRACE=2 \
+      "$CCWATCH" serve --port "$SPORT5" >"$WORK/serve-idle.log" 2>&1 & )
+    _i=0
+    while [ "$_i" -lt 40 ]; do
+      [ "$(curl -s --max-time 3 "http://127.0.0.1:$SPORT5/api/state" 2>/dev/null | jq -r '.warming' 2>/dev/null)" = "false" ] && break
+      sleep 1; _i=$((_i + 1))
+    done
+    # ⚠️ The idle span is 12s against a 2s grace, so a stopped collector leaves
+    # an age near 10s and a still-running one leaves an age at its ~2s cadence.
+    # The threshold sits between those two outcomes on purpose. It was `sleep 6`
+    # with `age > 4`, which put the pass/fail line exactly on the expected
+    # value (6s idle − 2s grace = 4.0) and made the result a coin flip: two
+    # consecutive runs on the same tree disagreed about which assertion in this
+    # pair failed. A margin, not a boundary.
+    sleep 12
+    _idle=$(curl -s --max-time 10 "http://127.0.0.1:$SPORT5/api/state")
+    assert_eq "$(printf '%s' "$_idle" | jq -r '.feed')" "idle" \
+      "the first read after the grace period reports the feed as idle"
+    _ia=$(printf '%s' "$_idle" | jq -r '.ages.snapshot')
+    assert_eq "$(awk -v a="$_ia" 'BEGIN{print (a > 6) ? "yes" : "no"}')" "yes" \
+      "collection stopped while nobody read /api/state (age tracks the full idle span, not the 2s cadence)"
+    # ⚠️ The contract is that a read RESUMES collection — not that a collection
+    # completes inside any fixed number of seconds. This assertion used to
+    # sleep 3 and require an age under 2.5s, which is one machine's speed
+    # written down as a requirement: a snapshot measured 2.1s warm but 24s on a
+    # cold cache under load on the development host, and it failed there while
+    # the feature worked correctly (verified by hand — the feed went idle at
+    # age 11.9s and the next read produced a 0.5s-old snapshot).
+    #
+    # So the deadline is derived from what a collection actually costs on THIS
+    # host. It stays a hard assertion rather than a skip on a slow host,
+    # because a broken resume ALSO produces no fresh snapshot, and reporting
+    # that as "skipped: host too slow" would count a regression as coverage.
+    _c0=$(python3 -c 'import time; print(time.time())')
+    ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-idle" CCWATCH_HOME="$DH" \
+      CCWATCH_DEPLOY_TTL=999999 "$CCWATCH" --json >/dev/null 2>&1 )
+    _c1=$(python3 -c 'import time; print(time.time())')
+    # Three collections' worth of headroom plus the cadence, so an ordinarily
+    # busy machine passes and only a pathological one runs out of deadline.
+    _deadline=$(awk -v a="$_c0" -v b="$_c1" 'BEGIN{d=(b-a)*3+6; print (d<10)?10:d}')
+    _fresh=no _waited=0
+    while [ "$(awk -v w="$_waited" -v d="$_deadline" 'BEGIN{print (w<d)?1:0}')" = "1" ]; do
+      sleep 2; _waited=$((_waited + 2))
+      _ra=$(curl -s --max-time 10 "http://127.0.0.1:$SPORT5/api/state" \
+            | jq -r '.ages.snapshot' 2>/dev/null)
+      # Younger than the idle span it replaced is the proof a new collection
+      # landed. Had collection stayed stopped, the age would keep climbing.
+      if [ "$(awk -v a="${_ra:-0}" -v i="$_ia" 'BEGIN{print (a < i - 1) ? 1 : 0}')" = "1" ]; then
+        _fresh=yes; break
+      fi
+    done
+    assert_eq "$_fresh" "yes" \
+      "and a read resumes collection, which catches up on its own cadence"
+    pkill -f "ccwatch serve --port $SPORT5" 2>/dev/null || true
+    rm -f "$FH/sessions/9601.json"
+  else
+    t_skip "idle-aware collection" "no free port"
+  fi
+
+  # --- conditional responses: the validator covers every measurement -------
+  # (FR-010, FR-011, FR-012)
+  #
+  # A 304 must guarantee that nothing measured changed, so the ETag has to be
+  # a hash of the published payload with `ages`/`stale`/`feed` excluded — those
+  # are recomputed per request from the wall clock and would otherwise churn
+  # the validator on every single read, defeating the whole point of a 304.
+  SPORT6=$(free_port) || SPORT6=""
+  if [ -n "$SPORT6" ]; then
+    mksess 9701 eeeeeeee-0000-0000-0000-000000000001 etagrow /fake/repo idle cli
+    mktrans eeeeeeee-0000-0000-0000-000000000001 5
+    mkps 9701 "0:10.00" > "$WORK/ps-etag"
+    ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-etag" CCWATCH_HOME="$DH" \
+      CCWATCH_DEPLOY_TTL=999999 "$CCWATCH" serve --port "$SPORT6" >"$WORK/serve-etag.log" 2>&1 & )
+    _e=0
+    while [ "$_e" -lt 40 ]; do
+      [ "$(curl -s --max-time 3 "http://127.0.0.1:$SPORT6/api/state" 2>/dev/null | jq -r '.warming' 2>/dev/null)" = "false" ] && break
+      sleep 1; _e=$((_e + 1))
+    done
+    # ⚠️ The contract is that the same collected data yields the same validator.
+    # This was two back-to-back reads plus the assumption that no collection
+    # could land between them — true on an idle machine, false on a busy one,
+    # where a collection on the 2s cadence slipping between the two reads
+    # changes the ETag legitimately. It passed twice and then failed once the
+    # host was loaded, which is a test reporting the machine rather than the
+    # code. So the pair is now confirmed against the collection instant that
+    # produced it, and retried when a collection did intervene.
+    #
+    # Exhausting the retries fails rather than skips, deliberately: a validator
+    # that never repeats across two reads is exactly the bug this section
+    # exists to catch — it is what hashing `ages` into the ETag would produce.
+    _try=0
+    while [ "$_try" -lt 20 ]; do
+      _try=$((_try + 1))
+      curl -s --max-time 10 -D "$WORK/hdr1" -o "$WORK/body1" "http://127.0.0.1:$SPORT6/api/state"
+      _etag1=$(tr -d '\r' < "$WORK/hdr1" | awk -F': ' 'tolower($1)=="etag"{print $2}')
+      _ages1=$(jq -r '.ages.snapshot' "$WORK/body1")
+      _ca1=$(jq -r '.collected_at.snapshot' "$WORK/body1")
+      curl -s --max-time 10 -D "$WORK/hdr2" -o "$WORK/body2" "http://127.0.0.1:$SPORT6/api/state"
+      _etag2=$(tr -d '\r' < "$WORK/hdr2" | awk -F': ' 'tolower($1)=="etag"{print $2}')
+      _ages2=$(jq -r '.ages.snapshot' "$WORK/body2")
+      _ca2=$(jq -r '.collected_at.snapshot' "$WORK/body2")
+      [ -n "$_ca1" ] && [ "$_ca1" = "$_ca2" ] && break
+    done
+    assert_eq "$_etag2" "$_etag1" \
+      "the ETag is unchanged across two reads with no intervening collection"
+    [ "$_ages1" != "$_ages2" ] \
+      && t_pass "even though the per-request ages differ between those same two reads" \
+      || t_fail "even though the per-request ages differ between those same two reads" \
+                "ages.snapshot was identical: $_ages1"
+    # A matching validator gets a bodyless 304.
+    # curl does not create the -o file at all for a bodyless 304 (nothing to
+    # write), so the body is confirmed empty via %{size_download} rather than
+    # by reading a file back.
+    _rw304=$(curl -s -o /dev/null -w '%{http_code} %{size_download}' --max-time 5 \
+             -H "If-None-Match: $_etag1" "http://127.0.0.1:$SPORT6/api/state")
+    assert_eq "${_rw304% *}" "304" "a matching If-None-Match gets a 304"
+    assert_eq "${_rw304#* }" "0" "and the 304 body is empty"
+    # A stale or unparseable validator still gets a full 200.
+    _code200=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+               -H 'If-None-Match: "0000000000000000"' "http://127.0.0.1:$SPORT6/api/state")
+    assert_eq "$_code200" "200" "a stale If-None-Match falls through to a full 200"
+    # And the 304 exchange must not have perturbed collected_at — the very
+    # instant a client needs to keep computing a truthful age from (FR-013).
+    curl -s --max-time 5 -o "$WORK/body3" "http://127.0.0.1:$SPORT6/api/state"
+    _ca3=$(jq -r '.collected_at.snapshot' "$WORK/body3")
+    assert_eq "$_ca3" "$_ca1" \
+      "collected_at is not reset by a 304 — the same instant survives the exchange"
+    _now3=$(python3 -c 'import time; print(time.time())')
+    assert_eq "$(awk -v n="$_now3" -v c="$_ca1" 'BEGIN{print (n - c > 0.2) ? "yes" : "no"}')" "yes" \
+      "so the client-derived age (now - collected_at) keeps growing rather than freezing"
+    pkill -f "ccwatch serve --port $SPORT6" 2>/dev/null || true
+    rm -f "$FH/sessions/9701.json"
+  else
+    t_skip "conditional responses" "no free port"
+  fi
+
+  # --- a failed snapshot is a fact, not an empty set (US3) ------------------
+  # (FR-024, FR-026, SC-007)
+  #
+  # A collection that exceeds its ceiling must read differently from a host
+  # that genuinely has no sessions — snapshot_ok/snapshot_error is the pair
+  # that makes the two distinguishable by inspecting the payload alone.
+  SPORT7=$(free_port) || SPORT7=""
+  if [ -n "$SPORT7" ]; then
+    ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-sv" CCWATCH_HOME="$DH" \
+      CCWATCH_DEPLOY_TTL=999999 CCWATCH_SNAPSHOT_TIMEOUT=0.001 \
+      "$CCWATCH" serve --port "$SPORT7" >"$WORK/serve-to.log" 2>&1 & )
+    _t7=0
+    while [ "$_t7" -lt 30 ]; do
+      curl -s --max-time 2 -o /dev/null "http://127.0.0.1:$SPORT7/" 2>/dev/null && break
+      sleep 1; _t7=$((_t7 + 1))
+    done
+    sleep 2
+    _to=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT7/api/state")
+    assert_eq "$(printf '%s' "$_to" | jq -r '.snapshot_ok')" "false" \
+      "a snapshot that exceeds its ceiling is reported as a failed collection, not an empty one"
+    assert_contains "$(printf '%s' "$_to" | jq -r '.snapshot_error')" "time" \
+      "and the failure reason names the timeout"
+    assert_eq "$(printf '%s' "$_to" | jq -r '.warming')" "true" \
+      "warming stays true because no snapshot has ever succeeded"
+    assert_eq "$(printf '%s' "$_to" | jq -r '.sessions')" "null" \
+      "and sessions is null, never a fabricated empty list"
+    pkill -f "ccwatch serve --port $SPORT7" 2>/dev/null || true
+  else
+    t_skip "failed snapshot is distinguishable from an empty host" "no free port"
+  fi
+
+  # A healthy server on a host with genuinely no sessions must read the other
+  # way, so the two payloads above are distinguishable and neither is confused
+  # for the other.
+  SPORT8=$(free_port) || SPORT8=""
+  if [ -n "$SPORT8" ]; then
+    ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-sv" CCWATCH_HOME="$DH" \
+      CCWATCH_DEPLOY_TTL=999999 "$CCWATCH" serve --port "$SPORT8" >"$WORK/serve-empty.log" 2>&1 & )
+    _e8=0
+    while [ "$_e8" -lt 30 ]; do
+      [ "$(curl -s --max-time 3 "http://127.0.0.1:$SPORT8/api/state" 2>/dev/null | jq -r '.warming' 2>/dev/null)" = "false" ] && break
+      sleep 1; _e8=$((_e8 + 1))
+    done
+    _empty=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT8/api/state")
+    assert_eq "$(printf '%s' "$_empty" | jq -r '.snapshot_ok')" "true" \
+      "a genuinely empty host reports a successful collection"
+    assert_eq "$(printf '%s' "$_empty" | jq -r '.snapshot_error')" "null" \
+      "with no error"
+    assert_eq "$(printf '%s' "$_empty" | jq -r '.sessions')" "[]" \
+      "and sessions is an empty array, not null — the two payloads are distinguishable by inspection alone"
+    pkill -f "ccwatch serve --port $SPORT8" 2>/dev/null || true
+  else
+    t_skip "empty host is distinguishable from a failed snapshot" "no free port"
+  fi
+
+  # --- a failed collection retains the prior snapshot, not blanks it (US3) --
+  # (FR-025)
+  #
+  # Once a snapshot has succeeded, a later failure must leave the retained
+  # `sessions` list and its original `collected_at` untouched, so the panel's
+  # age keeps growing truthfully instead of resetting near zero as a fresh
+  # empty collection would. Forced by making the running server's own copy of
+  # the tool briefly unexecutable, so every subsequent collection attempt
+  # fails — a private copy, so this cannot affect any other test in the suite.
+  SPORT9=$(free_port) || SPORT9=""
+  if [ -n "$SPORT9" ]; then
+    TC="$WORK/toolcopy"
+    mkdir -p "$TC/bin" "$TC/web"
+    cp "$CCWATCH" "$TC/bin/ccwatch"
+    chmod +x "$TC/bin/ccwatch"
+    cp "$ROOT/web/"*.html "$TC/web/"
+    mksess 9801 ffffffff-0000-0000-0000-000000000001 retainrow /fake/repo idle cli
+    mktrans ffffffff-0000-0000-0000-000000000001 5
+    mkps 9801 "0:10.00" > "$WORK/ps-retain"
+    ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-retain" CCWATCH_HOME="$DH" \
+      CCWATCH_DEPLOY_TTL=999999 "$TC/bin/ccwatch" serve --port "$SPORT9" \
+      >"$WORK/serve-retain.log" 2>&1 & )
+    _r9=0
+    while [ "$_r9" -lt 40 ]; do
+      [ "$(curl -s --max-time 3 "http://127.0.0.1:$SPORT9/api/state" 2>/dev/null | jq -r '.warming' 2>/dev/null)" = "false" ] && break
+      sleep 1; _r9=$((_r9 + 1))
+    done
+    _before9=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT9/api/state")
+    _sessions_before=$(printf '%s' "$_before9" | jq -c '.sessions')
+    _ca_before=$(printf '%s' "$_before9" | jq -r '.collected_at.snapshot')
+    chmod -x "$TC/bin/ccwatch"
+    sleep 5
+    _after9=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT9/api/state")
+    assert_eq "$(printf '%s' "$_after9" | jq -r '.snapshot_ok')" "false" \
+      "a subsequent collection failure is reported, not silently swallowed"
+    assert_eq "$(printf '%s' "$_after9" | jq -c '.sessions')" "$_sessions_before" \
+      "and the last successful sessions list is retained rather than blanked"
+    _ca_after=$(printf '%s' "$_after9" | jq -r '.collected_at.snapshot')
+    assert_eq "$_ca_after" "$_ca_before" \
+      "collected_at is not refreshed by a failed attempt"
+    _age_after=$(printf '%s' "$_after9" | jq -r '.ages.snapshot')
+    assert_eq "$(awk -v a="$_age_after" 'BEGIN{print (a > 4) ? "yes" : "no"}')" "yes" \
+      "so its age keeps growing truthfully, rather than resetting to near-zero as a fresh empty collection would"
+    chmod +x "$TC/bin/ccwatch"
+    pkill -f "ccwatch serve --port $SPORT9" 2>/dev/null || true
+    rm -f "$FH/sessions/9801.json"
+  else
+    t_skip "a failed collection retains the prior snapshot" "no free port"
+  fi
 else
   t_skip "serve" "curl not available"
 fi

@@ -2624,6 +2624,7 @@ peers_graph() { # peers_graph <edges.jsonl> <live.json>
 # and fragments of peer messages; that is not something to serve on 0.0.0.0.
 cmd_serve() {
   local port="${CCWATCH_PORT:-8787}" open=0 readonly=0 allowkill=0
+  local idle_grace="${CCWATCH_IDLE_GRACE:-15}" snapshot_timeout="${CCWATCH_SNAPSHOT_TIMEOUT:-90}"
   while [ $# -gt 0 ]; do
     case "$1" in
       --port)      port="${2:-8787}"; shift 2 || exit 3;;
@@ -2682,8 +2683,9 @@ cmd_serve() {
 
   CCWATCH_SELF="$root/bin/ccwatch" CCWATCH_WEB="$root/web" CCWATCH_BIND_PORT="$port" \
   CCWATCH_SEND_TOKEN="$send_token" CCWATCH_ALLOW_KILL="$allowkill" \
+  CCWATCH_IDLE_GRACE="$idle_grace" CCWATCH_SNAPSHOT_TIMEOUT="$snapshot_timeout" \
   python3 -c '
-import http.server, json, os, socketserver, subprocess, sys, threading, time
+import hashlib, http.server, json, os, socketserver, subprocess, sys, threading, time
 
 SELF = os.environ["CCWATCH_SELF"]
 WEB  = os.environ["CCWATCH_WEB"]
@@ -2708,8 +2710,14 @@ MAX_MESSAGE = 4000
 #
 # So: one refresher, N readers. The handler never blocks, and the page gets a
 # `stale` age it can display rather than silently showing old numbers.
-STATE = {"warming": True}
+#
+# "warming" is derived from STATE["snapshot_at"] being unset, not stored as
+# its own flag — a flag can be left stale by a code path that forgets to
+# clear it; a timestamp cannot.
+STATE = {}
 LOCK = threading.Lock()
+LAST_READ = time.monotonic()
+GRACE = float(os.environ.get("CCWATCH_IDLE_GRACE", "15"))
 
 def run(args, timeout):
     try:
@@ -2736,25 +2744,86 @@ def run(args, timeout):
 #
 # Each refresher owns one key and writes it under the lock. A slow one can only
 # make its own panel stale, and the page shows the age of each panel.
+#
+# Each loop holds its own `next_due` and checks two gates before doing any
+# work: idle (nobody has read /api/state within GRACE) and not-yet-due. Idle
+# does NOT advance next_due, so a collector that idled through several of its
+# own cadences fires on the very first tick after a reader returns rather than
+# leaving its panel stale for up to `every` more seconds. A collection already
+# in flight is never interrupted — the gate is only checked before starting.
+TICK = 0.25
 def refresh_loop(key, args, timeout, every, transform=None):
     def loop():
+        next_due = 0.0
         while True:
+            now = time.monotonic()
+            if now - LAST_READ > GRACE:
+                time.sleep(TICK)
+                continue
+            if now < next_due:
+                time.sleep(TICK)
+                continue
             val = run(args, timeout)
             if transform:
                 val = transform(val)
             with LOCK:
-                STATE[key] = val
-                STATE[key + "_at"] = time.time()
                 if key == "snapshot":
-                    STATE["warming"] = False
-            time.sleep(every)
+                    # A failed or timed-out collection must not overwrite a
+                    # retained good snapshot with an empty one -- that is
+                    # indistinguishable from a host with no sessions
+                    # (Constitution IV). Leave snapshot/snapshot_at
+                    # untouched on failure so the retained panels age keeps
+                    # growing truthfully; record the failure alongside it.
+                    if isinstance(val, dict) and "sessions" in val:
+                        STATE["snapshot"] = val
+                        STATE["snapshot_at"] = time.time()
+                        STATE["snapshot_ok"] = True
+                        STATE["snapshot_error"] = None
+                    else:
+                        STATE["snapshot_ok"] = False
+                        STATE["snapshot_error"] = (
+                            (val or {}).get("error", "snapshot failed")
+                            if isinstance(val, dict) else "snapshot failed")
+                else:
+                    STATE[key] = val
+                    STATE[key + "_at"] = time.time()
+                refresh_etag()
+            next_due = time.monotonic() + every
     return loop
 
-def snapshot_ok(snap):
-    if not isinstance(snap, dict) or "sessions" not in snap:
-        return {"sessions": [], "unfinished": [],
-                "error": (snap or {}).get("error", "snapshot failed")}
-    return snap
+def build_canonical():
+    # Assumes LOCK held. Same shape as the /api/state payload minus
+    # `ages`/`stale`/`feed` — those are recomputed per request, never
+    # published, so they must never affect the ETag (a 304 must guarantee
+    # every MEASURED number is unchanged, not merely that time passed).
+    snap = dict(STATE.get("snapshot") or {})
+    body = dict(snap)
+    body["warming"] = STATE.get("snapshot_at") is None
+    if body["warming"]:
+        # No snapshot has ever succeeded — `null`, never a fabricated `[]`,
+        # so a genuinely empty host and a never-succeeded one cannot be
+        # confused by inspection of the payload alone.
+        body["sessions"] = None
+        body["unfinished"] = None
+    body["deploys"] = STATE.get("deploys")
+    body["peers"] = STATE.get("peers")
+    body["can_kill"] = ALLOW_KILL
+    body["snapshot_ok"] = STATE.get("snapshot_ok", True)
+    body["snapshot_error"] = STATE.get("snapshot_error")
+    if body["snapshot_error"]:
+        # Mirrored into the existing top-level `error` key so the table
+        # views footer surfaces a failed collection without a page change.
+        body["error"] = body["snapshot_error"]
+    body["collected_at"] = {
+        k: STATE.get(k + "_at") for k in ("snapshot", "deploys", "peers")}
+    return body
+
+def refresh_etag():
+    # Assumes LOCK held. Computed once per publish, not per request, so
+    # concurrent readers see the same validator without re-hashing the
+    # payload on every /api/state hit.
+    canon = json.dumps(build_canonical(), sort_keys=True, separators=(",", ":"))
+    STATE["etag"] = hashlib.sha256(canon.encode()).hexdigest()[:16]
 
 class H(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
@@ -2908,25 +2977,45 @@ class H(http.server.SimpleHTTPRequestHandler):
                 self.reply_json(500, {"error": "unparseable transcript: %s" % e})
             return
         if self.path.startswith("/api/state"):
+            global LAST_READ
+            prev_read = LAST_READ
+            LAST_READ = time.monotonic()
             now = time.time()
             with LOCK:
-                snap = dict(STATE.get("snapshot") or {})
-                payload = dict(snap)
-                payload["warming"] = STATE.get("warming", True)
-                payload["deploys"] = STATE.get("deploys")
-                payload["peers"] = STATE.get("peers")
+                payload = build_canonical()
+                etag = STATE.get("etag")
                 # Every panel carries its OWN age, so one slow collector cannot
                 # make the whole dashboard look stale — or worse, make a stale
                 # panel look current.
-                payload["can_kill"] = ALLOW_KILL
                 payload["ages"] = {
                     k: (now - STATE[k + "_at"]) if STATE.get(k + "_at") else None
                     for k in ("snapshot", "deploys", "peers")}
             payload["stale"] = payload["ages"].get("snapshot")
+            # Derived per request, never stored: "warming" if no snapshot has
+            # ever succeeded, else "idle" if the read that preceded THIS one
+            # (before the stamp above overwrote it) was more than GRACE ago,
+            # else "collecting".
+            payload["feed"] = ("warming" if STATE.get("snapshot_at") is None
+                                else "idle" if (LAST_READ - prev_read) > GRACE
+                                else "collecting")
+            quoted_etag = ("\"%s\"" % etag) if etag else None
+            inm = self.headers.get("If-None-Match")
+            # A comma-separated list of validators, each optionally quoted;
+            # "*" matches whatever the server currently holds. Absent, stale
+            # or unparseable ⇒ fall through to a full 200 (FR-011).
+            if quoted_etag and inm and (
+                    "*" in inm or quoted_etag in [t.strip() for t in inm.split(",")]):
+                self.send_response(304)
+                self.send_header("ETag", quoted_etag)
+                self.send_header("Cache-Control", "no-cache, private")
+                self.end_headers()
+                return
             body = json.dumps(payload).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Cache-Control", "no-store")
+            if quoted_etag:
+                self.send_header("ETag", quoted_etag)
+            self.send_header("Cache-Control", "no-cache, private")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -2940,8 +3029,9 @@ class S(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
+SNAPSHOT_TIMEOUT = float(os.environ.get("CCWATCH_SNAPSHOT_TIMEOUT", "90"))
 for _key, _args, _to, _every, _tf in (
-        ("snapshot", ["--json"], 40, 2, snapshot_ok),
+        ("snapshot", ["--json"], SNAPSHOT_TIMEOUT, 2, None),
         ("deploys",  ["deploys", "--json"], 120, 60, None),
         ("peers",    ["peers", "--days", "2", "--json"], 120, 45, None)):
     threading.Thread(target=refresh_loop(_key, _args, _to, _every, _tf), daemon=True).start()

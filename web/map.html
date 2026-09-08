@@ -470,7 +470,19 @@ function gauges(u) {
 }
 
 // ---- inspector -------------------------------------------------------------
-let target = null, convoTimer = null;
+let target = null;
+
+// The one and only setInterval in this file, shared by every periodic thing
+// on the page (the roster poll and the open conversation's own cadence) so a
+// hidden (backgrounded) tab does no periodic work of any kind.
+const timers = {};
+function every(name, ms, fn) {
+  if (timers[name]) clearInterval(timers[name]);
+  timers[name] = setInterval(fn, ms);
+}
+function clearEvery(name) {
+  if (timers[name]) { clearInterval(timers[name]); timers[name] = null; }
+}
 
 const WHO = {said:"you", assistant:"claude", system:"system", tool_result:"result"};
 
@@ -614,13 +626,12 @@ function openReply(sid, name, row) {
   loadConvo();
   // Followed live while open, on its own slower cadence — the transcript is
   // read from disk per request and is much heavier than the roster poll.
-  if (convoTimer) clearInterval(convoTimer);
-  convoTimer = setInterval(loadConvo, 5000);
+  every("convo", 5000, loadConvo);
   if (CAN_SEND) $("replyText").focus();
 }
 function closeReply() {
   target = null;
-  if (convoTimer) { clearInterval(convoTimer); convoTimer = null; }
+  clearEvery("convo");
   $("reply").classList.remove("on");
   $("replyText").value = "";
 }
@@ -661,10 +672,39 @@ document.addEventListener("click", e => {
 });
 
 // ---- draw ------------------------------------------------------------------
+// The age of the data, not the age of the request: computed from the
+// absolute collected_at instants in the body we hold, never from a stored
+// `ages` value, so a repaint after a 304 or a resumed collection still shows
+// the true elapsed time rather than freezing it at the moment the body
+// arrived.
+function repaintFooter() {
+  if (!lastBody) return;
+  const s = lastBody;
+  if (s.warming) { $("foot").textContent = "taking the first snapshot…"; return; }
+  const ca = s.collected_at || {};
+  const snapAge = ca.snapshot != null ? (Date.now() / 1000 - ca.snapshot) : null;
+  const bits = ["updated " + new Date().toLocaleTimeString()];
+  if (snapAge > 10) bits.push(`<span class="stale">sessions ${dur(snapAge)} behind</span>`);
+  const total = (s.peers && s.peers.edges) ? s.peers.edges.length : 0;
+  const drawn = lastDrawn;
+  if (total > drawn)
+    bits.push(`${drawn}/${total} message edges drawn — the rest involve sessions`
+            + ` that have exited (see the table view)`);
+  $("foot").innerHTML = bits.join(" &middot; ");
+}
+
+let lastEtag = null, lastBody = null, lastDrawn = 0;
 async function tick() {
   try {
-    const s = await (await fetch("/api/state", {cache:"no-store"})).json();
-    if (s.warming) { $("foot").textContent = "taking the first snapshot…"; return; }
+    const res = await fetch("/api/state", lastEtag ? {headers: {"If-None-Match": lastEtag}} : {});
+    if (res.status === 304) {
+      repaintFooter();
+      return;
+    }
+    lastEtag = res.headers.get("ETag");
+    const s = await res.json();
+    lastBody = s;
+    if (s.warming) { repaintFooter(); return; }
     CAN_KILL = !!s.can_kill;
 
     // Grouped by project. Territories that need you sort first, so the map does
@@ -729,24 +769,32 @@ async function tick() {
                : `<span>click an agent to read its conversation (read-only)</span>`,
     ].join("");
 
-    const a = s.ages || {};
-    const bits = ["updated " + new Date().toLocaleTimeString()];
-    if (a.snapshot > 10) bits.push(`<span class="stale">sessions ${dur(a.snapshot)} behind</span>`);
-    const total = (s.peers && s.peers.edges) ? s.peers.edges.length : 0;
-    if (total > drawn)
-      bits.push(`${drawn}/${total} message edges drawn — the rest involve sessions`
-              + ` that have exited (see the table view)`);
-    $("foot").innerHTML = bits.join(" &middot; ");
+    lastDrawn = drawn;
+    repaintFooter();
   } catch (e) {
     $("foot").innerHTML = `<span style="color:var(--bad)">feed is down: ${esc(e.message)}`
       + ` — is \`ccwatch serve\` still running?</span>`;
   }
 }
-tick();
-setInterval(tick, 3000);
+// A page that becomes visible fires once immediately rather than waiting out
+// whatever was left of the old interval. A hidden (backgrounded) tab does no
+// periodic work of any kind — including the open conversation's own cadence.
+function resume() {
+  if (document.hidden) {
+    clearEvery("tick");
+    clearEvery("convo");
+    return;
+  }
+  tick();
+  every("tick", 3000, tick);
+  // The transcript inspector, if open, follows the same visibility rule.
+  if (target) every("convo", 5000, loadConvo);
+}
+document.addEventListener("visibilitychange", resume);
+resume();
 // The wires are positioned from measured geometry, so they have to be redrawn
-// when the grid reflows.
-addEventListener("resize", () => tick());
+// when the grid reflows. Not while hidden — a backgrounded tab does not resize.
+addEventListener("resize", () => { if (!document.hidden) tick(); });
 </script>
 </body>
 </html>
