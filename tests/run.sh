@@ -30,7 +30,7 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # A floor on the tally, because "assertions ran but were never counted" is
 # invisible by construction: nothing else in a passing run distinguishes it from
 # a full run.
-TALLY_FLOOR=90
+TALLY_FLOOR=205
 
 assert_contains() { case "$1" in *"$2"*) t_pass "$3";; *) t_fail "$3" "expected to contain: $2";; esac; }
 assert_not_contains() { case "$1" in *"$2"*) t_fail "$3" "should NOT contain: $2";; *) t_pass "$3";; esac; }
@@ -786,6 +786,12 @@ if command -v curl >/dev/null 2>&1; then
   assert_contains "$(cat "$WORK/serve.log")" "127.0.0.1" "serve binds loopback, not every interface"
   assert_eq "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$SPORT/map")" "200" \
     "the map view is served too"
+  # The markdown renderer is a second asset the map view loads, served by the
+  # static fallback rather than by a route of its own — so nothing in `serve`
+  # names it, and if it stopped arriving the inspector would go on working
+  # while quietly showing every turn as raw asterisks.
+  assert_eq "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$SPORT/md.js")" "200" \
+    "and the markdown renderer it loads is served beside it"
 
   # ⚠️ Invoked through a SYMLINK, which is the install the README documents —
   # `ln -s .../bin/ccwatch /usr/local/bin/ccwatch`, so that `git pull` upgrades
@@ -1376,6 +1382,124 @@ _rm=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-empty2" CCWATCH_HOME="$K
       NO_COLOR=1 "$CCWATCH" resume -n 30 2>&1)
 assert_contains "$_rm" "claude --resume $MSID" \
   "a transcript ending in metadata records is still offered for resume"
+
+
+# =============================================================== markdown ====
+printf '\nmarkdown\n'
+#
+# `web/md.js` renders transcript text, which is to say arbitrary file contents
+# and tool output, into HTML. It lives in its own file precisely so that these
+# assertions can run it: an escaping rule nobody executes is a comment.
+if command -v node >/dev/null 2>&1; then
+  # The program goes in -e and the INPUT goes in argv. Deliberately not stdin:
+  # a heredoc feeding a program that also reads stdin has already cost this
+  # project a debugging session once.
+  md_render() { # md_render <markdown>
+    node -e 'process.stdout.write(require(process.argv[1]).render(process.argv[2] || ""))' \
+         "$ROOT/web/md.js" "$1" 2>&1
+  }
+
+  # ⚠️ A canary, because the failure mode here is misleading rather than loud:
+  # if node cannot load the file at all, md_render returns an error message and
+  # every `assert_not_contains` below passes against it. This happened while
+  # these assertions were being written — a wrong path produced ten green
+  # checks. One clear failure beats that.
+  if md_render 'canary' >/dev/null 2>&1; then
+    t_pass "the renderer loads"
+  else
+    t_fail "the renderer loads" "node could not load $ROOT/web/md.js"
+  fi
+
+  _md=$(md_render '**Fixed** the join and `ccwatch doctor` passes')
+  assert_contains "$_md" "<strong>Fixed</strong>" "bold becomes bold"
+  assert_contains "$_md" "<code>ccwatch doctor</code>" "and a code span becomes code"
+
+  assert_contains "$(md_render '## Plan')" "<h5>Plan</h5>" \
+    "a heading is a heading, demoted so it is not this page's h1"
+
+  _md=$(md_render '```bash
+ccwatch once | grep HUNG
+```')
+  assert_contains "$_md" "<pre data-lang=\"bash\"><code>ccwatch once | grep HUNG</code></pre>" \
+    "a fenced block keeps its content and records the language"
+
+  # ⚠️ A turn is truncated at 1200 characters, which lands mid-block most times
+  # a model pastes a file. An unclosed fence must not swallow the rest of the
+  # conversation into a code block.
+  assert_contains "$(md_render '```python
+print(1)')" "</code></pre>" \
+    "a fence cut off by truncation is still closed"
+
+  # ⚠️ The escaping assertions. These are the reason the file is testable.
+  _md=$(md_render '<script>alert(1)</script> and <img src=x onerror=alert(1)>')
+  assert_not_contains "$_md" "<script" "a script tag in a transcript is not a script tag"
+  assert_not_contains "$_md" "<img" "nor is an img tag with an onerror"
+  assert_contains "$_md" "&lt;script&gt;" "it is shown as the text it was"
+
+  assert_not_contains "$(md_render '```
+<img src=x onerror=alert(1)>
+```')" "<img" "and markup inside a code fence is escaped too"
+
+  # No anchors at all, for any scheme — a click in this panel must never become
+  # an outbound request carrying transcript content.
+  _md=$(md_render '[click](javascript:alert(1)) and [PR 12](https://example.com/pull/12)')
+  assert_not_contains "$_md" "<a " "a markdown link does not become an anchor"
+  assert_not_contains "$_md" "href" "and carries no href of any kind"
+  assert_contains "$_md" "PR 12" "the label survives"
+  assert_contains "$_md" "example.com/pull/12" "and the URL is readable as text"
+
+  # ⚠️ ccwatch's own reduction of a tool use is not the model's prose, and the
+  # argument in it is a shell glob, not a formatting instruction.
+  # ⚠️ The fixture uses `*TODO*` deliberately. An earlier one used `**/*.ts`,
+  # which the inline pass leaves alone anyway — so the assertion passed with the
+  # verbatim handling removed, which makes it a test defect rather than
+  # coverage. This argument would come back in italics.
+  _md=$(md_render '→ Grep: *TODO* in web/')
+  assert_contains "$_md" 'class="mdmeta"' \
+    "a tool-use line is marked as ccwatch's own text, not the model's"
+  assert_contains "$_md" "*TODO*" "and is kept verbatim"
+  assert_not_contains "$_md" "<em>" "rather than read as emphasis"
+
+  # ⚠️ Transcripts are full of identifiers. `__init__` rendered as a bold
+  # "init", and `file_path` as file<em>path</em>, which is worse than no
+  # rendering at all because it changes what the text says.
+  _md=$(md_render 'the file_path and __init__ and tool_use_id are intact')
+  assert_contains "$_md" "__init__" "a dunder is left alone"
+  assert_contains "$_md" "file_path" "so is snake_case"
+  assert_not_contains "$_md" "<strong>" "no emphasis is invented from underscores"
+
+  # ⚠️ Multiplication is not rare in a conversation about token counts, and
+  # `2 * 3 * 4` rendered as "2 <em> 3 </em> 4".
+  assert_not_contains "$(md_render '2 * 3 * 4 tokens')" "<em>" \
+    "an asterisk with spaces around it is arithmetic, not emphasis"
+
+  # Nesting goes INSIDE the item, which is what makes the indent read as
+  # subordination rather than as a second list.
+  assert_contains "$(md_render '- corroborate
+  - transcript mtime
+- render')" "<li>corroborate<ul><li>transcript mtime</li></ul></li>" \
+    "a nested bullet nests inside its parent item"
+
+  assert_contains "$(md_render '1. read
+2. corroborate')" "<ol><li>read</li><li>corroborate</li></ol>" \
+    "a numbered list is ordered"
+
+  # Unbounded input, bounded output. A turn that is all "> " is 600 levels at
+  # the 1200-character cap, which is 600 nested elements for one turn on a panel
+  # that re-renders every five seconds. Nesting stops at four and the rest of
+  # the markers are shown as text.
+  # ⚠️ The assertion is on the nesting, not on surviving: node renders 600
+  # levels without overflowing, so an assertion phrased as "does not crash"
+  # would pass with the cap removed and count as coverage it is not.
+  _md=$(md_render "$(node -e 'process.stdout.write("> ".repeat(8) + "quoted")')")
+  assert_contains "$_md" "<blockquote><blockquote><blockquote><blockquote>" \
+    "quoting nests"
+  assert_not_contains "$_md" "<blockquote><blockquote><blockquote><blockquote><blockquote>" \
+    "but only four deep, however deep the input goes"
+  assert_contains "$_md" "quoted" "and the content at the bottom still renders"
+else
+  t_skip "markdown renderer" "node not installed"
+fi
 
 
 printf '\n%s passed, %s failed' "$pass" "$fail"
