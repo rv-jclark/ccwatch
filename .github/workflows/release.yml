@@ -1,0 +1,45 @@
+name: release
+
+# Versions come from the commit log, not from someone remembering. Every push to
+# main is read as conventional commits: `fix:` moves the patch, `feat:` the
+# minor, a `!` or a `BREAKING CHANGE:` footer the major. release-please keeps a
+# release PR up to date with the pending bump, the changelog entry it would
+# write, and the new number patched into `bin/ccwatch`; merging that PR is what
+# cuts the tag and the GitHub release.
+#
+# Why a PR rather than a tag straight off main: the version in the script and
+# the tag on the commit have to agree, and the PR is where that pairing is
+# visible before it becomes permanent. It is also the only place the generated
+# changelog can be edited while it still costs nothing.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# A second push while a release run is in flight would otherwise race it for the
+# same release PR.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    # ubuntu, unlike ci.yml. Nothing here executes ccwatch — no `stat -f`, no
+    # `ps -o lstart=`, no bash 3.2 — so the macOS runner would only cost time.
+    runs-on: ubuntu-latest
+    steps:
+      # ⚠️ The release PR is opened by GITHUB_TOKEN, and GitHub deliberately
+      # does not run workflows on PRs created that way, so ci.yml will not fire
+      # on it. That is tolerable only because the PR touches nothing executable:
+      # CHANGELOG.md, the manifest, and the version line in bin/ccwatch. The
+      # suite has already run on those commits on main. If this job ever starts
+      # editing anything else, it needs a PAT so CI can see it.
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
