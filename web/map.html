@@ -56,27 +56,72 @@
      time you look at it, and "did that agent move or did I misremember" is not
      a question a monitoring view should raise. */
   #wrap { position:relative; padding:1.1rem; }
-  #world { width:100%; height:calc(100vh - 8rem); display:block; }
+  /* touch-action:none so a one-finger drag pans the map instead of scrolling
+     the page (FR-007). */
+  #world { width:100%; height:calc(100vh - 8rem); display:block; touch-action:none; }
+  #world:focus-visible { outline:2px solid var(--info); outline-offset:2px; }
+  /* Page chrome, outside the camera group and outside data-lod on purpose
+     (page-camera.md §2): the controls are unaffected by the transform and
+     stay legible at every zoom. */
+  #camctl { position:absolute; left:1.6rem; bottom:1.6rem; display:flex;
+            align-items:center; gap:.4rem; background:var(--panel);
+            border:1px solid var(--line); border-radius:6px; padding:.35rem .5rem;
+            font-size:11px; }
+  #camctl button { background:none; border:1px solid var(--line); color:var(--ink);
+                    font:inherit; padding:.15rem .5rem; border-radius:4px; cursor:pointer; }
+  #camctl button:disabled { opacity:.4; cursor:default; }
+  #camstate { color:var(--dim); }
+  #camnote { color:var(--warn); }
   .hit { fill:transparent; }
   .district .hit { stroke:var(--line); stroke-width:1; fill:var(--ground); }
   .building .hit { stroke:var(--line); stroke-width:.6; fill:var(--panel); }
   .zone .hit { stroke:var(--line); stroke-width:.4; fill:none; stroke-dasharray:1.5; }
-  .dlabel { font-size:7px; fill:var(--ink); font-weight:600; }
-  .blabel { font-size:5px; fill:var(--ink); }
-  .zlabel { font-size:4px; fill:var(--dim); }
-  .norepo-badge { font-size:4px; fill:var(--warn); }
-  .wreck-badge { font-size:4px; fill:var(--bad); }
-  .deploy-badge { font-size:4px; fill:var(--ok); }
+  .dlabel { font-size:calc(7px / var(--k, 1)); fill:var(--ink); font-weight:600; }
+  .blabel { font-size:calc(5px / var(--k, 1)); fill:var(--ink); }
+  .zlabel { font-size:calc(4px / var(--k, 1)); fill:var(--dim); }
+  .norepo-badge { font-size:calc(4px / var(--k, 1)); fill:var(--warn); }
+  .wreck-badge { font-size:calc(4px / var(--k, 1)); fill:var(--bad); }
+  .deploy-badge { font-size:calc(4px / var(--k, 1)); fill:var(--ok); }
   .building.has-unfinished .hit { stroke:var(--bad); }
+  .dsummary { font-size:calc(6px / var(--k, 1)); fill:var(--dim); }
 
   .agent { cursor:default; }
   .agent.clickable { cursor:pointer; }
   .agent.clickable:hover .hit { fill:rgba(255,255,255,.06); }
   .figure { display:block; overflow:visible; }
-  .alabel { font-size:3.6px; fill:var(--dim); text-anchor:middle; }
+  .alabel { font-size:calc(3.6px / var(--k, 1)); fill:var(--dim); text-anchor:middle; }
   .agent.sev4 .alabel { fill:var(--block); font-weight:600; }
   .agent.sev3 .alabel { fill:var(--bad); }
   .agent.sev2 .alabel { fill:var(--ink); }
+
+  /* Level of detail (contracts/page-camera.md §3): one attribute, four
+     rules. The far level shows the district aggregate instead of buildings,
+     zones, agents and their labels; near is the only level that also shows
+     agent labels — mid shows the figures themselves but not their names. */
+  #world[data-lod="far"] .building,
+  #world[data-lod="far"] .zone,
+  #world[data-lod="far"] .agent      { display:none; }
+  #world[data-lod="far"] .dlabel     { display:none; }
+  #world:not([data-lod="far"]) .dsummary { display:none; }
+  #world[data-lod="mid"] .alabel     { display:none; }
+
+  /* Constant apparent size for wires (FR-031-FR-033, contracts/page-camera.md
+     §3): the stroke width is staged as --wire-w by updateWire() and divided
+     by --k here, and the count bubble is un-scaled by nesting .bubblescale
+     one level inside .bubble, whose own transform carries only position. */
+  .wire path { stroke-width:calc(var(--wire-w, 1) * 1px / var(--k, 1)); }
+  .wire text { font-size:9px; } /* inside .bubblescale — already counter-scaled */
+  .bubblescale { transform:scale(calc(1 / var(--k, 1))); transform-origin:0 0; }
+
+  /* Bounded, class-driven easing for centreOn({animate: true}) and fit only
+     (research.md D12, FR-045, SC-012) — never left permanently on #camera, so
+     a drag or wheel step never lags the pointer. Reduced to an instant jump
+     under prefers-reduced-motion rather than skipped, so the transitionend
+     listener that removes the class still fires. */
+  #camera.eased { transition: transform 180ms ease-out; }
+  @media (prefers-reduced-motion: reduce) {
+    #camera.eased { transition: none; }
+  }
 
   /* Motion is meaning here, not decoration: it is only ever applied to a state
      that is actually changing, so a still figure is a still session. */
@@ -227,7 +272,8 @@
 <div id="trust"></div>
 <div id="hostwarn"></div>
 <div id="wrap">
-  <svg id="world" viewBox="0 0 408 408">
+  <svg id="world" viewBox="0 0 408 408" tabindex="0" data-lod="mid"
+       aria-label="City map. Drag to pan. Arrow keys pan, plus and minus zoom, zero fits the whole world.">
     <defs><marker id="ah" viewBox="0 0 8 8" refX="6" refY="4"
         markerWidth="5" markerHeight="5" orient="auto">
         <path d="M0,0 L8,4 L0,8 z" fill="var(--info)"/></marker></defs>
@@ -255,6 +301,7 @@
      answers on both /map and /map.html and one src should mean one file. -->
 <script src="/md.js"></script>
 <script src="/plots.js"></script>
+<script src="/camera.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -394,7 +441,10 @@ function buildWorldModel(s) {
   function ensureDistrict(org, isNoRepo) {
     if (!districts[org]) {
       districts[org] = {org, isNoRepo, buildings: {}};
-      districtsByKey["d|" + org] = {org, isNoRepo};
+      // DistrictSummary accumulators (data-model.md §5), finalised below once
+      // every session/unfinished row has been seen.
+      districtsByKey["d|" + org] = {org, isNoRepo, n: 0, worst: null,
+                                     unfinishedCount: 0, unfinishedText: null};
     }
     return districts[org];
   }
@@ -425,6 +475,12 @@ function buildWorldModel(s) {
     z.figures.push({sid: r.sid});
     figuresByKey["f|" + slug + "|" + branchKey + "|" + r.sid] = r;
     if (r.repo) buildingBySlugRepo[r.repo] = b;
+    // Sessions arrive in the CLI's own [sev, psev] order (bin/ccwatch:920), so
+    // the first row seen for a district is already its worst (data-model.md
+    // §5) — no re-sort needed here.
+    const dMeta = districtsByKey["d|" + org];
+    dMeta.n++;
+    if (dMeta.worst == null) dMeta.worst = r.token;
   }
   for (const u of (s.unfinished || [])) {
     const hasRemote = !!u.repo;
@@ -437,6 +493,13 @@ function buildWorldModel(s) {
     const b = ensureBuilding(d, slug, label, hasRemote);
     b.unfinished.push(u);
     if (u.repo) buildingBySlugRepo[u.repo] = b;
+    // The badge text this replaces at far (FR-022), so the aggregate carries
+    // the fact rather than dropping it (FR-029) — same wording as the
+    // per-building badge (updateBuilding below).
+    const dMeta = districtsByKey["d|" + org];
+    dMeta.unfinishedCount++;
+    if (dMeta.unfinishedText == null)
+      dMeta.unfinishedText = `${u.phase}/${u.crashed ? "CRASHED" : u.status}`;
   }
   // Exact match on owner/name — see the note this replaces at the old
   // territory()/tick() call site: matching on a directory basename let a
@@ -444,6 +507,15 @@ function buildWorldModel(s) {
   for (const dep of ((s.deploys && s.deploys.runs) || [])) {
     const b = buildingBySlugRepo[dep.repo];
     if (b) b.deploys.push(dep);
+  }
+
+  // Finalise DistrictSummary.unfinished — the representative text plus a
+  // "+N" for any others (data-model.md §5) — now that every row is seen.
+  for (const k in districtsByKey) {
+    const m = districtsByKey[k];
+    m.unfinished = m.unfinishedCount
+      ? m.unfinishedText + (m.unfinishedCount > 1 ? ` +${m.unfinishedCount - 1}` : "")
+      : null;
   }
 
   const tree = Object.keys(districts).map(org => {
@@ -520,6 +592,9 @@ function makeDistrict() {
   g.appendChild(svgEl("rect", {class: "hit", rx: 3}));
   g.appendChild(svgEl("title", {}));
   g.appendChild(svgEl("text", {class: "dlabel", x: 3, y: 8}));
+  // The far-level aggregate (data-model.md §5); shown only at data-lod="far",
+  // hidden everywhere else (contracts/page-camera.md §3).
+  g.appendChild(svgEl("text", {class: "dsummary", x: 3, y: 18}));
   return g;
 }
 function updateDistrict(g, {geo, meta}) {
@@ -528,7 +603,14 @@ function updateDistrict(g, {geo, meta}) {
   hit.setAttribute("width", geo.w); hit.setAttribute("height", geo.h);
   g.querySelector("title").textContent = meta.isNoRepo
     ? "no repo — grouped by directory, no git remote" : meta.org;
-  g.querySelector(".dlabel").textContent = meta.isNoRepo ? NO_REPO : meta.org;
+  const label = meta.isNoRepo ? NO_REPO : meta.org;
+  g.querySelector(".dlabel").textContent = label;
+  // "<org> · <n> sessions · <worst>" with " · <unfinished>" appended when
+  // present (data-model.md §5) — a maximum the payload supplied, printed
+  // verbatim, never a derived status (FR-027).
+  let summary = `${label} · ${meta.n} session${meta.n === 1 ? "" : "s"} · ${meta.worst}`;
+  if (meta.unfinished) summary += ` · ${meta.unfinished}`;
+  g.querySelector(".dsummary").textContent = summary;
 }
 
 function makeBuilding() {
@@ -649,9 +731,13 @@ function makeWire() {
   const g = svgEl("g", {class: "wire"});
   g.appendChild(svgEl("path", {fill: "none", stroke: "var(--info)",
     opacity: ".42", "marker-end": "url(#ah)"}));
-  g.appendChild(svgEl("circle", {r: 8, fill: "var(--ground)",
+  const bubble = svgEl("g", {class: "bubble"});
+  const scale = svgEl("g", {class: "bubblescale"});
+  scale.appendChild(svgEl("circle", {cx: 0, cy: 0, r: 8, fill: "var(--ground)",
     stroke: "var(--info)", "stroke-opacity": ".5", "stroke-width": "1"}));
-  g.appendChild(svgEl("text", {"font-size": "9", fill: "var(--info)", "text-anchor": "middle"}));
+  scale.appendChild(svgEl("text", {fill: "var(--info)", "text-anchor": "middle", y: 3}));
+  bubble.appendChild(scale);
+  g.appendChild(bubble);
   return g;
 }
 function updateWire(g, {p, q, count}) {
@@ -664,8 +750,8 @@ function updateWire(g, {p, q, count}) {
   const w = Math.min(3.2, 0.7 + Math.log2(1 + count) * 0.7);
   const path = g.querySelector("path");
   path.setAttribute("d", `M${p.x},${p.y} Q${cx},${cy} ${q.x},${q.y}`);
-  path.setAttribute("stroke-width", w);
-  const circle = g.querySelector("circle"), text = g.querySelector("text");
+  path.style.setProperty("--wire-w", w);
+  const bubble = g.querySelector(".bubble"), text = g.querySelector("text");
   // Only worth labelling when it is more than one message — a "1" on every
   // line is clutter that buries the edge that actually has traffic. Placed
   // near the SENDER rather than at the apex: the apex lands in the middle of
@@ -674,12 +760,11 @@ function updateWire(g, {p, q, count}) {
     const t = 0.22;   // quadratic Bézier at t, close to the source
     const lx = (1-t)*(1-t)*p.x + 2*(1-t)*t*cx + t*t*q.x;
     const ly = (1-t)*(1-t)*p.y + 2*(1-t)*t*cy + t*t*q.y;
-    circle.setAttribute("cx", lx); circle.setAttribute("cy", ly);
-    circle.style.display = ""; text.style.display = "";
-    text.setAttribute("x", lx); text.setAttribute("y", ly + 3);
+    bubble.setAttribute("transform", `translate(${lx} ${ly})`);
+    bubble.style.display = "";
     text.textContent = count;
   } else {
-    circle.style.display = "none"; text.style.display = "none";
+    bubble.style.display = "none";
   }
 }
 function wires(peers, placed) {
@@ -1161,10 +1246,247 @@ $("replyText").addEventListener("keydown", e => {
 });
 let lastRows = {};
 document.addEventListener("click", e => {
+  // A pan never opens the inspector (FR-005): the drag that just ended set
+  // drag.moved, and this is the one place that flag is consumed.
+  if (drag.moved) { drag.moved = false; return; }
   const a = e.target.closest(".agent[data-sid]");
   // Clicking is worth doing even in --read-only: seeing the conversation is
   // the more common reason to click an agent than messaging it.
   if (a) openReply(a.dataset.sid, a.dataset.name, lastRows[a.dataset.sid]);
+});
+
+// ---- camera ------------------------------------------------------------
+// contracts/page-camera.md §2 — built with DOM APIs, never innerHTML, so
+// map.html still assigns innerHTML exactly twice (FR-047). Lives in #wrap,
+// after #world and outside the camera group, so it is unaffected by the
+// transform and by data-lod (FR-016, FR-019).
+const camctl = document.createElement("div");
+camctl.id = "camctl";
+const zoutBtn = document.createElement("button");
+zoutBtn.id = "zout"; zoutBtn.type = "button"; zoutBtn.textContent = "zoom out";
+const zinBtn = document.createElement("button");
+zinBtn.id = "zin"; zinBtn.type = "button"; zinBtn.textContent = "zoom in";
+const zfitBtn = document.createElement("button");
+zfitBtn.id = "zfit"; zfitBtn.type = "button"; zfitBtn.textContent = "fit";
+const camstate = document.createElement("span");
+camstate.id = "camstate"; camstate.setAttribute("aria-live", "polite");
+const camnote = document.createElement("span");
+camnote.id = "camnote";
+camctl.append(zoutBtn, zinBtn, zfitBtn, camstate, camnote);
+$("world").insertAdjacentElement("afterend", camctl);
+
+// FR-004, FR-039 — same ladder step and fit the keyboard uses, anchored at
+// the viewport centre rather than a pointer position the button click has none of.
+zoutBtn.addEventListener("click", () => {
+  view = CCWATCH_CAMERA.clampPan(
+    CCWATCH_CAMERA.zoomTo(view, view.idx - 1, $("world").clientWidth / 2, $("world").clientHeight / 2),
+    worldExtent, $("world").clientWidth, $("world").clientHeight);
+  applyView();
+  flushPendingSave();
+});
+zinBtn.addEventListener("click", () => {
+  view = CCWATCH_CAMERA.clampPan(
+    CCWATCH_CAMERA.zoomTo(view, view.idx + 1, $("world").clientWidth / 2, $("world").clientHeight / 2),
+    worldExtent, $("world").clientWidth, $("world").clientHeight);
+  applyView();
+  flushPendingSave();
+});
+zfitBtn.addEventListener("click", () => {
+  view = CCWATCH_CAMERA.fitView(worldExtent, $("world").clientWidth, $("world").clientHeight);
+  overflow = view.overflow;
+  applyView();
+  flushPendingSave();
+});
+
+// contracts/page-camera.md §1 — the single writer. Every camera path calls
+// this and nothing else; it touches no district/building/zone/figure/badge/
+// wire node (FR-044, SC-008).
+let view = {idx: 2, tx: 0, ty: 0};
+let level = null; // DetailLevel (data-model.md §3); recomputed from levelFor(idx, level)
+let worldExtent = null; // OccupiedExtent (data-model.md §4); the clamp's bound
+let overflow = false;
+let pendingSave = null; // StoredViewport | null (data-model.md §6), flushed by the callers of applyView()
+
+// The one new persisted record (data-model.md §6), separate from
+// ccwatch.map.plots.v1. Storage calls are injected exactly as plots.js's own
+// key already is, so a throwing localStorage cannot take the map down.
+const VIEW_KEY = "ccwatch.map.view.v1";
+function flushPendingSave() {
+  if (!pendingSave) return;
+  CCWATCH_CAMERA.saveView(function (v) {
+    try { localStorage.setItem(VIEW_KEY, v); } catch (e) { /* unavailable — camera.js records it */ }
+  }, pendingSave);
+  pendingSave = null;
+}
+
+// contracts/page-camera.md §5 — the load order. Runs exactly once, the first
+// time there is an extent to clamp against: a record that fails validation or
+// clamps to a rectangle that intersects nothing placed falls back to fitView
+// (FR-036–FR-038) rather than opening on empty ground.
+function loadStoredView(placed) {
+  const vw = $("world").clientWidth, vh = $("world").clientHeight;
+  const raw = CCWATCH_CAMERA.loadView(function () {
+    try { return localStorage.getItem(VIEW_KEY); } catch (e) { return null; }
+  });
+  let restored = raw ? CCWATCH_CAMERA.clampPan(raw, worldExtent, vw, vh) : null;
+  if (restored) {
+    const rect = CCWATCH_CAMERA.visibleWorldRect(restored, vw, vh);
+    const groups = ["districts", "buildings", "zones", "figures"];
+    const hit = groups.some(g => Object.keys(placed.world[g]).some(
+      k => CCWATCH_CAMERA.intersects(rect, placed.world[g][k])));
+    if (!hit) restored = null;
+  }
+  view = restored || CCWATCH_CAMERA.fitView(worldExtent, vw, vh);
+  overflow = view.overflow || false;
+  level = CCWATCH_CAMERA.levelFor(view.idx, null); // the cold mapping (FR-041)
+}
+
+function applyView() {
+  const k = CCWATCH_CAMERA.scaleFor(view.idx);
+  $("camera").setAttribute("transform", `translate(${view.tx} ${view.ty}) scale(${k})`);
+  const world = $("world");
+  world.style.setProperty("--k", k);
+  level = CCWATCH_CAMERA.levelFor(view.idx, level);
+  world.setAttribute("data-lod", level);
+  const atMin = view.idx === 0, atMax = view.idx === CCWATCH_CAMERA.LADDER.length - 1;
+  zoutBtn.disabled = atMin;
+  zoutBtn.title = atMin ? "already at the widest zoom" : "";
+  zinBtn.disabled = atMax;
+  zinBtn.title = atMax ? "already at the closest zoom" : "";
+  camstate.textContent = `zoom ${k}× · ${level}`;
+  camnote.textContent = overflow ? "the whole world does not fit at this zoom"
+    : CCWATCH_CAMERA.persistence === "unavailable" ? "the viewport will not be remembered"
+    : "";
+  pendingSave = {v: CCWATCH_CAMERA.STORAGE_VERSION, idx: view.idx, tx: view.tx, ty: view.ty};
+  // Bookkeeping only, not a DOM write: the size a resize needs to diff
+  // against is whatever it was as of the last camera action, which — since
+  // only a resize itself changes it — is the size just before this one.
+  vpSize = {w: $("world").clientWidth, h: $("world").clientHeight};
+}
+let vpSize = {w: 0, h: 0};
+
+// ---- camera: pointer drag + wheel zoom (contracts/page-camera.md §4) -------
+// panBy/clampPan/applyView on move; drag.moved gates the document click
+// handler below so a pan never opens the inspector (FR-005). The drag base
+// is the {tx,ty} recorded at pointerdown, not the running view, so repeated
+// small moves cannot accumulate drift from clampPan re-entering each step.
+const drag = {active: false, moved: false, id: null, x: 0, y: 0, tx: 0, ty: 0};
+$("world").addEventListener("pointerdown", e => {
+  if (e.button !== 0) return;
+  drag.active = true; drag.moved = false; drag.id = e.pointerId;
+  drag.x = e.clientX; drag.y = e.clientY;
+  drag.tx = view.tx; drag.ty = view.ty;
+  $("world").setPointerCapture(e.pointerId);
+  $("world").focus();
+});
+$("world").addEventListener("pointermove", e => {
+  if (!drag.active || e.pointerId !== drag.id) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (!drag.moved && Math.hypot(dx, dy) > CCWATCH_CAMERA.DRAG_SLOP) drag.moved = true;
+  if (!drag.moved) return;
+  view = CCWATCH_CAMERA.clampPan(
+    CCWATCH_CAMERA.panBy({idx: view.idx, tx: drag.tx, ty: drag.ty}, dx, dy),
+    worldExtent, $("world").clientWidth, $("world").clientHeight);
+  applyView();
+});
+function endDrag(e) {
+  if (!drag.active || e.pointerId !== drag.id) return;
+  drag.active = false;
+  flushPendingSave();
+}
+$("world").addEventListener("pointerup", endDrag);
+$("world").addEventListener("pointercancel", endDrag);
+$("world").addEventListener("lostpointercapture", endDrag);
+
+// ---- camera: keyboard (contracts/page-camera.md §4, FR-013–FR-015) --------
+// The guard returns before doing anything else so a shortcut key typed into
+// the reply box or any other editable control never moves the camera.
+const EDITABLE_SEL = "input, textarea, select, [contenteditable]";
+$("world").addEventListener("keydown", e => {
+  const t = e.target;
+  if ((t && (t.matches(EDITABLE_SEL) || t.isContentEditable)) ||
+      (document.activeElement && document.activeElement !== t &&
+       (document.activeElement.matches(EDITABLE_SEL) || document.activeElement.isContentEditable)))
+    return;
+  const step = e.shiftKey ? CCWATCH_CAMERA.PAN_STEP_BIG : CCWATCH_CAMERA.PAN_STEP;
+  let handled = true;
+  switch (e.key) {
+    case "ArrowLeft":  view = CCWATCH_CAMERA.panBy(view, step, 0); break;
+    case "ArrowRight": view = CCWATCH_CAMERA.panBy(view, -step, 0); break;
+    case "ArrowUp":    view = CCWATCH_CAMERA.panBy(view, 0, step); break;
+    case "ArrowDown":  view = CCWATCH_CAMERA.panBy(view, 0, -step); break;
+    case "+": case "=":
+      view = CCWATCH_CAMERA.zoomTo(view, view.idx + 1,
+        $("world").clientWidth / 2, $("world").clientHeight / 2);
+      break;
+    case "-": case "_":
+      view = CCWATCH_CAMERA.zoomTo(view, view.idx - 1,
+        $("world").clientWidth / 2, $("world").clientHeight / 2);
+      break;
+    case "0":
+      view = CCWATCH_CAMERA.fitView(worldExtent, $("world").clientWidth, $("world").clientHeight);
+      overflow = view.overflow;
+      break;
+    default: handled = false;
+  }
+  if (!handled) return;
+  view = CCWATCH_CAMERA.clampPan(view, worldExtent, $("world").clientWidth, $("world").clientHeight);
+  applyView();
+});
+// The `setItem` happens on key *release*, not on every keydown a held arrow
+// repeats (data-model.md §6) — the same coalescing the drag path uses.
+$("world").addEventListener("keyup", flushPendingSave);
+
+// FR-003, FR-006, FR-007 — always preventDefault so the page itself never
+// scrolls; wheelStep accumulates and reports whether a rung was crossed; a
+// step is one anchored zoom at the pointer.
+let wheelAcc = 0;
+$("world").addEventListener("wheel", e => {
+  e.preventDefault();
+  const rect = $("world").getBoundingClientRect();
+  const ax = e.clientX - rect.left, ay = e.clientY - rect.top;
+  const r = CCWATCH_CAMERA.wheelStep(wheelAcc, e, $("world").clientHeight);
+  wheelAcc = r.acc;
+  if (r.step !== 0) {
+    // step is -1 (zoom in) or +1 (zoom out) on the negative-delta convention
+    // (contracts/camera-js.md §9); zooming in raises the ladder index.
+    view = CCWATCH_CAMERA.clampPan(
+      CCWATCH_CAMERA.zoomTo(view, view.idx - r.step, ax, ay),
+      worldExtent, $("world").clientWidth, $("world").clientHeight);
+    applyView();
+  }
+}, {passive: false});
+
+// contracts/page-camera.md §6, FR-042 — the API a later roster panel calls.
+// No caller ships with this feature; `current()` exists so a roster can read
+// the level without duplicating the thresholds.
+window.CCWATCH_MAP_CAMERA = {
+  centreOn(wx, wy, opts) {
+    opts = opts || {};
+    const world = $("world");
+    view = CCWATCH_CAMERA.clampPan(
+      CCWATCH_CAMERA.centreOn(view, wx, wy, world.clientWidth, world.clientHeight, opts.idx),
+      worldExtent, world.clientWidth, world.clientHeight);
+    if (opts.animate) $("camera").classList.add("eased");
+    applyView();
+    flushPendingSave();
+  },
+  fit() {
+    view = CCWATCH_CAMERA.fitView(worldExtent, $("world").clientWidth, $("world").clientHeight);
+    overflow = view.overflow;
+    applyView();
+    flushPendingSave();
+  },
+  current() {
+    return {idx: view.idx, scale: CCWATCH_CAMERA.scaleFor(view.idx), level, tx: view.tx, ty: view.ty};
+  },
+};
+
+// The eased class is only ever meant to bound one transition (research.md
+// D12); removing it on transitionend means the next un-animated move (a drag,
+// a wheel step) is instant again rather than inheriting the easing.
+$("camera").addEventListener("transitionend", () => {
+  $("camera").classList.remove("eased");
 });
 
 // ---- world coordinates ------------------------------------------------------
@@ -1215,12 +1537,20 @@ function drawWorld(s) {
   }
   reconcile(camera, figureWanted, "figure", makeFigure, updateFigure);
 
-  // Recomputed only when the occupied set changes (placed.sig) or on resize
-  // (see applyFit's own caller below) — never on every tick, since fit() is
-  // pure geometry over an extent that mostly doesn't move (FR-019, FR-038).
+  // Recomputed only when the occupied set changes (placed.sig) — never on
+  // every tick, since the extent is pure geometry that mostly doesn't move
+  // (FR-019, FR-038). The first time there is an extent to clamp against, the
+  // stored viewport (or the fit) is loaded (contracts/page-camera.md §5);
+  // every later change to the extent only re-clamps the view the viewer
+  // already chose, so a shrinking extent pulls it back in without a refit
+  // (FR-011, T046).
   if (placed.sig !== lastFit.sig) {
+    const firstLoad = lastFit.sig === null;
     lastFit = {sig: placed.sig, extent: placed.extent};
-    applyFit(placed.extent);
+    worldExtent = placed.extent;
+    if (firstLoad) loadStoredView(placed);
+    else view = CCWATCH_CAMERA.clampPan(view, worldExtent, $("world").clientWidth, $("world").clientHeight);
+    applyView();
   }
   // Carried alongside `placed` so wires() can resolve a session name to its
   // figure's world centre without re-walking the payload (T052).
@@ -1229,19 +1559,11 @@ function drawWorld(s) {
 }
 
 // ---- fit ---------------------------------------------------------------
-// The world's viewBox is fixed to the SVG element's own pixel size (so 1
-// world unit == 1 screen px), and `<g id="camera">` carries the
-// translate+scale that centres the occupied extent in it — never the SVG's
-// own viewBox scaling, which can't express the max-scale clamp (F2).
+// The world's viewBox is fixed to the SVG element's own pixel size, so 1
+// world unit == 1 screen px at idx 2 — `applyView()` and the resize handler
+// are the only writers of `#camera`'s transform now (contracts/page-camera.md
+// §1); `sig` is what tells drawWorld the occupied set actually changed.
 let lastFit = {sig: null, extent: null};
-function applyFit(extent) {
-  const world = $("world");
-  const vw = world.clientWidth, vh = world.clientHeight;
-  if (!vw || !vh) return;
-  world.setAttribute("viewBox", `0 0 ${vw} ${vh}`);
-  const {k, tx, ty} = CCWATCH_PLOTS.fit(extent, vw, vh);
-  $("camera").setAttribute("transform", `translate(${tx} ${ty}) scale(${k})`);
-}
 
 // ---- draw ------------------------------------------------------------------
 // data-model.md §5 — the page's trust model. Computed fresh every tick from
@@ -1414,6 +1736,7 @@ async function tick() {
 // whatever was left of the old interval. A hidden (backgrounded) tab does no
 // periodic work of any kind — including the open conversation's own cadence.
 function resume() {
+  flushPendingSave();
   if (document.hidden) {
     clearEvery("tick");
     clearEvery("convo");
@@ -1426,11 +1749,21 @@ function resume() {
 }
 document.addEventListener("visibilitychange", resume);
 resume();
-// A resize refits the same extent alone — no refetch, no coordinate moves
-// (research.md D9, FR-049). Not while hidden — a backgrounded tab does not
-// resize.
+// No refit on resize (research.md D9, FR-010, FR-049): the centre world
+// point is held and the view is re-clamped against the unchanged extent, so
+// a chosen zoom and pan survive a window resize. Not while hidden — a
+// backgrounded tab does not resize.
 addEventListener("resize", () => {
-  if (!document.hidden && lastFit.extent) applyFit(lastFit.extent);
+  if (document.hidden || !worldExtent) return;
+  const world = $("world");
+  const k = CCWATCH_CAMERA.scaleFor(view.idx);
+  // The world point that was at the centre of the *old* size — vpSize, held
+  // since the last camera action — stays at the centre of the new one.
+  const wx = (vpSize.w / 2 - view.tx) / k, wy = (vpSize.h / 2 - view.ty) / k;
+  const vw = world.clientWidth, vh = world.clientHeight;
+  world.setAttribute("viewBox", `0 0 ${vw} ${vh}`);
+  view = CCWATCH_CAMERA.clampPan(CCWATCH_CAMERA.centreOn(view, wx, wy, vw, vh), worldExtent, vw, vh);
+  applyView();
 });
 </script>
 </body>

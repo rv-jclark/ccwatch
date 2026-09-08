@@ -35,7 +35,7 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # are the node-gated markdown block, so a host without `node` counts 216 — the
 # floor has to sit below that, not below the full count, or the suite fails on
 # a machine that is merely missing an optional tool.
-TALLY_FLOOR=244
+TALLY_FLOOR=345
 
 assert_contains() { case "$1" in *"$2"*) t_pass "$3";; *) t_fail "$3" "expected to contain: $2";; esac; }
 assert_not_contains() { case "$1" in *"$2"*) t_fail "$3" "should NOT contain: $2";; *) t_pass "$3";; esac; }
@@ -815,6 +815,56 @@ for _pf in "$ROOT/web/index.html" "$ROOT/web/map.html"; do
   assert_eq "$(awk -v n="$_pfvc" 'BEGIN{print (n >= 1) ? "yes" : "no"}')" "yes" \
     "$_pf listens for visibilitychange"
 done
+
+# FR-018: #world must be reachable by keyboard and its aria-label must name the
+# keys, not just say "map" — a screen-reader user gets no other hint the arrow
+# keys, +/-, and 0 do anything here.
+_world_tag=$(awk '/<svg id="world"/{f=1} f{print; if(/>/){exit}}' "$ROOT/web/map.html")
+assert_contains "$_world_tag" 'tabindex="0"' "#world carries tabindex=\"0\""
+assert_contains "$_world_tag" 'aria-label="' "#world carries a non-empty aria-label"
+_world_label=$(printf '%s' "$_world_tag" | sed -n 's/.*aria-label="\([^"]*\)".*/\1/p')
+assert_contains "$_world_label" "Arrow keys" "and the aria-label names the keys"
+
+# FR-016, FR-047: #camctl is built with three real, focusable, named buttons —
+# not divs with click handlers, which a screen reader and Tab both skip.
+_camctl_js=$(awk '/const camctl = document.createElement/,/insertAdjacentElement/' "$ROOT/web/map.html")
+assert_eq "$(printf '%s' "$_camctl_js" | grep -c 'createElement("button")')" "3" \
+  "#camctl is built from three real <button> elements"
+assert_contains "$_camctl_js" 'zoom out' "and #zout has an accessible name"
+assert_contains "$_camctl_js" 'zoom in' "and #zin has an accessible name"
+assert_contains "$_camctl_js" '"fit"' "and #zfit has an accessible name"
+
+# FR-031-FR-033: every label and badge, plus the wire's stroke, counter-scale
+# against --k so they hold their apparent size at every rung of the ladder —
+# a coordinate-space stroke-width would thicken into a smear at the closest
+# zoom and vanish at the widest.
+_maphtml=$(cat "$ROOT/web/map.html")
+for _sel in '\.dlabel' '\.blabel' '\.zlabel' '\.dsummary' '\.alabel' \
+            '\.norepo-badge' '\.wreck-badge' '\.deploy-badge'; do
+  _rule=$(printf '%s' "$_maphtml" | grep -E "^\s*${_sel}(,|\s*\{)" | head -1)
+  assert_contains "$_rule" 'calc(' "$_sel's font-size counter-scales with calc(Npx / var(--k, 1))"
+  assert_contains "$_rule" 'var(--k' "$_sel's font-size reads --k"
+done
+_wire_rule=$(printf '%s' "$_maphtml" | grep '\.wire path' | head -1)
+assert_contains "$_wire_rule" 'calc(var(--wire-w, 1) * 1px / var(--k, 1))' \
+  ".wire path's stroke-width counter-scales with --wire-w and --k"
+
+# FR-032: the count bubble stays a constant size on screen while its position
+# — written by updateWire() onto the outer .bubble group — moves in world
+# units, which is why the un-scaling has to live one level in.
+_bubblescale_rule=$(printf '%s' "$_maphtml" | grep -E '^\s*\.bubblescale\s*\{' | head -1)
+assert_contains "$_bubblescale_rule" 'transform:scale(calc(1 / var(--k, 1)))' \
+  ".bubblescale carries transform: scale(calc(1 / var(--k, 1)))"
+
+# FR-045, SC-012: easing is a single bounded transition applied by a class —
+# never permanently on #camera, which would make a drag or wheel step lag the
+# pointer — and reduced to an instant jump under prefers-reduced-motion.
+_eased_rule=$(printf '%s' "$_maphtml" | grep -E '^\s*#camera\.eased\s*\{' | head -1)
+assert_contains "$_eased_rule" 'transition: transform 180ms ease-out' \
+  "#camera.eased sets a bounded transition on transform"
+_reduced_motion_block=$(awk '/@media \(prefers-reduced-motion: reduce\)/{f=1} f{print; if (/^  \}/) exit}' "$ROOT/web/map.html")
+assert_contains "$_reduced_motion_block" '#camera.eased { transition: none; }' \
+  "the rule reduces to none under prefers-reduced-motion: reduce"
 
 # The dashboard must never derive its own version of the status: two renderings
 # that compute it separately will eventually disagree, and the one you are not
@@ -1992,6 +2042,225 @@ PLOTSJS
   done < <(node "$WORK/plots-check.js" "$ROOT/web/plots.js" 2>&1)
 else
   t_skip "plots geometry" "node not installed"
+fi
+
+
+# ================================================================== camera ===
+printf '\ncamera\n'
+#
+# web/camera.js is the pure camera arithmetic module (contracts/camera-js.md).
+# It lives in its own file for the same reason web/md.js and web/plots.js do:
+# so these assertions can require() it under node without a browser.
+if command -v node >/dev/null 2>&1; then
+  cat > "$WORK/camera-check.js" <<'CAMERAJS'
+var C = require(process.argv[2]);
+var out = [];
+function check(name, cond, detail) {
+  out.push((cond ? "PASS|" : "FAIL|") + name + "|" + (detail || ""));
+}
+
+// K1: scaleFor/clampIdx clamp to the ladder's ends and floor a fractional index.
+(function () {
+  check("K1 clampIdx clamps below the ladder to 0", C.clampIdx(-3) === 0, C.clampIdx(-3));
+  check("K1 clampIdx clamps above the ladder to its last index", C.clampIdx(99) === C.LADDER.length - 1, C.clampIdx(99));
+  check("K1 clampIdx floors a fractional index", C.clampIdx(2.7) === 2, C.clampIdx(2.7));
+  check("K1 scaleFor never returns a value outside LADDER", C.LADDER.indexOf(C.scaleFor(5)) !== -1, C.scaleFor(5));
+})();
+
+// K2: panBy adds screen-pixel deltas to tx/ty and leaves idx untouched.
+(function () {
+  var v = C.panBy({idx: 3, tx: 10, ty: -5}, 4, 6);
+  check("K2 panBy adds the delta to tx and ty", v.tx === 14 && v.ty === 1, JSON.stringify(v));
+  check("K2 panBy leaves idx unchanged", v.idx === 3, v.idx);
+})();
+
+// K3: clampPan holds the visible rectangle inside a larger-than-viewport extent.
+(function () {
+  var extent = {x: 0, y: 0, w: 2000, h: 2000};
+  var v = C.clampPan({idx: 2, tx: 500, ty: 500}, extent, 400, 400); // k=1
+  var visX0 = -v.tx, visX1 = -v.tx + 400;
+  check("K3 clampPan keeps the visible rect inside a larger extent",
+        visX0 >= extent.x && visX1 <= extent.x + extent.w, JSON.stringify(v));
+})();
+
+// K4: clampPan holds a smaller-than-viewport extent inside the viewport.
+(function () {
+  var extent = {x: 0, y: 0, w: 100, h: 100};
+  var v = C.clampPan({idx: 2, tx: -9999, ty: -9999}, extent, 400, 400); // k=1
+  var left = extent.x * 1 + v.tx, right = (extent.x + extent.w) * 1 + v.tx;
+  check("K4 clampPan keeps a smaller extent inside the viewport",
+        left >= 0 && right <= 400, JSON.stringify(v));
+})();
+
+// K5: clampPan is idempotent and resolves a non-finite tx/ty to the centred value.
+(function () {
+  var extent = {x: 0, y: 0, w: 2000, h: 2000};
+  var once = C.clampPan({idx: 2, tx: 500, ty: 500}, extent, 400, 400);
+  var twice = C.clampPan(once, extent, 400, 400);
+  check("K5 clampPan is idempotent", once.tx === twice.tx && once.ty === twice.ty, JSON.stringify([once, twice]));
+  var nonfinite = C.clampPan({idx: 2, tx: NaN, ty: Infinity}, extent, 400, 400);
+  check("K5 clampPan resolves a non-finite tx/ty to a finite value",
+        isFinite(nonfinite.tx) && isFinite(nonfinite.ty), JSON.stringify(nonfinite));
+})();
+
+// K6: centreOn puts the world point at the centre of the viewport, optionally at a new rung.
+(function () {
+  var v = C.centreOn({idx: 2, tx: 0, ty: 0}, 50, 60, 400, 300);
+  check("K6 centreOn centres the world point at k=1",
+        Math.abs(v.tx - (200 - 50)) < 1e-9 && Math.abs(v.ty - (150 - 60)) < 1e-9, JSON.stringify(v));
+  var v2 = C.centreOn({idx: 2, tx: 0, ty: 0}, 50, 60, 400, 300, 3); // idx 3 -> k=2
+  check("K6 centreOn honours an explicit idx argument",
+        v2.idx === 3 && Math.abs(v2.tx - (200 - 100)) < 1e-9, JSON.stringify(v2));
+})();
+
+// K7: fitIndex picks the largest rung that fits both dimensions, and reports overflow when none do.
+(function () {
+  var extent = {x: 0, y: 0, w: 400, h: 400};
+  var fi = C.fitIndex(extent, 850, 850); // fits at k<=2.125 -> idx 3 (k=2)
+  check("K7 fitIndex picks the largest fitting rung", fi.idx === 3 && fi.overflow === false, JSON.stringify(fi));
+  var huge = {x: 0, y: 0, w: 100000, h: 100000};
+  var fiOverflow = C.fitIndex(huge, 400, 400);
+  check("K7 fitIndex reports overflow when no rung fits", fiOverflow.idx === 0 && fiOverflow.overflow === true, JSON.stringify(fiOverflow));
+})();
+
+// K8: fitView centres the fit index and passes through clampPan.
+(function () {
+  var extent = {x: 100, y: 100, w: 400, h: 400};
+  var fv = C.fitView(extent, 850, 850);
+  var k = C.scaleFor(fv.idx);
+  var visX0 = -fv.tx / k, visX1 = visX0 + 850 / k;
+  check("K8 fitView's visible rect covers the extent on x",
+        visX0 <= extent.x + 1 && visX1 >= extent.x + extent.w - 1, JSON.stringify(fv));
+  check("K8 fitView surfaces the same overflow flag as fitIndex", fv.overflow === false, fv.overflow);
+})();
+
+// K9: levelFor's hysteresis bands and cold mapping.
+(function () {
+  check("K9 levelFor rises into mid at idx 3", C.levelFor(3, "far") === "mid", C.levelFor(3, "far"));
+  check("K9 levelFor stepping in and back out does not flip mid twice",
+        C.levelFor(2, "mid") === "mid", C.levelFor(2, "mid"));
+  check("K9 levelFor falls out of mid below idx 2", C.levelFor(1, "mid") === "far", C.levelFor(1, "mid"));
+  check("K9 levelFor rises into near at idx 5", C.levelFor(5, "mid") === "near", C.levelFor(5, "mid"));
+  check("K9 levelFor falls out of near below idx 4", C.levelFor(3, "near") === "mid", C.levelFor(3, "near"));
+  check("K9 levelFor's cold mapping resolves both bands downward at idx 2",
+        C.levelFor(2, null) === "far", C.levelFor(2, null));
+  check("K9 levelFor's cold mapping resolves both bands downward at idx 4",
+        C.levelFor(4, null) === "mid", C.levelFor(4, null));
+  check("K9 levelFor never returns anything but the three names",
+        ["far", "mid", "near"].indexOf(C.levelFor(7, "far")) !== -1, C.levelFor(7, "far"));
+})();
+
+// K10: wheelStep accumulates sub-threshold deltas, steps on crossing the
+// threshold, and resets immediately on a sign change rather than unwinding.
+(function () {
+  var r1 = C.wheelStep(0, {deltaY: 40, deltaMode: 0});
+  check("K10 wheelStep accumulates without stepping below threshold",
+        r1.step === 0 && r1.acc === 40, JSON.stringify(r1));
+  var r2 = C.wheelStep(90, {deltaY: 20, deltaMode: 0});
+  check("K10 wheelStep steps and resets acc once the threshold is crossed",
+        r2.step === 1 && r2.acc === 0, JSON.stringify(r2));
+  var r3 = C.wheelStep(50, {deltaY: -10, deltaMode: 0});
+  check("K10 wheelStep resets the accumulator immediately on a sign change",
+        r3.acc === -10 && r3.step === 0, JSON.stringify(r3));
+})();
+
+// K11: zoomTo's anchored world point stays within a pixel of the anchor
+// after the step (SC-004), and a no-op request returns the view unchanged.
+(function () {
+  var v = {idx: 2, tx: -50, ty: 30}; // k=1
+  var ax = 120, ay = 80;
+  var k1 = C.scaleFor(v.idx);
+  var wx = (ax - v.tx) / k1, wy = (ay - v.ty) / k1;
+  var stepped = C.zoomTo(v, 5, ax, ay); // idx 5 -> k=4
+  var k2 = C.scaleFor(stepped.idx);
+  check("K11 zoomTo keeps the anchor's world point within a pixel after the step",
+        Math.abs(wx * k2 + stepped.tx - ax) < 1 && Math.abs(wy * k2 + stepped.ty - ay) < 1,
+        JSON.stringify(stepped));
+  var same = C.zoomTo(v, v.idx, ax, ay);
+  check("K11 zoomTo at the same idx returns the view unchanged",
+        same.tx === v.tx && same.ty === v.ty && same.idx === v.idx, JSON.stringify(same));
+})();
+
+// K12: validateView's rejection table (data-model.md §6) — every bad shape
+// returns null, never throws, and a valid record round-trips its fields.
+(function () {
+  var L = C.LADDER.length;
+  check("K12 validateView rejects an absent record", C.validateView(null, L) === null, "null");
+  check("K12 validateView rejects undefined", C.validateView(undefined, L) === null, "undefined");
+  check("K12 validateView rejects unparseable JSON", C.validateView("{not json", L) === null, "{not json");
+  check("K12 validateView rejects a bare number", C.validateView('"7"', L) === null, '"7"');
+  check("K12 validateView rejects an array", C.validateView("[]", L) === null, "[]");
+  check("K12 validateView rejects the wrong storage version",
+        C.validateView(JSON.stringify({v: 2, idx: 1, tx: 0, ty: 0}), L) === null, "v:2");
+  check("K12 validateView rejects a non-integer idx",
+        C.validateView(JSON.stringify({v: 1, idx: 2.5, tx: 0, ty: 0}), L) === null, "idx:2.5");
+  check("K12 validateView rejects an out-of-range idx",
+        C.validateView(JSON.stringify({v: 1, idx: 99, tx: 0, ty: 0}), L) === null, "idx:99");
+  check("K12 validateView rejects a non-finite tx",
+        C.validateView({v: 1, idx: 1, tx: NaN, ty: 0}, L) === null, "tx:NaN");
+  check("K12 validateView rejects a non-finite ty",
+        C.validateView({v: 1, idx: 1, tx: 0, ty: Infinity}, L) === null, "ty:Infinity");
+  var ok = C.validateView(JSON.stringify({v: 1, idx: 3, tx: -12, ty: 5}), L);
+  check("K12 validateView accepts and round-trips a valid record",
+        ok && ok.idx === 3 && ok.tx === -12 && ok.ty === 5, JSON.stringify(ok));
+})();
+
+// K13: loadView/saveView round-trip through injected storage functions, and a
+// throwing storage flips persistence to "unavailable" exactly once.
+(function () {
+  var store = null;
+  var loaded = C.loadView(function () { return store; });
+  check("K13 loadView returns null when nothing is stored", loaded === null, String(loaded));
+  C.saveView(function (v) { store = v; }, {idx: 4, tx: -1, ty: 2});
+  var restored = C.loadView(function () { return store; });
+  check("K13 saveView/loadView round-trips idx/tx/ty",
+        restored && restored.idx === 4 && restored.tx === -1 && restored.ty === 2,
+        JSON.stringify(restored));
+})();
+(function () {
+  var throwingGet = function () { throw new Error("quota"); };
+  var before = C.persistence;
+  var r1 = C.loadView(throwingGet);
+  check("K13 loadView swallows a throwing getItem and returns null", r1 === null, String(r1));
+  check("K13 a throwing storage flips persistence to unavailable",
+        before === "ok" && C.persistence === "unavailable", before + " -> " + C.persistence);
+  // Never retried: a second throwing call does not un-flip or re-flip anything
+  // observable — persistence stays exactly "unavailable".
+  C.loadView(throwingGet);
+  check("K13 persistence stays unavailable and is never reset",
+        C.persistence === "unavailable", C.persistence);
+})();
+
+// K14: visibleWorldRect/intersects — the FR-038 test, including a stored
+// viewport whose rectangle lies entirely outside the world.
+(function () {
+  var view = {idx: 2, tx: -100, ty: -50}; // k=1
+  var rect = C.visibleWorldRect(view, 400, 300);
+  check("K14 visibleWorldRect derives the visible rectangle from tx/ty/k",
+        rect.x === 100 && rect.y === 50 && rect.w === 400 && rect.h === 300, JSON.stringify(rect));
+  var world = {x: 0, y: 0, w: 1000, h: 1000};
+  check("K14 intersects is true when the visible rect overlaps the world",
+        C.intersects(rect, world) === true, JSON.stringify([rect, world]));
+  var farAway = C.visibleWorldRect({idx: 2, tx: -100000, ty: -100000}, 400, 300);
+  check("K14 intersects is false for a viewport far outside the world",
+        C.intersects(farAway, world) === false, JSON.stringify([farAway, world]));
+  check("K14 intersects is false on a non-finite input rather than throwing",
+        C.intersects({x: NaN, y: 0, w: 10, h: 10}, world) === false, "NaN");
+})();
+
+process.stdout.write(out.join("\n") + "\n");
+CAMERAJS
+
+  while IFS='|' read -r status name detail; do
+    [ -z "$status" ] && continue
+    if [ "$status" = "PASS" ]; then
+      t_pass "$name"
+    else
+      t_fail "$name" "$detail"
+    fi
+  done < <(node "$WORK/camera-check.js" "$ROOT/web/camera.js" 2>&1)
+else
+  t_skip "camera arithmetic" "node not installed"
 fi
 
 
