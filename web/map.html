@@ -35,50 +35,48 @@
   #hostwarn { display:none; padding:.45rem 1.1rem; background:color-mix(in srgb, var(--bad) 14%, transparent);
               border-bottom:1px solid var(--bad); color:var(--bad); font-size:12px; }
   #hostwarn.on { display:block; }
+  /* data-model.md §5's FeedCondition, rendered: (a)/(b) share this banner
+     because both replace the volatile readings with a stated reason; (c) is
+     a second, additive line (R1); (d) a third — all three are absent, not
+     empty, when the feed is trusted and sessions exist. */
+  #trust { display:none; padding:.45rem 1.1rem; font-size:12px; }
+  #trust.on { display:block; }
+  #trust .main.down { color:var(--bad); background:color-mix(in srgb, var(--bad) 14%, transparent); }
+  #trust .main.warming { color:var(--dim); }
+  #trust .main { display:block; }
+  #trust .unreadable { display:block; color:var(--warn); }
+  #trust .emptymsg { display:block; color:var(--dim); }
 
-  /* The map itself. Territories are laid out in a normal responsive grid and
-     the message lines are drawn on an SVG layer above them, positioned from
-     measured element geometry. A force-directed graph was the other option and
-     is worse here: with a dozen nodes it moves every time you look at it, and
-     "did that agent move or did I misremember" is not a question a monitoring
-     view should raise. */
+  /* The map itself. A single inline SVG holds a `<g id="camera">` that every
+     district/building/zone/figure — and, from a later entry, the wires — is a
+     child of, all in world units authored by web/plots.js. Nothing here reads
+     getBoundingClientRect() to position anything; the camera's own transform
+     is the only place screen pixels enter the picture. A force-directed graph
+     was the other option and is worse here: with a dozen nodes it moves every
+     time you look at it, and "did that agent move or did I misremember" is not
+     a question a monitoring view should raise. */
   #wrap { position:relative; padding:1.1rem; }
-  #map { display:grid; gap:1.1rem; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); }
-  #wires { position:absolute; inset:0; pointer-events:none; overflow:visible; z-index:5; }
-  .territory { z-index:1; }
+  #world { width:100%; height:calc(100vh - 8rem); display:block; }
+  .hit { fill:transparent; }
+  .district .hit { stroke:var(--line); stroke-width:1; fill:var(--ground); }
+  .building .hit { stroke:var(--line); stroke-width:.6; fill:var(--panel); }
+  .zone .hit { stroke:var(--line); stroke-width:.4; fill:none; stroke-dasharray:1.5; }
+  .dlabel { font-size:7px; fill:var(--ink); font-weight:600; }
+  .blabel { font-size:5px; fill:var(--ink); }
+  .zlabel { font-size:4px; fill:var(--dim); }
+  .norepo-badge { font-size:4px; fill:var(--warn); }
+  .wreck-badge { font-size:4px; fill:var(--bad); }
+  .deploy-badge { font-size:4px; fill:var(--ok); }
+  .building.has-unfinished .hit { stroke:var(--bad); }
 
-  .territory { position:relative; background:var(--ground); border:1px solid var(--line);
-               border-radius:10px; padding:.7rem .8rem .8rem; min-height:150px; }
-  /* A territory borrows the colour of its most urgent inhabitant, so the thing
-     that needs you is findable without reading any labels. */
-  .territory.t4 { border-color:var(--block); box-shadow:0 0 0 1px var(--block) inset; }
-  .territory.t3 { border-color:var(--bad); }
-  .territory.t2 { border-color:#2b6b57; }
-  .thead { display:flex; align-items:baseline; gap:.5rem; margin-bottom:.55rem; }
-  .tname { font-weight:600; }
-  .towner { color:var(--dim); font-weight:400; margin-right:-.35rem; }
-  .norepo { color:var(--warn); font-size:10px; border:1px solid currentColor;
-            border-radius:3px; padding:0 .25rem; }
-  .branchgroup { margin-bottom:.35rem; }
-  .bname { font-size:10px; color:var(--dim); margin:.15rem 0 .1rem;
-           overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .tcount { color:var(--dim); font-size:11px; }
-  .tbadges { margin-left:auto; display:flex; gap:.3rem; flex-wrap:wrap; justify-content:flex-end; }
-  .badge { font-size:10px; padding:0 .35rem; border-radius:3px; border:1px solid currentColor;
-           white-space:nowrap; }
-  .b-run { color:var(--warn); } .b-ok { color:var(--ok); } .b-bad { color:var(--bad); }
-
-  .folk { display:flex; flex-wrap:wrap; gap:.45rem; }
-  .agent { position:relative; width:82px; padding:.3rem 0 .1rem; border-radius:6px;
-           text-align:center; cursor:default; }
+  .agent { cursor:default; }
   .agent.clickable { cursor:pointer; }
-  .agent.clickable:hover { background:rgba(255,255,255,.04); }
-  .figure { width:100%; height:44px; display:block; }
-  .alabel { font-size:10px; color:var(--dim); overflow:hidden; text-overflow:ellipsis;
-            white-space:nowrap; }
-  .agent.sev4 .alabel { color:var(--block); font-weight:600; }
-  .agent.sev3 .alabel { color:var(--bad); }
-  .agent.sev2 .alabel { color:var(--ink); }
+  .agent.clickable:hover .hit { fill:rgba(255,255,255,.06); }
+  .figure { display:block; overflow:visible; }
+  .alabel { font-size:3.6px; fill:var(--dim); text-anchor:middle; }
+  .agent.sev4 .alabel { fill:var(--block); font-weight:600; }
+  .agent.sev3 .alabel { fill:var(--bad); }
+  .agent.sev2 .alabel { fill:var(--ink); }
 
   /* Motion is meaning here, not decoration: it is only ever applied to a state
      that is actually changing, so a still figure is a still session. */
@@ -226,10 +224,15 @@
   <nav><a href="/">table</a><a href="/map" class="on">map</a></nav>
   <div class="gauges" id="gauges"></div>
 </header>
+<div id="trust"></div>
 <div id="hostwarn"></div>
 <div id="wrap">
-  <svg id="wires"></svg>
-  <div id="map"></div>
+  <svg id="world" viewBox="0 0 408 408">
+    <defs><marker id="ah" viewBox="0 0 8 8" refX="6" refY="4"
+        markerWidth="5" markerHeight="5" orient="auto">
+        <path d="M0,0 L8,4 L0,8 z" fill="var(--info)"/></marker></defs>
+    <g id="camera"></g>
+  </svg>
 </div>
 <div class="legend" id="legend"></div>
 <div id="reply">
@@ -251,6 +254,7 @@
      it needs no route of its own. The path is absolute because this page
      answers on both /map and /map.html and one src should mean one file. -->
 <script src="/md.js"></script>
+<script src="/plots.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -261,6 +265,25 @@ const SEND_TOKEN = "__CCWATCH_SEND_TOKEN__";
 const CAN_SEND = SEND_TOKEN && !SEND_TOKEN.startsWith("__");
 // Set from the server, which only enables it when started with --allow-kill.
 let CAN_KILL = false;
+// The single VOLATILE gate (data-model.md §5, FR-029): true only when the
+// feed is fully trusted. Every reading in the withheld set — the context
+// fill inside a figure, `ctx NN%`/`NN MB` in a figure's title, every gauge
+// percentage, the host memory-pressure figures — reads this flag rather than
+// deciding independently, so there is exactly one place to extend it.
+let VOLATILE = true;
+
+// Built once at load, never touched by a refresh (FR-020): CAN_SEND is known
+// before the first tick, so there is nothing here a snapshot could change.
+$("legend").innerHTML = [
+  `<span><b style="color:var(--block)">raised arm</b> blocked on you — click to read the question</span>`,
+  `<span><b style="color:var(--bad)">tilted, ?</b> says busy but has gone quiet</span>`,
+  `<span><b style="color:var(--ok)">bobbing</b> working</span>`,
+  `<span><b style="color:var(--info)">outline</b> alive, nothing to corroborate it</span>`,
+  `<span><b style="color:var(--dim)">z</b> idle</span>`,
+  `<span>fill level inside the body = context used</span>`,
+  CAN_SEND ? `<span>click an agent to read its conversation and reply</span>`
+           : `<span>click an agent to read its conversation (read-only)</span>`,
+].join("");
 
 // One mapping from status to appearance, so the figure, the label colour and
 // the territory border can never disagree about how bad something is.
@@ -282,35 +305,62 @@ const kindOf = r => KIND[r.token] || {cls:"quiet", sev:r.sev, colour:"var(--dim)
 // A little standing figure. Drawn as SVG rather than an emoji so the colour
 // tracks the status and the parts can be animated independently — the raised
 // arm on a session that is blocked on you is the whole point of this view.
-function figure(r) {
+// Built with svgEl rather than an innerHTML template string (FR-016/V1/V2):
+// this is the figure primitive's art, assembled fresh into a detached node
+// each call and handed to updateFigure() to attach — no innerHTML assignment
+// anywhere on the page's refresh path except the one turn body.
+function figure(r, w, h) {
   const k = kindOf(r);
   const c = k.colour;
-  const ctx = r.context && r.context.used_percentage != null
+  const ctx = VOLATILE && r.context && r.context.used_percentage != null
             ? Math.min(100, Math.max(0, r.context.used_percentage)) : null;
   // Context fill is drawn as a level inside the body: a session close to
   // compacting is worth seeing before it happens.
   const fillH = ctx == null ? 0 : (14 * ctx / 100);
-  return `<svg class="figure" viewBox="0 0 40 44" aria-hidden="true">
-    <g class="body">
-      ${k.cls === "waiting" ? `<g class="bubble">
-        <rect x="24" y="1" width="14" height="11" rx="3" fill="${c}" opacity=".22"/>
-        <text x="31" y="9.5" text-anchor="middle" font-size="8" fill="${c}">!</text></g>` : ""}
-      ${k.cls === "idle" ? `<text x="30" y="9" font-size="7" fill="var(--dim)">z</text>` : ""}
-      <circle cx="20" cy="12" r="5.4" fill="none" stroke="${c}" stroke-width="1.6"/>
-      ${k.cls === "hung" ? `<text x="20" y="15" text-anchor="middle" font-size="7" fill="${c}">?</text>` : ""}
-      <rect x="14.6" y="19" width="10.8" height="15" rx="4"
-            fill="${k.cls === "quiet" ? "none" : c}" fill-opacity="${k.cls === "quiet" ? 0 : .16}"
-            stroke="${c}" stroke-width="1.6"/>
-      ${ctx != null ? `<rect x="15.6" y="${20 + (14 - fillH)}" width="8.8" height="${fillH}"
-            rx="2" fill="${ctx >= 80 ? "var(--bad)" : ctx >= 60 ? "var(--warn)" : c}"
-            opacity=".55"/>` : ""}
-      <g class="arm"><line x1="25.4" y1="22" x2="${k.cls === "waiting" ? 31 : 29}"
-            y2="${k.cls === "waiting" ? 13 : 27}" stroke="${c}" stroke-width="1.6"
-            stroke-linecap="round"/></g>
-      <line x1="14.6" y1="22" x2="10.5" y2="27" stroke="${c}" stroke-width="1.6" stroke-linecap="round"/>
-      <line x1="17.5" y1="34" x2="16" y2="42" stroke="${c}" stroke-width="1.6" stroke-linecap="round"/>
-      <line x1="22.5" y1="34" x2="24" y2="42" stroke="${c}" stroke-width="1.6" stroke-linecap="round"/>
-    </g></svg>`;
+  const svg = svgEl("svg", {class: "figure", viewBox: "0 0 40 44",
+    width: w || 40, height: h || 44, "aria-hidden": "true"});
+  const body = svgEl("g", {class: "body"});
+  if (k.cls === "waiting") {
+    const bubble = svgEl("g", {class: "bubble"});
+    bubble.appendChild(svgEl("rect", {x: 24, y: 1, width: 14, height: 11, rx: 3, fill: c, opacity: .22}));
+    const bang = svgEl("text", {x: 31, y: 9.5, "text-anchor": "middle", "font-size": 8, fill: c});
+    bang.textContent = "!";
+    bubble.appendChild(bang);
+    body.appendChild(bubble);
+  }
+  if (k.cls === "idle") {
+    const z = svgEl("text", {x: 30, y: 9, "font-size": 7, fill: "var(--dim)"});
+    z.textContent = "z";
+    body.appendChild(z);
+  }
+  body.appendChild(svgEl("circle", {cx: 20, cy: 12, r: 5.4, fill: "none", stroke: c, "stroke-width": 1.6}));
+  if (k.cls === "hung") {
+    const q = svgEl("text", {x: 20, y: 15, "text-anchor": "middle", "font-size": 7, fill: c});
+    q.textContent = "?";
+    body.appendChild(q);
+  }
+  body.appendChild(svgEl("rect", {
+    x: 14.6, y: 19, width: 10.8, height: 15, rx: 4,
+    fill: k.cls === "quiet" ? "none" : c, "fill-opacity": k.cls === "quiet" ? 0 : .16,
+    stroke: c, "stroke-width": 1.6,
+  }));
+  if (ctx != null) {
+    body.appendChild(svgEl("rect", {
+      x: 15.6, y: 20 + (14 - fillH), width: 8.8, height: fillH, rx: 2,
+      fill: ctx >= 80 ? "var(--bad)" : ctx >= 60 ? "var(--warn)" : c, opacity: .55,
+    }));
+  }
+  const arm = svgEl("g", {class: "arm"});
+  arm.appendChild(svgEl("line", {
+    x1: 25.4, y1: 22, x2: k.cls === "waiting" ? 31 : 29, y2: k.cls === "waiting" ? 13 : 27,
+    stroke: c, "stroke-width": 1.6, "stroke-linecap": "round",
+  }));
+  body.appendChild(arm);
+  body.appendChild(svgEl("line", {x1: 14.6, y1: 22, x2: 10.5, y2: 27, stroke: c, "stroke-width": 1.6, "stroke-linecap": "round"}));
+  body.appendChild(svgEl("line", {x1: 17.5, y1: 34, x2: 16, y2: 42, stroke: c, "stroke-width": 1.6, "stroke-linecap": "round"}));
+  body.appendChild(svgEl("line", {x1: 22.5, y1: 34, x2: 24, y2: 42, stroke: c, "stroke-width": 1.6, "stroke-linecap": "round"}));
+  svg.appendChild(body);
+  return svg;
 }
 
 // Within a territory the project prefix is redundant and eats the width that
@@ -328,145 +378,461 @@ function shortName(r) {
   return r.name;
 }
 
-function agentCard(r) {
-  const k = kindOf(r);
+// The one and only thing this file may hand plots.js: strings identifying who
+// something is (data-model.md §2). No sev/psev/token/quiet/waited/context/
+// rss_mb/cost/age/pipeline/deploys, and no row order, may reach this tree.
+const NO_REPO = "no repo";
+
+function buildWorldModel(s) {
+  const districts = {};      // org -> {org, isNoRepo, buildings: {slug -> ...}}
+  const districtsByKey = {}; // "d|<org>" -> {org, isNoRepo}
+  const buildingsByKey = {}; // "b|<org>|<slug>" -> {slug, label, hasRemote, unfinished, deploys}
+  const zonesByKey = {};     // "z|<slug>|<branch>" -> {branch}
+  const figuresByKey = {};   // "f|<slug>|<branch>|<sid>" -> row
+  const buildingBySlugRepo = {}; // row.repo -> building, for exact deploy matching
+
+  function ensureDistrict(org, isNoRepo) {
+    if (!districts[org]) {
+      districts[org] = {org, isNoRepo, buildings: {}};
+      districtsByKey["d|" + org] = {org, isNoRepo};
+    }
+    return districts[org];
+  }
+  function ensureBuilding(d, slug, label, hasRemote) {
+    if (!d.buildings[slug]) {
+      d.buildings[slug] = {slug, label, hasRemote, zones: {}, unfinished: [], deploys: []};
+      buildingsByKey["b|" + d.org + "|" + slug] = d.buildings[slug];
+    }
+    return d.buildings[slug];
+  }
+  function ensureZone(b, slug, branchKey) {
+    if (!b.zones[branchKey]) {
+      b.zones[branchKey] = {branch: branchKey, figures: []};
+      zonesByKey["z|" + slug + "|" + branchKey] = b.zones[branchKey];
+    }
+    return b.zones[branchKey];
+  }
+
+  for (const r of (s.sessions || [])) {
+    const hasRemote = !!r.repo;
+    const org = hasRemote ? r.repo.split("/")[0] : NO_REPO;
+    const slug = r.repo || ("dir:" + (r.cwd || "?"));
+    const label = r.repo || r.project || slug;
+    const branchKey = r.branch || "?";
+    const d = ensureDistrict(org, !hasRemote);
+    const b = ensureBuilding(d, slug, label, hasRemote);
+    const z = ensureZone(b, slug, branchKey);
+    z.figures.push({sid: r.sid});
+    figuresByKey["f|" + slug + "|" + branchKey + "|" + r.sid] = r;
+    if (r.repo) buildingBySlugRepo[r.repo] = b;
+  }
+  for (const u of (s.unfinished || [])) {
+    const hasRemote = !!u.repo;
+    const org = hasRemote ? u.repo.split("/")[0] : NO_REPO;
+    // No `cwd` on an unfinished-run row — `project` is the only directory
+    // hint it carries (data-model.md §2's cwd rule applies to live rows).
+    const slug = u.repo || ("dir:" + (u.project || "?"));
+    const label = u.repo || u.project || slug;
+    const d = ensureDistrict(org, !hasRemote);
+    const b = ensureBuilding(d, slug, label, hasRemote);
+    b.unfinished.push(u);
+    if (u.repo) buildingBySlugRepo[u.repo] = b;
+  }
+  // Exact match on owner/name — see the note this replaces at the old
+  // territory()/tick() call site: matching on a directory basename let a
+  // deploy on acme/checkout-api silently never find its building.
+  for (const dep of ((s.deploys && s.deploys.runs) || [])) {
+    const b = buildingBySlugRepo[dep.repo];
+    if (b) b.deploys.push(dep);
+  }
+
+  const tree = Object.keys(districts).map(org => {
+    const d = districts[org];
+    return {
+      org: d.org,
+      buildings: Object.keys(d.buildings).map(slug => {
+        const b = d.buildings[slug];
+        return {
+          slug: b.slug,
+          zones: Object.keys(b.zones).map(br => {
+            const z = b.zones[br];
+            return {branch: z.branch, figures: z.figures};
+          }),
+        };
+      }),
+    };
+  });
+
+  return {tree, districtsByKey, buildingsByKey, zonesByKey, figuresByKey};
+}
+
+const SVGNS = "http://www.w3.org/2000/svg";
+function svgEl(tag, attrs) {
+  const el = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) el.setAttribute(k, attrs[k]);
+  return el;
+}
+function titleEl(text) {
+  const t = svgEl("title", {});
+  t.textContent = text;
+  return t;
+}
+
+// The one reconciliation primitive (research.md D4): create/update/remove by
+// identity key, never a wholesale rebuild. `key` namespaces the index kept on
+// `parentEl` (`camera` holds four kinds of child — district/building/zone/
+// figure — reconciled by three separate calls sharing one parent, so each
+// gets its own slice rather than one call's absentees deleting another's
+// children). `make()` returns a freshly created element; `update(el, model)`
+// writes attributes/text onto an existing one. Anything indexed under `key`
+// whose identity is missing from `wanted` is removed.
+function reconcile(parentEl, wanted, key, make, update) {
+  if (!parentEl._reconcileIndex) parentEl._reconcileIndex = {};
+  if (!parentEl._reconcileIndex[key]) parentEl._reconcileIndex[key] = {};
+  const index = parentEl._reconcileIndex[key];
+  for (const id in index) {
+    if (!wanted.hasOwnProperty(id)) {
+      index[id].remove();
+      delete index[id];
+    }
+  }
+  for (const id in wanted) {
+    const model = wanted[id];
+    let el = index[id];
+    if (!el) {
+      el = make(id, model);
+      index[id] = el;
+      parentEl.appendChild(el);
+    }
+    update(el, model);
+  }
+}
+
+// One primitive per level (research.md D4), each owning all of its own art
+// plus a `<rect class="hit">` independent of that art, so a later sprite swap
+// touches only the primitive. None of them reads anything but the geometry
+// place() computed and the identity/label fields already excluded from it.
+// Split make/update so reconcile() can create a node once and write to the
+// SAME node on every later tick — the node's identity, not its content, is
+// what a hover/focus/selection is anchored to.
+function makeDistrict() {
+  const g = svgEl("g", {class: "district"});
+  g.appendChild(svgEl("rect", {class: "hit", rx: 3}));
+  g.appendChild(svgEl("title", {}));
+  g.appendChild(svgEl("text", {class: "dlabel", x: 3, y: 8}));
+  return g;
+}
+function updateDistrict(g, {geo, meta}) {
+  g.setAttribute("transform", `translate(${geo.x},${geo.y})`);
+  const hit = g.querySelector(".hit");
+  hit.setAttribute("width", geo.w); hit.setAttribute("height", geo.h);
+  g.querySelector("title").textContent = meta.isNoRepo
+    ? "no repo — grouped by directory, no git remote" : meta.org;
+  g.querySelector(".dlabel").textContent = meta.isNoRepo ? NO_REPO : meta.org;
+}
+
+function makeBuilding() {
+  const g = svgEl("g", {class: "building"});
+  g.appendChild(svgEl("rect", {class: "hit", rx: 2}));
+  g.appendChild(svgEl("title", {}));
+  g.appendChild(svgEl("text", {class: "blabel", x: 2, y: 6}));
+  g.appendChild(svgEl("text", {class: "norepo-badge", "text-anchor": "end"}));
+  g.appendChild(svgEl("g", {class: "badges"}));
+  return g;
+}
+function updateBuilding(g, {geo, meta}) {
+  g.setAttribute("class", "building" + (meta.unfinished.length ? " has-unfinished" : ""));
+  g.setAttribute("transform", `translate(${geo.x},${geo.y})`);
+  const hit = g.querySelector(".hit");
+  hit.setAttribute("width", geo.w); hit.setAttribute("height", geo.h);
+  g.querySelector("title").textContent =
+    meta.label + (meta.hasRemote === false ? " (no repo)" : "");
+  g.querySelector(".blabel").textContent = meta.label;
+  const norepo = g.querySelector(".norepo-badge");
+  if (meta.hasRemote === false) {
+    norepo.setAttribute("x", geo.w - 2); norepo.setAttribute("y", 6);
+    norepo.textContent = NO_REPO;
+  } else {
+    norepo.textContent = "";
+  }
+  // Badges are rebuilt wholesale on each update: they carry no hover/focus/
+  // selection state of their own (plain <text>, no interaction), so there is
+  // nothing reconciliation would preserve here that a fresh set does not.
+  const badges = g.querySelector(".badges");
+  badges.textContent = "";
+  let by = 12;
+  for (const u of meta.unfinished) {
+    const el = svgEl("text", {class: "wreck-badge", x: 2, y: by});
+    el.textContent = `${u.phase}/${u.status}`;
+    el.appendChild(titleEl(`${u.feature} · $${(u.cost || 0).toFixed(2)}`
+      + (u.age != null ? ` · ${dur(u.age)} ago` : "")));
+    badges.appendChild(el);
+    by += 5;
+  }
+  for (const d of meta.deploys) {
+    const state = d.live ? "RUNNING" : String(d.conclusion || "?").toUpperCase();
+    const el = svgEl("text", {class: "deploy-badge", x: 2, y: by});
+    el.textContent = state;
+    el.appendChild(titleEl(`${d.workflowName} · ${d.headBranch}`));
+    badges.appendChild(el);
+    by += 5;
+  }
+}
+
+function makeZone() {
+  const g = svgEl("g", {class: "zone"});
+  g.appendChild(svgEl("rect", {class: "hit", rx: 1}));
+  g.appendChild(svgEl("title", {}));
+  g.appendChild(svgEl("text", {class: "zlabel", x: 2, y: 5}));
+  return g;
+}
+function updateZone(g, {geo, meta}) {
+  g.setAttribute("transform", `translate(${geo.x},${geo.y})`);
+  const hit = g.querySelector(".hit");
+  hit.setAttribute("width", geo.w); hit.setAttribute("height", geo.h);
+  g.querySelector("title").textContent = "branch " + meta.branch;
+  g.querySelector(".zlabel").textContent = meta.branch;
+}
+
+function titleBits(r) {
   const bits = [r.token];
   if (r.questions && r.questions.length) bits.push("ASKS: " + r.questions[0].question);
   if (r.waited != null) bits.push(`${r.note} ${dur(r.waited)}`);
   else if (r.note) bits.push(r.note);
   if (r.pipeline) bits.push(`${r.pipeline.phase}/${r.pipeline.crashed ? "CRASHED" : r.pipeline.status}`);
   bits.push(`age ${dur(r.age)}`);
-  if (r.context && r.context.used_percentage != null)
+  // Withheld, not annotated, while the feed is not fully trusted (FR-029):
+  // pose/colour/structure/status word/age (above) stay regardless.
+  if (VOLATILE && r.context && r.context.used_percentage != null)
     bits.push(`ctx ${Math.floor(r.context.used_percentage)}%`);
-  if (r.rss_mb != null) bits.push(`${r.rss_mb}MB`);
-  return `<div class="agent sev${k.sev} ${k.cls} clickable"
-    data-sid="${esc(r.sid)}" data-name="${esc(r.name)}" title="${esc(bits.join(" · "))}">
-    ${figure(r)}<div class="alabel">${esc(shortName(r))}</div></div>`;
+  if (VOLATILE && r.rss_mb != null) bits.push(`${r.rss_mb}MB`);
+  return bits.join(" · ");
 }
 
-function territory(g) {
-  const {label, repo, rows, unfinished, deploys} = g;
-  const owner = repo && repo.includes("/") ? repo.split("/")[0] : null;
-  const worst = Math.max(0, ...rows.map(r => Math.max(r.sev, r.psev || 0)),
-                         ...(unfinished.length ? [3] : []));
-  const badges = deploys.map(d => {
-    const state = d.live ? "RUNNING" : String(d.conclusion || "?").toUpperCase();
-    const cls = d.live ? "b-run" : state === "SUCCESS" ? "b-ok" : "b-bad";
-    return `<span class="badge ${cls}" title="${esc(d.workflowName)} · ${esc(d.headBranch)}">`
-         + `${esc(state)}</span>`;
-  }).join("");
-  const wreck = unfinished.length ? `<div class="wreck">` + unfinished.map(u =>
-      `<div><span>${esc(u.phase)}/${esc(u.status)}</span>`
-    + `<span class="feat">${esc(u.feature)}</span>`
-    + `<span class="cost">$${(u.cost||0).toFixed(2)} · ${u.age!=null?dur(u.age)+" ago":""}</span></div>`
-    ).join("") + `</div>` : "";
-  // Worktrees of one repository now live in the SAME territory, which is
-  // correct — they are one repo — but then the branch is the only thing
-  // telling two of them apart. So agents are grouped by it, and the grouping
-  // only appears when there is more than one.
-  const byBranch = {};
-  for (const r of rows) (byBranch[r.branch || "?"] = byBranch[r.branch || "?"] || []).push(r);
-  const branches = Object.keys(byBranch).sort();
-  const folk = branches.length > 1
-    ? branches.map(b => `<div class="branchgroup"><div class="bname">${esc(b)}</div>`
-        + `<div class="folk">${byBranch[b].map(agentCard).join("")}</div></div>`).join("")
-    : `<div class="folk">${rows.map(agentCard).join("")}</div>`;
-  return `<section class="territory t${worst}" data-repo="${esc(repo || label)}">
-    <div class="thead">
-      ${owner ? `<span class="towner">${esc(owner)}/</span>` : ""}<span class="tname">${esc(label)}</span>
-      ${!repo ? `<span class="norepo" title="no git remote — grouped by directory">no repo</span>` : ""}
-      <span class="tcount">${rows.length} agent${rows.length===1?"":"s"}</span>
-      <div class="tbadges">${badges}</div></div>
-    ${folk}${wreck}</section>`;
+// Pose/colour/emphasis exactly as agentCard() drew them; position comes
+// entirely from `geo`, which place() derived from identity alone (FR-006).
+// The figure's own art (`.figart`) is rebuilt wholesale on every update — it
+// carries no hover/focus/selection state — but the outer `<g class="agent">`
+// node, its hit rect and its dataset are the SAME node across ticks, which is
+// what a click handler, a `:hover` and the reconcile index all key off.
+function makeFigure() {
+  const g = svgEl("g", {class: "agent clickable"});
+  g.appendChild(svgEl("g", {class: "figart"}));
+  g.appendChild(svgEl("rect", {class: "hit"}));
+  g.appendChild(svgEl("title", {}));
+  g.appendChild(svgEl("text", {class: "alabel"}));
+  return g;
+}
+function updateFigure(g, {geo, row}) {
+  const k = kindOf(row);
+  g.setAttribute("class", `agent sev${k.sev} ${k.cls} clickable`);
+  g.setAttribute("transform", `translate(${geo.x},${geo.y})`);
+  g.dataset.sid = row.sid;
+  g.dataset.name = row.name;
+  const figart = g.querySelector(".figart");
+  figart.textContent = "";
+  figart.appendChild(figure(row, geo.w, geo.h));
+  const hit = g.querySelector(".hit");
+  hit.setAttribute("width", geo.w); hit.setAttribute("height", geo.h);
+  g.querySelector("title").textContent = titleBits(row);
+  const label = g.querySelector(".alabel");
+  label.setAttribute("x", geo.w / 2); label.setAttribute("y", geo.h - .5);
+  label.textContent = shortName(row);
 }
 
 // Message lines are drawn between the two figures involved, wherever they are —
-// including across territories, which is the case worth seeing.
-function wires(peers) {
-  const svg = $("wires");
-  svg.innerHTML = "";
-  if (!peers || !peers.edges) return;
-  const wrap = $("wrap").getBoundingClientRect();
-  const byName = {};
-  document.querySelectorAll(".agent[data-name]").forEach(el => { byName[el.dataset.name] = el; });
-  const centre = el => {
-    const b = el.getBoundingClientRect();
-    return {x: b.left - wrap.left + b.width/2, y: b.top - wrap.top + 22};
-  };
-  let drawn = 0;
-  const defs = `<defs><marker id="ah" viewBox="0 0 8 8" refX="6" refY="4"
-      markerWidth="5" markerHeight="5" orient="auto">
-      <path d="M0,0 L8,4 L0,8 z" fill="var(--info)"/></marker></defs>`;
-  let out = defs;
-  for (const e of peers.edges) {
-    const a = byName[e.from], b = byName[e.to];
-    // Only edges where BOTH ends are on the map. A line to a session that has
-    // exited would be a line to nowhere, and the peers panel in the table view
-    // already lists those.
-    if (!a || !b || a === b) continue;
-    const p = centre(a), q = centre(b);
-    // Bowed, so A→B and B→A are two visible lines rather than one overdrawn.
-    const mx = (p.x + q.x)/2, my = (p.y + q.y)/2;
-    const dx = q.x - p.x, dy = q.y - p.y;
-    const len = Math.hypot(dx, dy) || 1;
-    const bow = Math.min(48, len * 0.18);
-    const cx = mx - (dy/len) * bow, cy = my + (dx/len) * bow;
-    const w = Math.min(3.2, 0.7 + Math.log2(1 + e.count) * 0.7);
-    out += `<path d="M${p.x},${p.y} Q${cx},${cy} ${q.x},${q.y}" fill="none"
-      stroke="var(--info)" stroke-width="${w}" opacity=".42" marker-end="url(#ah)"/>`;
-    // Only worth labelling when it is more than one message — a "1" on every
-    // line is clutter that buries the edge that actually has traffic. Placed
-    // near the SENDER rather than at the apex: the apex lands in the middle of
-    // whatever the line crosses, which was reliably a territory's own text.
-    if (e.count > 1) {
-      const t = 0.22;   // quadratic Bézier at t, close to the source
-      const lx = (1-t)*(1-t)*p.x + 2*(1-t)*t*cx + t*t*q.x;
-      const ly = (1-t)*(1-t)*p.y + 2*(1-t)*t*cy + t*t*q.y;
-      out += `<circle cx="${lx}" cy="${ly}" r="8" fill="var(--ground)"
-        stroke="var(--info)" stroke-opacity=".5" stroke-width="1"/>`;
-      out += `<text x="${lx}" y="${ly + 3}" font-size="9" fill="var(--info)"
-        text-anchor="middle">${e.count}</text>`;
-    }
-    drawn++;
+// including across territories, which is the case worth seeing. Positioned
+// entirely from the `cx`/`cy` world centres place() returned this tick — never
+// getBoundingClientRect() — so a wire is exactly as stable under the camera's
+// transform as the figures it connects (FR-021, V6).
+function makeWire() {
+  const g = svgEl("g", {class: "wire"});
+  g.appendChild(svgEl("path", {fill: "none", stroke: "var(--info)",
+    opacity: ".42", "marker-end": "url(#ah)"}));
+  g.appendChild(svgEl("circle", {r: 8, fill: "var(--ground)",
+    stroke: "var(--info)", "stroke-opacity": ".5", "stroke-width": "1"}));
+  g.appendChild(svgEl("text", {"font-size": "9", fill: "var(--info)", "text-anchor": "middle"}));
+  return g;
+}
+function updateWire(g, {p, q, count}) {
+  // Bowed, so A→B and B→A are two visible lines rather than one overdrawn.
+  const mx = (p.x + q.x)/2, my = (p.y + q.y)/2;
+  const dx = q.x - p.x, dy = q.y - p.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const bow = Math.min(48, len * 0.18);
+  const cx = mx - (dy/len) * bow, cy = my + (dx/len) * bow;
+  const w = Math.min(3.2, 0.7 + Math.log2(1 + count) * 0.7);
+  const path = g.querySelector("path");
+  path.setAttribute("d", `M${p.x},${p.y} Q${cx},${cy} ${q.x},${q.y}`);
+  path.setAttribute("stroke-width", w);
+  const circle = g.querySelector("circle"), text = g.querySelector("text");
+  // Only worth labelling when it is more than one message — a "1" on every
+  // line is clutter that buries the edge that actually has traffic. Placed
+  // near the SENDER rather than at the apex: the apex lands in the middle of
+  // whatever the line crosses, which was reliably a territory's own text.
+  if (count > 1) {
+    const t = 0.22;   // quadratic Bézier at t, close to the source
+    const lx = (1-t)*(1-t)*p.x + 2*(1-t)*t*cx + t*t*q.x;
+    const ly = (1-t)*(1-t)*p.y + 2*(1-t)*t*cy + t*t*q.y;
+    circle.setAttribute("cx", lx); circle.setAttribute("cy", ly);
+    circle.style.display = ""; text.style.display = "";
+    text.setAttribute("x", lx); text.setAttribute("y", ly + 3);
+    text.textContent = count;
+  } else {
+    circle.style.display = "none"; text.style.display = "none";
   }
-  svg.innerHTML = out;
-  svg.setAttribute("width", wrap.width);
-  svg.setAttribute("height", $("map").getBoundingClientRect().height);
+}
+function wires(peers, placed) {
+  const camera = $("camera");
+  const wanted = {};
+  let drawn = 0;
+  if (peers && peers.edges && placed) {
+    const centreByName = {};
+    for (const k in placed.figuresByKey) {
+      const row = placed.figuresByKey[k];
+      const geo = placed.world.figures[k];
+      if (row && geo) centreByName[row.name] = {x: geo.cx, y: geo.cy};
+    }
+    for (const e of peers.edges) {
+      const p = centreByName[e.from], q = centreByName[e.to];
+      // Only edges where BOTH ends are on the map. A line to a session that
+      // has exited would be a line to nowhere, and the peers panel in the
+      // table view already lists those.
+      if (!p || !q || e.from === e.to) continue;
+      wanted[`${e.from}->${e.to}`] = {p, q, count: e.count};
+      drawn++;
+    }
+  }
+  reconcile(camera, wanted, "wire", makeWire, updateWire);
   return drawn;
 }
 
 // A session killed by the OS leaves the same trace as one that exited
 // cleanly, so without this the dashboard can say an agent is gone but not why.
-function hostwarn(h) {
+// Built once, updated in place (FR-016/V1): the bold lead-in never changes,
+// only the trailing text node does.
+const hostwarnEls = (function () {
   const el = $("hostwarn");
-  if (!el) return;
-  if (!h || !h.pressure) { el.className = ""; el.textContent = ""; return; }
+  if (!el) return null;
+  const lead = document.createElement("b"); lead.textContent = "host under memory pressure";
+  const rest = document.createTextNode("");
+  el.append(lead, rest);
+  return {el, rest};
+})();
+function hostwarn(h) {
+  if (!hostwarnEls) return;
+  const {el, rest} = hostwarnEls;
+  if (!h || !h.pressure) { el.className = ""; rest.textContent = ""; return; }
   el.className = "on";
+  // Every memory figure here is in the VOLATILE set (data-model.md §5): the
+  // pressure itself still appears at its own threshold (FR-044), but the
+  // numbers behind it are withheld, not annotated, while the feed is not
+  // fully trusted.
+  if (!VOLATILE) {
+    rest.textContent = " — readings withheld while the feed is unreliable."
+      + " The OS may kill sessions, and a killed session looks exactly like a clean exit.";
+    return;
+  }
   // The sessions' own share is stated, so "would killing agents help" is a
   // number rather than a hunch. Usually it is a small fraction of the total.
   const share = h.sessions_mb != null
     ? ` Sessions account for ${h.sessions_mb}MB of it (${h.idle_mb || 0}MB of that idle).` : "";
-  el.innerHTML = `<b>host under memory pressure</b> — swap ${h.swap_used_pct}% used `
+  rest.textContent = ` — swap ${h.swap_used_pct}% used `
     + `(${h.swap_used_mb}/${h.swap_total_mb}MB), ${h.ram_free_mb}MB RAM free. `
     + `The OS may kill sessions, and a killed session looks exactly like a clean exit.`
     + share;
 }
 
-function gauges(u) {
-  if (!u) return '<span class="dim">usage not reporting — run <b>ccwatch install-statusline</b></span>';
-  const now = Date.now()/1000;
+// One gauge span per reading, reconciled by name so the DOM node behind each
+// percentage survives a tick (FR-016/V1); the two full-panel messages (no
+// usage at all, or the whole reading stale) replace the gauge set with a
+// single persistent note node instead.
+function makeGaugeSpan() {
+  const span = document.createElement("span");
+  const label = document.createElement("span"); label.className = "g-label";
+  const val = document.createElement("span"); val.className = "g-val";
+  span.append(label, document.createTextNode(" "), val, document.createTextNode(" "));
+  const reset = document.createElement("span"); reset.className = "g-reset";
+  span.appendChild(reset);
+  return span;
+}
+function updateGaugeSpan(span, g) {
   const band = p => p >= 90 ? "var(--bad)" : p >= 70 ? "var(--warn)" : "var(--ink)";
-  const one = (nm, x) => !x ? "" :
-    `<span><span class="g-label">${nm}</span> <span class="g-val" style="color:${band(x.used_percentage)}">`
-    + `${Math.floor(x.used_percentage)}%</span>`
-    + (x.resets_at ? ` <span class="g-reset">resets ${dur(x.resets_at-now)}</span>` : "") + `</span>`;
+  span.querySelector(".g-label").textContent = g.name;
+  const val = span.querySelector(".g-val");
+  val.textContent = `${Math.floor(g.x.used_percentage)}%`;
+  val.style.color = band(g.x.used_percentage);
+  span.querySelector(".g-reset").textContent =
+    g.x.resets_at ? `resets ${dur(g.x.resets_at - g.now)}` : "";
+}
+const gaugesEls = (function () {
+  const el = $("gauges");
+  const note = document.createElement("span"); note.style.display = "none";
+  el.appendChild(note);
+  return {el, note};
+})();
+function updateGauges(u) {
+  const {el, note} = gaugesEls;
+  if (!u) {
+    reconcile(el, {}, "gauge", makeGaugeSpan, updateGaugeSpan);
+    note.className = "dim"; note.style.display = "";
+    note.textContent = "usage not reporting — run ccwatch install-statusline";
+    return;
+  }
+  // Withheld while the feed itself is not trusted (FR-029) — on top of, not
+  // instead of, the reading's own staleness window below.
+  if (!VOLATILE) {
+    reconcile(el, {}, "gauge", makeGaugeSpan, updateGaugeSpan);
+    note.className = "stale"; note.style.display = "";
+    note.textContent = "usage: withheld while the feed is unreliable";
+    return;
+  }
   // Withheld rather than annotated past the staleness limit. A percentage on
   // screen is read as current whatever is printed beside it — a fixture left
   // over from an earlier run showed 52% while the real figure was 7%.
-  if (u.age > (u.stale_after || 600))
-    return `<span class="stale">usage: last reading ${dur(u.age)} old — not shown</span>`;
-  return [one("5h",u.five_hour), one("7d",u.seven_day), one("7d opus",u.seven_day_opus)].join("")
-    + (u.age > 60 ? ` <span class="stale">[${dur(u.age)} old]</span>` : "");
+  if (u.age > (u.stale_after || 600)) {
+    reconcile(el, {}, "gauge", makeGaugeSpan, updateGaugeSpan);
+    note.className = "stale"; note.style.display = "";
+    note.textContent = `usage: last reading ${dur(u.age)} old — not shown`;
+    return;
+  }
+  note.style.display = "none"; note.textContent = "";
+  const now = Date.now() / 1000;
+  const wanted = {};
+  if (u.five_hour) wanted["5h"] = {name: "5h", x: u.five_hour, now};
+  if (u.seven_day) wanted["7d"] = {name: "7d", x: u.seven_day, now};
+  if (u.seven_day_opus) wanted["7dop"] = {name: "7d opus", x: u.seven_day_opus, now};
+  reconcile(el, wanted, "gauge", makeGaugeSpan, updateGaugeSpan);
+  if (u.age > 60) {
+    note.className = "stale"; note.style.display = "";
+    note.textContent = `[${dur(u.age)} old]`;
+  }
+}
+
+// Built once, updated in place (FR-016/V1): the live-count sentence plus its
+// two conditional clauses, each a persistent node so a click-drag selection
+// across the header survives a tick.
+const countsEls = (function () {
+  const root = $("counts");
+  const main = document.createTextNode("");
+  const waitSep = document.createTextNode("");
+  const wait = document.createElement("b"); wait.style.color = "var(--block)";
+  const suspSep = document.createTextNode("");
+  const susp = document.createElement("b"); susp.style.color = "var(--bad)";
+  root.append(main, waitSep, wait, suspSep, susp);
+  return {main, waitSep, wait, suspSep, susp};
+})();
+function updateCounts(s, buildingCount) {
+  const {main, waitSep, wait, suspSep, susp} = countsEls;
+  const total = (s.sessions || []).length;
+  const w = (s.sessions || []).filter(r => r.sev === 4).length;
+  const q = (s.sessions || []).filter(r => r.sev === 3).length;
+  main.textContent = `${total} live in ${buildingCount} project${buildingCount === 1 ? "" : "s"}`;
+  waitSep.textContent = w ? " · " : "";
+  wait.textContent = w ? `${w} waiting on you` : "";
+  suspSep.textContent = q ? " · " : "";
+  susp.textContent = q ? `${q} suspect` : "";
+  document.title = (w ? `(${w}) ` : "") + "ccwatch · map";
 }
 
 // ---- inspector -------------------------------------------------------------
@@ -497,99 +863,228 @@ const MD = {assistant:true, said:true};
 // session with nothing to say. The class comes off the SAME condition as the
 // rendering: tagging a plain-text turn as markdown would drop its newlines.
 const isMd = t => !!(MD[t.kind] && window.CCWATCH_MD);
-const body = t => isMd(t) ? CCWATCH_MD.render(t.text || "") : esc(t.text || "");
+
+// A message slot for the empty/error states, kept out of the "turn" index so
+// reconcile()'s removal pass never touches it. Built once; toggled, not
+// replaced.
+const convoMsgEl = (function () {
+  const box = $("convo");
+  const el = document.createElement("div"); el.className = "dim"; el.style.display = "none";
+  box.appendChild(el);
+  return el;
+})();
+function setConvoMessage(text, isError) {
+  convoMsgEl.textContent = text;
+  convoMsgEl.style.color = isError ? "var(--bad)" : "";
+  convoMsgEl.style.display = "";
+}
+function clearConvoMessage() {
+  convoMsgEl.style.display = "none";
+  convoMsgEl.textContent = "";
+}
+
+// One <div class="turn"> per transcript entry, reconciled by identity
+// (research.md D4) so an open text selection or a scrolled-to position
+// survives a refresh instead of being rebuilt wholesale. `.what`'s single
+// remaining innerHTML write is the escape-first-then-tag path Constitution X
+// requires (V2) — the container is reconciled, the body is not.
+function makeTurn() {
+  const div = document.createElement("div");
+  const who = document.createElement("div"); who.className = "who";
+  const what = document.createElement("div"); what.className = "what";
+  div.append(who, what);
+  return div;
+}
+function updateTurn(div, t) {
+  const who = t.origin === "peer" ? (t.from || "peer") : (WHO[t.kind] || t.kind);
+  div.className = "turn " + t.kind + (t.origin === "peer" ? " peer" : "");
+  div.querySelector(".who").textContent = who;
+  const what = div.querySelector(".what");
+  what.className = "what" + (isMd(t) ? " md" : "");
+  if (isMd(t)) what.innerHTML = CCWATCH_MD.render(t.text || "");
+  else what.textContent = t.text || "";
+}
 
 function renderConvo(data) {
   const box = $("convo");
   if (!data || !data.turns || !data.turns.length) {
-    box.innerHTML = '<div class="dim">No transcript yet. Embedded-SDK sessions never write one.</div>';
+    reconcile(box, {}, "turn", makeTurn, updateTurn);
+    setConvoMessage("No transcript yet. Embedded-SDK sessions never write one.");
     return;
   }
-  // Scroll position is preserved only when already at the bottom, so a
-  // conversation you have scrolled back through does not yank itself away on
-  // the next refresh.
-  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
-  box.innerHTML = data.turns.map(t => {
-    const who = t.origin === "peer" ? (t.from || "peer") : (WHO[t.kind] || t.kind);
-    const cls = "turn " + t.kind + (t.origin === "peer" ? " peer" : "");
-    return `<div class="${cls}"><div class="who">${esc(who)}</div>`
-         + `<div class="what${isMd(t) ? " md" : ""}">${body(t)}</div></div>`;
-  }).join("");
-  if (atBottom) box.scrollTop = box.scrollHeight;
+  clearConvoMessage();
+  // No scroll-position save/restore: reconciliation never removes a turn
+  // still in `wanted`, so the browser's own scroll position is never
+  // disturbed by a refresh in the first place (research.md D4).
+  const wanted = {};
+  const seenAt = {};
+  data.turns.forEach(t => {
+    const dupKey = t.timestamp + "|" + t.kind;
+    seenAt[dupKey] = (seenAt[dupKey] || 0) + 1;
+    wanted["at|" + t.kind + "|" + t.timestamp + "|" + seenAt[dupKey]] = t;
+  });
+  reconcile(box, wanted, "turn", makeTurn, updateTurn);
 }
 
 async function loadConvo() {
   if (!target) return;
+  const box = $("convo");
   try {
     const res = await fetch(`/api/transcript?sid=${encodeURIComponent(target.sid)}&n=40`,
                             {cache:"no-store"});
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
-      $("convo").innerHTML = `<div class="dim">${esc(j.error || "no transcript")}</div>`;
+      reconcile(box, {}, "turn", makeTurn, updateTurn);
+      setConvoMessage(j.error || "no transcript");
       return;
     }
     renderConvo(await res.json());
   } catch (e) {
-    $("convo").innerHTML = `<div style="color:var(--bad)">could not read the transcript: ${esc(e.message)}</div>`;
+    reconcile(box, {}, "turn", makeTurn, updateTurn);
+    setConvoMessage("could not read the transcript: " + e.message, true);
   }
 }
 
-function renderAsk(row) {
+// One question <li> per option, reconciled by index (the option list is the
+// one genuinely variable-length part of the ask panel).
+function makeQuestion() {
+  const div = document.createElement("div");
+  const q = document.createElement("div"); q.className = "q";
+  const ol = document.createElement("ol");
+  div.append(q, ol);
+  return div;
+}
+function makeOption() {
+  const li = document.createElement("li");
+  const desc = document.createElement("div"); desc.className = "odesc";
+  li.append(document.createTextNode(""), desc);
+  return li;
+}
+function updateOption(li, o) {
+  li.childNodes[0].textContent = o.label;
+  const desc = li.querySelector(".odesc");
+  desc.textContent = o.description || "";
+  desc.style.display = o.description ? "" : "none";
+}
+function updateQuestion(div, q) {
+  div.querySelector(".q").textContent = q.question;
+  const ol = div.querySelector("ol");
+  const wanted = {};
+  (q.options || []).forEach((o, i) => { wanted["o" + i] = o; });
+  reconcile(ol, wanted, "opt", makeOption, updateOption);
+}
+
+// Built once, updated in place (FR-016/V1): `dialogNote`/`dialogHow` cover
+// the no-recorded-question case, `qlist`/`qHow` the normal one — exactly one
+// pair is ever visible, toggled by `style.display` rather than by replacing
+// either subtree.
+const askEls = (function () {
   const box = $("ask");
+  const dialogNote = document.createElement("div"); dialogNote.className = "q";
+  const dialogHow = document.createElement("div"); dialogHow.className = "how";
+  dialogHow.textContent = "No question is recorded in the transcript, so this is a dialog "
+    + "(a permission prompt, for example). Its text is only in that session's terminal.";
+  const qlist = document.createElement("div");
+  const qHow = document.createElement("div"); qHow.className = "how";
+  const qHowB = document.createElement("b"); qHowB.textContent = "queued behind it";
+  qHow.append(
+    document.createTextNode("This is a dialog: it can only be answered in that session's own"
+      + " terminal. A message sent from here is "),
+    qHowB,
+    document.createTextNode(" and read once the dialog is resolved — it does not answer it."));
+  box.append(dialogNote, dialogHow, qlist, qHow);
+  [dialogNote, dialogHow, qlist, qHow].forEach(el => { el.style.display = "none"; });
+  return {box, dialogNote, dialogHow, qlist, qHow};
+})();
+function renderAsk(row) {
+  const {box, dialogNote, dialogHow, qlist, qHow} = askEls;
   const qs = row && row.questions;
   if (!qs || !qs.length) {
+    qlist.style.display = "none"; qHow.style.display = "none";
+    reconcile(qlist, {}, "q", makeQuestion, updateQuestion);
     // A waiting session with no recorded question is a different kind of
     // dialog — a permission prompt, say — whose text lives only in the TUI.
     // Saying so beats an empty box that looks like a loading failure.
     if (row && row.sev === 4) {
       box.className = "on";
-      box.innerHTML = `<div class="q">Waiting on you: ${esc(row.note || "input needed")}</div>`
-        + `<div class="how">No question is recorded in the transcript, so this is a dialog `
-        + `(a permission prompt, for example). Its text is only in that session's terminal.</div>`;
+      dialogNote.style.display = ""; dialogHow.style.display = "";
+      dialogNote.textContent = "Waiting on you: " + (row.note || "input needed");
     } else {
-      box.className = ""; box.innerHTML = "";
+      box.className = "";
+      dialogNote.style.display = "none"; dialogHow.style.display = "none";
     }
     return;
   }
   box.className = "on";
-  box.innerHTML = qs.map(q =>
-      `<div class="q">${esc(q.question)}</div>`
-    + `<ol>` + (q.options || []).map(o =>
-        `<li>${esc(o.label)}`
-        + (o.description ? `<div class="odesc">${esc(o.description)}</div>` : "")
-        + `</li>`).join("") + `</ol>`
-    ).join("")
-    + `<div class="how">This is a dialog: it can only be answered in that session's own`
-    + ` terminal. A message sent from here is <b>queued behind it</b> and read once the`
-    + ` dialog is resolved — it does not answer it.</div>`;
+  dialogNote.style.display = "none"; dialogHow.style.display = "none";
+  qlist.style.display = ""; qHow.style.display = "";
+  const wanted = {};
+  qs.forEach((q, i) => { wanted["q" + i] = q; });
+  reconcile(qlist, wanted, "q", makeQuestion, updateQuestion);
 }
 
 // Two steps, and the second one names what is at stake. The figures come from
 // the same snapshot the map draws, so what you are told you will free is what
 // the process is actually holding.
-function renderKill(row) {
+// Built once, listeners attached once (FR-016/V1): only the text content
+// changes per render. `killEls.row` is the closure `killgo`'s listener reads,
+// updated on every renderKill() call rather than re-bound.
+const killEls = (function () {
   const bar = $("killbar");
-  if (!bar) return;
-  if (!CAN_KILL || !row) { bar.className = ""; bar.innerHTML = ""; return; }
+  if (!bar) return null;
+  const startBtn = document.createElement("button");
+  startBtn.className = "danger"; startBtn.id = "killstart";
+  const confirmDiv = document.createElement("div"); confirmDiv.id = "killconfirm";
+  const desc = document.createElement("div");
+  const nameB = document.createElement("b");
+  const memB = document.createElement("b");
+  const resumeCode = document.createElement("code");
+  const phaseB = document.createElement("b");
+  const phaseWrap = document.createElement("span"); phaseWrap.style.display = "none";
+  phaseWrap.append(document.createTextNode(" It is running spec-run phase "), phaseB,
+    document.createTextNode(" — killing it aborts a paid model call."));
+  const busyText = document.createTextNode("");
+  desc.append(
+    document.createTextNode("Killing "), nameB, document.createTextNode(" frees "), memB,
+    document.createTextNode(". The conversation is kept — reopen it with "),
+    resumeCode, document.createTextNode("."), phaseWrap, busyText);
+  const row = document.createElement("div"); row.className = "row";
+  const goBtn = document.createElement("button");
+  goBtn.className = "danger"; goBtn.id = "killgo"; goBtn.textContent = "yes, kill it";
+  const noBtn = document.createElement("button");
+  noBtn.className = "ghost"; noBtn.id = "killno"; noBtn.textContent = "cancel";
+  const out = document.createElement("span"); out.id = "killout";
+  row.append(goBtn, noBtn, out);
+  confirmDiv.append(desc, row);
+  bar.append(startBtn, confirmDiv);
+  startBtn.addEventListener("click", () => confirmDiv.classList.add("on"));
+  noBtn.addEventListener("click", () => confirmDiv.classList.remove("on"));
+  goBtn.addEventListener("click", () => doKill(killEls.row));
+  return {bar, startBtn, confirmDiv, nameB, memB, resumeCode, phaseWrap, phaseB, busyText, out, row: null};
+})();
+
+// Two steps, and the second one names what is at stake. The figures come from
+// the same snapshot the map draws, so what you are told you will free is what
+// the process is actually holding.
+function renderKill(row) {
+  if (!killEls) return;
+  const {bar, startBtn, confirmDiv, nameB, memB, resumeCode, phaseWrap, phaseB, busyText, out} = killEls;
+  if (!CAN_KILL || !row) { bar.className = ""; confirmDiv.classList.remove("on"); return; }
+  killEls.row = row;
   bar.className = "on";
   const mem = row.rss_mb != null ? `${row.rss_mb}MB` : "an unknown amount";
-  const phase = row.pipeline && row.pipeline.status === "running"
-    ? ` It is running spec-run phase <b>${esc(row.pipeline.phase)}</b> — killing it aborts a paid model call.`
-    : "";
-  const busy = row.token === "busy"
+  startBtn.textContent = `kill this session (frees ${mem})`;
+  nameB.textContent = row.name;
+  memB.textContent = mem;
+  resumeCode.textContent = `claude --resume ${row.sid}`;
+  if (row.pipeline && row.pipeline.status === "running") {
+    phaseWrap.style.display = ""; phaseB.textContent = row.pipeline.phase;
+  } else {
+    phaseWrap.style.display = "none";
+  }
+  busyText.textContent = row.token === "busy"
     ? " It is mid-turn, so a tool call may be left half-applied." : "";
-  bar.innerHTML =
-      `<button class="danger" id="killstart">kill this session (frees ${mem})</button>`
-    + `<div id="killconfirm">`
-    + `<div>Killing <b>${esc(row.name)}</b> frees <b>${mem}</b>.`
-    + ` The conversation is kept — reopen it with <code>claude --resume ${esc(row.sid)}</code>.`
-    + `${phase}${busy}</div>`
-    + `<div class="row"><button class="danger" id="killgo">yes, kill it</button>`
-    + `<button class="ghost" id="killno">cancel</button>`
-    + `<span id="killout"></span></div></div>`;
-  $("killstart").addEventListener("click", () => $("killconfirm").classList.add("on"));
-  $("killno").addEventListener("click", () => $("killconfirm").classList.remove("on"));
-  $("killgo").addEventListener("click", () => doKill(row));
+  out.className = ""; out.textContent = "";
 }
 
 async function doKill(row) {
@@ -620,7 +1115,8 @@ function openReply(sid, name, row) {
   renderAsk(row);
   renderKill(row);
   $("replyOut").textContent = ""; $("replyOut").className = "";
-  $("convo").innerHTML = '<div class="dim">reading the transcript…</div>';
+  reconcile($("convo"), {}, "turn", makeTurn, updateTurn);
+  setConvoMessage("reading the transcript…");
   $("ifoot").style.display = CAN_SEND ? "flex" : "none";
   $("reply").classList.add("on");
   loadConvo();
@@ -671,26 +1167,225 @@ document.addEventListener("click", e => {
   if (a) openReply(a.dataset.sid, a.dataset.name, lastRows[a.dataset.sid]);
 });
 
+// ---- world coordinates ------------------------------------------------------
+// The one persisted record (data-model.md §4). Storage calls are injected so a
+// throwing localStorage — private mode, a full origin quota — cannot take the
+// map down; plots.js itself flips `persistence` to "unavailable" once rather
+// than retrying every frame.
+const PLOTS_KEY = "ccwatch.map.plots.v1";
+if (window.CCWATCH_PLOTS) {
+  CCWATCH_PLOTS.load(function () {
+    try { return localStorage.getItem(PLOTS_KEY); } catch (e) { return null; }
+  });
+}
+
+// Full rebuild of the world each tick: reconciliation (create/update/remove by
+// identity key, nothing rebuilt wholesale) is a later phase's work. What this
+// phase guarantees is that the *coordinates* handed to whatever draws them
+// never move except on first placement — that guarantee lives entirely in
+// plots.js and is unaffected by how the DOM is currently populated.
+function drawWorld(s) {
+  if (!window.CCWATCH_PLOTS) return null;
+  const model = buildWorldModel(s);
+  const placed = CCWATCH_PLOTS.place({districts: model.tree, now: Math.floor(Date.now() / 1000)});
+  CCWATCH_PLOTS.save(function (v) {
+    try { localStorage.setItem(PLOTS_KEY, v); } catch (e) { /* unavailable — plots.js records it */ }
+  }, placed.liveKeys);
+
+  const camera = $("camera");
+  const districtWanted = {};
+  for (const k in placed.world.districts)
+    districtWanted[k] = {geo: placed.world.districts[k], meta: model.districtsByKey[k]};
+  reconcile(camera, districtWanted, "district", makeDistrict, updateDistrict);
+
+  const buildingWanted = {};
+  for (const k in placed.world.buildings)
+    buildingWanted[k] = {geo: placed.world.buildings[k], meta: model.buildingsByKey[k]};
+  reconcile(camera, buildingWanted, "building", makeBuilding, updateBuilding);
+
+  const zoneWanted = {};
+  for (const k in placed.world.zones)
+    zoneWanted[k] = {geo: placed.world.zones[k], meta: model.zonesByKey[k]};
+  reconcile(camera, zoneWanted, "zone", makeZone, updateZone);
+
+  const figureWanted = {};
+  for (const k in placed.world.figures) {
+    const row = model.figuresByKey[k];
+    if (row) figureWanted[k] = {geo: placed.world.figures[k], row};
+  }
+  reconcile(camera, figureWanted, "figure", makeFigure, updateFigure);
+
+  // Recomputed only when the occupied set changes (placed.sig) or on resize
+  // (see applyFit's own caller below) — never on every tick, since fit() is
+  // pure geometry over an extent that mostly doesn't move (FR-019, FR-038).
+  if (placed.sig !== lastFit.sig) {
+    lastFit = {sig: placed.sig, extent: placed.extent};
+    applyFit(placed.extent);
+  }
+  // Carried alongside `placed` so wires() can resolve a session name to its
+  // figure's world centre without re-walking the payload (T052).
+  placed.figuresByKey = model.figuresByKey;
+  return placed;
+}
+
+// ---- fit ---------------------------------------------------------------
+// The world's viewBox is fixed to the SVG element's own pixel size (so 1
+// world unit == 1 screen px), and `<g id="camera">` carries the
+// translate+scale that centres the occupied extent in it — never the SVG's
+// own viewBox scaling, which can't express the max-scale clamp (F2).
+let lastFit = {sig: null, extent: null};
+function applyFit(extent) {
+  const world = $("world");
+  const vw = world.clientWidth, vh = world.clientHeight;
+  if (!vw || !vh) return;
+  world.setAttribute("viewBox", `0 0 ${vw} ${vh}`);
+  const {k, tx, ty} = CCWATCH_PLOTS.fit(extent, vw, vh);
+  $("camera").setAttribute("transform", `translate(${tx} ${ty}) scale(${k})`);
+}
+
 // ---- draw ------------------------------------------------------------------
+// data-model.md §5 — the page's trust model. Computed fresh every tick from
+// the read outcome and the payload fields it produced, and from nothing
+// else: there is no flag to latch and no reload needed to clear one
+// (FR-032, R7). `fetchFailure` is the thrown message when the read itself
+// failed (a network error or `!res.ok`); otherwise it is null and `s` is a
+// parsed body.
+function computeFeedCondition(s, fetchFailure) {
+  const ca = (s && s.collected_at) || {};
+  const dataAge = ca.snapshot != null ? (Date.now() / 1000 - ca.snapshot) : null;
+  const unreadable = s ? s.parse_failed : null;
+  if (fetchFailure)
+    return {trust: "feed_down", reason: fetchFailure, dataAge, unreadable, empty: false};
+  if (s.warming)
+    return {trust: "warming", reason: null, dataAge: null, unreadable, empty: false};
+  if (s.snapshot_ok === false)
+    return {trust: "feed_down", reason: s.snapshot_error || s.error || "snapshot failed",
+            dataAge, unreadable, empty: false};
+  return {
+    trust: "ok", reason: null, dataAge, unreadable,
+    empty: !s.error && (s.sessions || []).length === 0,
+  };
+}
+
+// Built once, updated in place (FR-016/V1): sentence (a)/(b) share one node
+// because only one of them can be true at a time; (c) and (d) are separate,
+// additive nodes (R1) — `renderTrust` toggles each independently rather than
+// replacing the whole panel.
+const trustEls = (function () {
+  const root = $("trust");
+  const main = document.createElement("span"); main.className = "main";
+  const unreadable = document.createElement("span"); unreadable.className = "unreadable";
+  const emptyMsg = document.createElement("span"); emptyMsg.className = "emptymsg";
+  root.append(main, unreadable, emptyMsg);
+  return {root, main, unreadable, emptyMsg};
+})();
+function renderTrust(cond) {
+  const {root, main, unreadable, emptyMsg} = trustEls;
+  if (cond.trust === "feed_down") {
+    main.className = "main down";
+    main.textContent = `the feed is down: ${cond.reason} — is \`ccwatch serve\` still running? `
+      + `showing session data from ${dur(cond.dataAge)} ago`;
+  } else if (cond.trust === "warming") {
+    main.className = "main warming";
+    main.textContent = "taking the first snapshot — no session data has been collected yet";
+  } else {
+    main.className = "main"; main.textContent = "";
+  }
+  // R5: absent or null prints nothing, never `0`.
+  unreadable.textContent = cond.unreadable > 0
+    ? `${cond.unreadable} registry file(s) could not be read — run: ccwatch doctor` : "";
+  // (d), verbatim (contracts/page-render.md §1) — never printed alongside
+  // (a) or (c) since `empty` is only ever true when `trust === "ok"` (R6).
+  emptyMsg.textContent = cond.empty
+    ? "No live sessions. After a reboot, run ccwatch resume." : "";
+  root.className = (main.textContent || unreadable.textContent || emptyMsg.textContent) ? "on" : "";
+}
+
 // The age of the data, not the age of the request: computed from the
 // absolute collected_at instants in the body we hold, never from a stored
 // `ages` value, so a repaint after a 304 or a resumed collection still shows
 // the true elapsed time rather than freezing it at the moment the body
 // arrived.
-function repaintFooter() {
-  if (!lastBody) return;
-  const s = lastBody;
-  if (s.warming) { $("foot").textContent = "taking the first snapshot…"; return; }
-  const ca = s.collected_at || {};
-  const snapAge = ca.snapshot != null ? (Date.now() / 1000 - ca.snapshot) : null;
-  const bits = ["updated " + new Date().toLocaleTimeString()];
-  if (snapAge > 10) bits.push(`<span class="stale">sessions ${dur(snapAge)} behind</span>`);
-  const total = (s.peers && s.peers.edges) ? s.peers.edges.length : 0;
+// Built once, updated in place (FR-016/V1): four persistent nodes — the
+// three normal bits (updated-at, staleness, edge count) each with their own
+// leading " · " separator so an absent bit leaves no dangling dot.
+const footEls = (function () {
+  const root = $("foot");
+  const updated = document.createTextNode("");
+  const staleSep = document.createTextNode("");
+  const stale = document.createElement("span"); stale.className = "stale";
+  const edgesSep = document.createTextNode("");
+  const edges = document.createElement("span");
+  root.append(updated, staleSep, stale, edgesSep, edges);
+  return {root, updated, staleSep, stale, edgesSep, edges};
+})();
+function repaintFooter(cond) {
+  // Nothing has ever been collected: the trust banner (b) says so and there
+  // is nothing else to state here.
+  if (cond.trust === "warming") {
+    footEls.updated.textContent = "";
+    footEls.staleSep.textContent = ""; footEls.stale.textContent = "";
+    footEls.edgesSep.textContent = ""; footEls.edges.textContent = "";
+    return;
+  }
+  footEls.updated.textContent = "updated " + new Date().toLocaleTimeString();
+  // R3: marked stale with the measured age, recomputed every repaint —
+  // shared with the (a)/(c) trust sentences' own `dataAge`.
+  if (cond.dataAge > 10) {
+    footEls.staleSep.textContent = " · ";
+    footEls.stale.textContent = `sessions ${dur(cond.dataAge)} behind`;
+  } else {
+    footEls.staleSep.textContent = "";
+    footEls.stale.textContent = "";
+  }
+  const total = (lastBody && lastBody.peers && lastBody.peers.edges)
+    ? lastBody.peers.edges.length : 0;
   const drawn = lastDrawn;
-  if (total > drawn)
-    bits.push(`${drawn}/${total} message edges drawn — the rest involve sessions`
-            + ` that have exited (see the table view)`);
-  $("foot").innerHTML = bits.join(" &middot; ");
+  if (total > drawn) {
+    footEls.edgesSep.textContent = " · ";
+    footEls.edges.textContent = `${drawn}/${total} message edges drawn — the rest involve sessions`
+            + ` that have exited (see the table view)`;
+  } else {
+    footEls.edgesSep.textContent = "";
+    footEls.edges.textContent = "";
+  }
+}
+
+// Draws (or redraws) from whatever body is currently trusted enough to show —
+// a fresh one on a successful tick, or the retained one on a failed/warming
+// tick — with `VOLATILE` set first so every primitive it calls withholds (or
+// restores) the same readings this same tick (FR-032, R4, R7).
+function applyFeed(s, cond) {
+  VOLATILE = cond.trust === "ok";
+  CAN_KILL = !!s.can_kill;
+
+  // Keyed by identity (data-model.md §2), not by project/severity, so the
+  // map does not reorder or reshape itself for any reason other than an
+  // identity actually appearing or disappearing.
+  lastRows = {};
+  for (const r of (s.sessions || [])) lastRows[r.sid] = r;
+  // If the inspector is open, keep its question panel current — a dialog
+  // answered elsewhere should stop being shown here.
+  if (target && lastRows[target.sid]) {
+    renderAsk(lastRows[target.sid]);
+    const row = lastRows[target.sid];
+    $("imeta").textContent = [row.repo, row.branch, row.token].filter(Boolean).join(" · ");
+  }
+
+  // R2/R8: districts/buildings/zones stay drawn through (a)/(b)/(c) — a
+  // failure never presents as an empty city. In (b) there is nothing yet to
+  // have drawn, which `buildWorldModel`'s `s.sessions || []` already covers.
+  const placed = drawWorld(s);
+  const buildingCount = placed ? Object.keys(placed.world.buildings).length : 0;
+  updateGauges(s.usage);
+  hostwarn(s.host);
+  const drawn = wires(s.peers, placed) || 0;
+
+  updateCounts(s, buildingCount);
+
+  lastDrawn = drawn;
+  renderTrust(cond);
+  repaintFooter(cond);
 }
 
 let lastEtag = null, lastBody = null, lastDrawn = 0;
@@ -698,82 +1393,21 @@ async function tick() {
   try {
     const res = await fetch("/api/state", lastEtag ? {headers: {"If-None-Match": lastEtag}} : {});
     if (res.status === 304) {
-      repaintFooter();
+      if (lastBody) applyFeed(lastBody, computeFeedCondition(lastBody, null));
       return;
     }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     lastEtag = res.headers.get("ETag");
     const s = await res.json();
     lastBody = s;
-    if (s.warming) { repaintFooter(); return; }
-    CAN_KILL = !!s.can_kill;
-
-    // Grouped by project. Territories that need you sort first, so the map does
-    // not reorder itself into a different arrangement each time you glance at
-    // it for any reason other than something actually changing.
-    // Keyed by the repo slug where there is one. A directory with no remote
-    // keys on its own path, so a scratch directory is never silently merged
-    // into a real repository.
-    lastRows = {};
-    for (const r of (s.sessions || [])) lastRows[r.sid] = r;
-    // If the inspector is open, keep its question panel current — a dialog
-    // answered elsewhere should stop being shown here.
-    if (target && lastRows[target.sid]) {
-      renderAsk(lastRows[target.sid]);
-      const row = lastRows[target.sid];
-      $("imeta").textContent = [row.repo, row.branch, row.token].filter(Boolean).join(" · ");
-    }
-    const keyOf = r => r.repo || ("dir:" + (r.project || "?"));
-    const groups = {};
-    const bucket = r => (groups[keyOf(r)] = groups[keyOf(r)]
-      || {repo:r.repo || null, label:r.project || "?", rows:[], unfinished:[], deploys:[]});
-    for (const r of (s.sessions || [])) bucket(r).rows.push(r);
-    for (const u of (s.unfinished || [])) bucket(u).unfinished.push(u);
-    // Exact match on owner/name. The previous version matched on the last path
-    // segment of the repo against the directory basename, so a deploy on
-    // acme/checkout-api never found the territory shown as "platform" —
-    // those badges simply never appeared.
-    for (const d of ((s.deploys && s.deploys.runs) || [])) {
-      const g = groups[d.repo];
-      if (g) g.deploys.push(d);
-    }
-
-    const order = Object.keys(groups).sort((a, b) => {
-      const w = g => Math.max(0, ...groups[g].rows.map(r => Math.max(r.sev, r.psev||0)),
-                              ...(groups[g].unfinished.length ? [3] : []));
-      return (w(b) - w(a)) || groups[a].label.localeCompare(groups[b].label);
-    });
-
-    $("map").innerHTML = order.length
-      ? order.map(k => territory(groups[k])).join("")
-      : '<p class="empty">No live sessions. After a reboot, run <b>ccwatch resume</b>.</p>';
-    $("gauges").innerHTML = gauges(s.usage);
-    hostwarn(s.host);
-    const drawn = wires(s.peers) || 0;
-
-    const w = (s.sessions||[]).filter(r => r.sev === 4).length;
-    const q = (s.sessions||[]).filter(r => r.sev === 3).length;
-    $("counts").innerHTML = `<span>${(s.sessions||[]).length} live in ${order.length} project`
-      + `${order.length===1?"":"s"}`
-      + (w ? ` &middot; <b style="color:var(--block)">${w} waiting on you</b>` : "")
-      + (q ? ` &middot; <b style="color:var(--bad)">${q} suspect</b>` : "") + `</span>`;
-    document.title = (w ? `(${w}) ` : "") + "ccwatch · map";
-
-    $("legend").innerHTML = [
-      `<span><b style="color:var(--block)">raised arm</b> blocked on you — click to read the question</span>`,
-      `<span><b style="color:var(--bad)">tilted, ?</b> says busy but has gone quiet</span>`,
-      `<span><b style="color:var(--ok)">bobbing</b> working</span>`,
-      `<span><b style="color:var(--info)">outline</b> alive, nothing to corroborate it</span>`,
-      `<span><b style="color:var(--dim)">z</b> idle</span>`,
-      `<span>fill level inside the body = context used</span>`,
-      CAN_SEND ? `<span>click an agent to read its conversation and reply</span>`
-               : `<span>click an agent to read its conversation (read-only)</span>`,
-    ].join("");
-
-    lastDrawn = drawn;
-    repaintFooter();
+    applyFeed(s, computeFeedCondition(s, null));
   } catch (e) {
-    $("foot").innerHTML = `<span style="color:var(--bad)">feed is down: ${esc(e.message)}`
-      + ` — is \`ccwatch serve\` still running?</span>`;
+    // A dead feed is stated, not left to look like an empty city (R2): the
+    // last trusted body, if any, is redrawn with every VOLATILE reading
+    // withheld rather than dropped from the page entirely.
+    const cond = computeFeedCondition(lastBody, e.message);
+    if (lastBody) applyFeed(lastBody, cond);
+    else { VOLATILE = false; renderTrust(cond); }
   }
 }
 // A page that becomes visible fires once immediately rather than waiting out
@@ -792,9 +1426,12 @@ function resume() {
 }
 document.addEventListener("visibilitychange", resume);
 resume();
-// The wires are positioned from measured geometry, so they have to be redrawn
-// when the grid reflows. Not while hidden — a backgrounded tab does not resize.
-addEventListener("resize", () => { if (!document.hidden) tick(); });
+// A resize refits the same extent alone — no refetch, no coordinate moves
+// (research.md D9, FR-049). Not while hidden — a backgrounded tab does not
+// resize.
+addEventListener("resize", () => {
+  if (!document.hidden && lastFit.extent) applyFit(lastFit.extent);
+});
 </script>
 </body>
 </html>

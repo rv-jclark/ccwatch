@@ -35,7 +35,7 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # are the node-gated markdown block, so a host without `node` counts 216 — the
 # floor has to sit below that, not below the full count, or the suite fails on
 # a machine that is merely missing an optional tool.
-TALLY_FLOOR=210
+TALLY_FLOOR=244
 
 assert_contains() { case "$1" in *"$2"*) t_pass "$3";; *) t_fail "$3" "expected to contain: $2";; esac; }
 assert_not_contains() { case "$1" in *"$2"*) t_fail "$3" "should NOT contain: $2";; *) t_pass "$3";; esac; }
@@ -259,7 +259,30 @@ printf '{"pid":9009,"cwd":' > "$FH/sessions/9009.json"   # truncated mid-write
 mkps 9009 "0:10.00" >> "$WORK/ps-p"
 assert_eq "$(printf '%s' "$(ccwatch_json "$WORK/ps-p")" | jq -r '.sessions[0].name')" "healthy" \
   "a half-written registry file does not take the rest of the table down with it"
+
+# --- parse_failed reaches all four consumers identically (research.md D6) ---
+# Mutation check: reverting any of collect_sessions/snapshot/cmd_doctor/the
+# footer to read a stale/global $PARSE_FAILED instead of the object this
+# fixture drives makes every one of these read 0 again.
+assert_eq "$(printf '%s' "$(ccwatch_json "$WORK/ps-p")" | jq -r '.parse_failed')" "1" \
+  "--json reports the one unreadable file as parse_failed"
+_footout=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-p" CCWATCH_HOME="$WORK/ccwatch-events" \
+           NO_COLOR=1 "$CCWATCH" once 2>&1)
+assert_contains "$_footout" "1 unreadable registry file(s) — run: ccwatch doctor" \
+  "the terminal footer states the unreadable file and where to look"
+_doc9=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-p" CCWATCH_HOME="$WORK/ccwatch-events" \
+        NO_COLOR=1 "$CCWATCH" doctor 2>&1)
+assert_contains "$_doc9" "1 registry file(s) would not parse" \
+  "ccwatch doctor reports the same count"
 rm -f "$FH/sessions/9009.json"
+# Constitution XII: with the bad file gone, all four consumers drop to 0 and
+# print nothing — not a "0 unreadable" line, an absent one.
+assert_eq "$(printf '%s' "$(ccwatch_json "$WORK/ps-p")" | jq -r '.parse_failed')" "0" \
+  "deleting the bad file drops parse_failed to 0"
+_footout2=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-p" CCWATCH_HOME="$WORK/ccwatch-events" \
+            NO_COLOR=1 "$CCWATCH" once 2>&1)
+assert_not_contains "$_footout2" "unreadable registry file" \
+  "and the footer prints no note at all below the threshold, not a zero"
 
 # --- the pipeline overlay attaches by session id, not by directory -----------
 # Attaching by cwd was the first thing tried and it lied: four sessions in one
@@ -794,6 +817,20 @@ if command -v curl >/dev/null 2>&1; then
   # Every panel carries its own age, so one slow collector cannot make a stale
   # panel look current.
   assert_contains "$_api" '"ages"' "each panel reports its own age"
+
+  # G1, FR-034, SC-009: parse_failed is the fourth of the four consumers and
+  # must equal the CLI's --json value for the same fabricated registry.
+  printf '{"pid":9108,"cwd":' > "$FH/sessions/9108.json"   # truncated mid-write
+  _tries=0; _pf_api=""
+  while [ "$_tries" -lt 30 ]; do
+    _pf_api=$(curl -s --max-time 3 "http://127.0.0.1:$SPORT/api/state" 2>/dev/null | jq -r '.parse_failed // empty')
+    [ "$_pf_api" = "1" ] && break
+    sleep 1; _tries=$((_tries + 1))
+  done
+  _pf_cli=$(printf '%s' "$(ccwatch_json "$WORK/ps-sv")" | jq -r '.parse_failed')
+  assert_eq "$_pf_api" "$_pf_cli" \
+    "/api/state's parse_failed matches ccwatch --json's for the same registry"
+  rm -f "$FH/sessions/9108.json"
   # The handler must not block: it was serving from a per-request subprocess at
   # first, and eleven concurrent requests piled up without one completing.
   _t=$( { time -p curl -s -o /dev/null --max-time 8 "http://127.0.0.1:$SPORT/api/state"; } 2>&1 \
@@ -1245,6 +1282,25 @@ else
   t_skip "serve" "curl not available"
 fi
 
+# V1/V2 (FR-016): the rewritten map.html reconciles instead of replacing.
+# Static, source-level guards — no server needed — so they still run even
+# when curl is absent.
+_ih_count=$(grep -c '\.innerHTML *=' "$ROOT/web/map.html")
+assert_eq "$_ih_count" "2" \
+  "map.html assigns innerHTML exactly twice: the once-built legend and the turn body"
+_ih_legend_line=$(grep -n '\$("legend")\.innerHTML *=' "$ROOT/web/map.html" | head -1 | cut -d: -f1)
+_ih_tick_line=$(grep -n '^async function tick(' "$ROOT/web/map.html" | head -1 | cut -d: -f1)
+assert_eq "$(awk -v a="$_ih_legend_line" -v b="$_ih_tick_line" 'BEGIN{print (a>0 && b>0 && a<b) ? "yes" : "no"}')" "yes" \
+  "the legend's innerHTML write sits before tick() is even defined, so no refresh reaches it"
+assert_contains "$(grep '\.innerHTML *=' "$ROOT/web/map.html" | grep -v legend)" "CCWATCH_MD.render" \
+  "the one refresh-reachable innerHTML write is the turn body, filled from md.js's escape-first render"
+
+# V16 (FR-047): the placeholder ships byte-identical in the source; the served
+# page substitutes a real token in its place (asserted against a live server
+# above, in the serve section).
+assert_contains "$(cat "$ROOT/web/map.html")" 'const SEND_TOKEN = "__CCWATCH_SEND_TOKEN__";' \
+  "the SEND_TOKEN placeholder is byte-identical in the map.html source"
+
 # ============================================================ repo identity ==
 printf '\nrepo identity\n'
 
@@ -1656,6 +1712,236 @@ _rm=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-empty2" CCWATCH_HOME="$K
       NO_COLOR=1 "$CCWATCH" resume -n 30 2>&1)
 assert_contains "$_rm" "claude --resume $MSID" \
   "a transcript ending in metadata records is still offered for resume"
+
+
+# =================================================================== plots ===
+printf '\nplots\n'
+#
+# web/plots.js is the pure identity->coordinate module (contracts/plots-js.md).
+# It lives in its own file for the same reason web/md.js does: so these
+# assertions can require() it under node without a browser.
+if command -v node >/dev/null 2>&1; then
+  cat > "$WORK/plots-check.js" <<'PLOTSJS'
+var P = require(process.argv[2]);
+var out = [];
+function check(name, cond, detail) {
+  out.push((cond ? "PASS|" : "FAIL|") + name + "|" + (detail || ""));
+}
+function fresh() {
+  delete require.cache[require.resolve(process.argv[2])];
+  return require(process.argv[2]);
+}
+
+// A1: same key, same slot, every call.
+(function () {
+  var p = fresh();
+  var s1 = p.assign("district", "d|acme", { seen: 1 });
+  var s2 = p.assign("district", "d|acme", { seen: 2 });
+  check("A1 same key returns same slot on repeat calls", s1 === s2, s1 + " vs " + s2);
+})();
+
+// A2: a key present in storage returns its stored slot without hashing.
+(function () {
+  var p = fresh();
+  var store = JSON.stringify({ v: 1, entries: { "d|acme": { slot: 6, seen: 1 } } });
+  p.load(function () { return store; });
+  var slot = p.assign("district", "d|acme", { seen: 2 });
+  check("A2 a stored key returns its stored slot without recomputing", slot === 6, "got " + slot);
+})();
+
+// A3: assigning a new key never changes an existing key's slot.
+(function () {
+  var p = fresh();
+  var before = p.assign("district", "d|acme", { seen: 1 });
+  p.assign("district", "d|newone", { seen: 1 });
+  var after = p.assign("district", "d|acme", { seen: 1 });
+  check("A3 a new key never changes an existing key's slot", before === after, before + " vs " + after);
+})();
+
+// A4: a collision's probe step derives from the key, not call order.
+(function () {
+  var p = fresh();
+  // Two full independent module instances, assigning the same two colliding
+  // keys in opposite order, must resolve to the same pair of slots each —
+  // which would not hold if the probe step came from a call counter.
+  var a = fresh(), b = fresh();
+  var k1 = "f|s|br|one", k2 = "f|s|br|two";
+  var a1 = a.assign("figure", k1, { seen: 1 });
+  var a2 = a.assign("figure", k2, { seen: 1 });
+  var b2 = b.assign("figure", k2, { seen: 1 });
+  var b1 = b.assign("figure", k1, { seen: 1 });
+  check("A4 probe outcome for a key does not depend on assignment order",
+        a1 === b1 && a2 === b2, [a1, a2, b1, b2].join(","));
+})();
+
+// A5: only level/key/opts.seen influence the result.
+(function () {
+  var p1 = fresh(), p2 = fresh();
+  var s1 = p1.assign("building", "b|acme|repo", { seen: 1 });
+  var s2 = p2.assign("building", "b|acme|repo", { seen: 999, bogus: "ignored" });
+  check("A5 no argument besides level/key/opts.seen influences the slot", s1 === s2, s1 + " vs " + s2);
+})();
+
+// A6: an annex key (<key>#2) is itself persisted.
+(function () {
+  var p = fresh();
+  for (var i = 0; i < 10; i++) p.assign("zone", "z|repo|branch" + i, { seen: 1 });
+  // zone cap is 2, so branch2..branch9 must overflow into annex zone keys.
+  var raw = null;
+  p.save(function (v) { raw = v; }, []);
+  var saved = JSON.parse(raw);
+  var hasAnnex = Object.keys(saved.entries).some(function (k) { return k.indexOf("#") !== -1; });
+  check("A6 an annex key is itself persisted", hasAnnex, Object.keys(saved.entries).join(","));
+})();
+
+// P1: every returned coordinate is an integer.
+(function () {
+  var p = fresh();
+  var tree = { districts: [{ org: "acme", buildings: [{ slug: "acme/repo", zones: [{ branch: "main", figures: [{ sid: "s1" }] }] }] }] };
+  var r = p.place(tree);
+  var f = r.world.figures["f|acme/repo|main|s1"];
+  check("P1 figure coordinates are integers",
+        Number.isInteger(f.x) && Number.isInteger(f.y) && Number.isInteger(f.cx) && Number.isInteger(f.cy),
+        JSON.stringify(f));
+})();
+
+// P2: fields excluded from layout do not affect coordinates.
+(function () {
+  function treeWith(extra) {
+    return { districts: [{ org: "acme", buildings: [{ slug: "acme/repo", zones: [{ branch: "main",
+      figures: [Object.assign({ sid: "s1" }, extra)] }] }] }] };
+  }
+  var p1 = fresh(), p2 = fresh();
+  var r1 = p1.place(treeWith({ sev: 4, cost: 9.9, age: 100 }));
+  var r2 = p2.place(treeWith({ sev: 1, cost: 0, age: 0 }));
+  check("P2 volatile fields never influence a coordinate",
+        JSON.stringify(r1.world) === JSON.stringify(r2.world), "trees differed");
+})();
+
+// P3/P4: extent is the occupied bbox + gutter, floored at 408x408; a
+// remembered-but-unoccupied plot contributes nothing.
+(function () {
+  var p = fresh();
+  var empty = p.place({ districts: [] });
+  check("P3 extent floors at 408x408 when nothing is occupied",
+        empty.extent.w === 408 && empty.extent.h === 408, JSON.stringify(empty.extent));
+
+  var tree = { districts: [{ org: "acme", buildings: [{ slug: "acme/repo", zones: [{ branch: "main", figures: [{ sid: "s1" }] }] }] }] };
+  var full = p.place(tree);
+  var againEmpty = p.place({ districts: [] });
+  check("P4 a remembered-but-unoccupied plot contributes nothing to a later extent",
+        againEmpty.extent.w === 408 && againEmpty.extent.h === 408, JSON.stringify(againEmpty.extent));
+})();
+
+// P5: sig changes only when the occupied set changes.
+(function () {
+  var p = fresh();
+  var tree1 = { districts: [{ org: "acme", buildings: [{ slug: "acme/repo", zones: [{ branch: "main", figures: [{ sid: "s1" }] }] }] }] };
+  var r1a = p.place(tree1);
+  var r1b = p.place(tree1);
+  check("P5 sig is stable across identical calls", r1a.sig === r1b.sig, r1a.sig);
+  var tree2 = { districts: [{ org: "acme", buildings: [{ slug: "acme/repo", zones: [{ branch: "main", figures: [{ sid: "s1" }, { sid: "s2" }] }] }] }] };
+  var r2 = p.place(tree2);
+  check("P5 sig changes when the occupied set changes", r2.sig !== r1a.sig, r2.sig + " vs " + r1a.sig);
+})();
+
+// P6: cx/cy are usable centres — inside the figure's own box.
+(function () {
+  var p = fresh();
+  var tree = { districts: [{ org: "acme", buildings: [{ slug: "acme/repo", zones: [{ branch: "main", figures: [{ sid: "s1" }] }] }] }] };
+  var r = p.place(tree);
+  var f = r.world.figures["f|acme/repo|main|s1"];
+  check("P6 cx/cy fall within the figure's own box",
+        f.cx >= f.x && f.cx <= f.x + f.w && f.cy >= f.y && f.cy <= f.y + f.h, JSON.stringify(f));
+})();
+
+// P7: a "no repo" building lands in the reserved district.
+(function () {
+  var p = fresh();
+  var tree = { districts: [{ org: "no repo", isNoRepo: true, buildings: [{ slug: "dir:/tmp/x", zones: [] }] }] };
+  var r = p.place(tree);
+  check("P7 a no-repo building's district key is the reserved no-repo district",
+        Object.keys(r.world.districts)[0] === "d|no repo", Object.keys(r.world.districts).join(","));
+})();
+
+// F1-F4: fit.
+(function () {
+  var p = fresh();
+  var f1 = p.fit({ x: 0, y: 0, w: 400, h: 200 }, 800, 800);
+  check("F1 scale is uniform and aspect-preserving", f1.k === 2, JSON.stringify(f1));
+  var f2 = p.fit({ x: 0, y: 0, w: 10, h: 10 }, 8000, 8000);
+  check("F2 scale is clamped to a maximum of 3.0", f2.k === 3, JSON.stringify(f2));
+  var f3 = p.fit({ x: 0, y: 0, w: 400, h: 200 }, 800, 800);
+  var scaledW = 400 * f3.k, scaledH = 200 * f3.k;
+  var centeredX = Math.abs((f3.tx) - ((800 - scaledW) / 2)) < 0.001;
+  var centeredY = Math.abs((f3.ty) - ((800 - scaledH) / 2)) < 0.001;
+  check("F3 the extent is centred in the available area", centeredX && centeredY, JSON.stringify(f3));
+  check("F4 fit holds no state across calls", p.fit({ x: 0, y: 0, w: 400, h: 200 }, 800, 800).k === f1.k, "");
+})();
+
+// S1: load of a payload whose v !== 1 discards it wholly. The stored slot (7)
+// is deliberately NOT the slot d|zzz would hash to (4): if the version check
+// were dropped, assign() would return the discarded 7 instead of recomputing.
+(function () {
+  var p2 = fresh();
+  var store = JSON.stringify({ v: 2, entries: { "d|zzz": { slot: 7, seen: 1 } } });
+  p2.load(function () { return store; });
+  var slot = p2.assign("district", "d|zzz", { seen: 1 });
+  check("S1 load discards a payload whose v is not 1", slot === 4, "slot=" + slot + " (expected freshly-hashed 4, not the discarded 7)");
+})();
+
+// S2: throwing storage sets persistence unavailable, without retrying.
+(function () {
+  var p = fresh();
+  var calls = 0;
+  p.load(function () { calls++; throw new Error("boom"); });
+  check("S2 a throwing load sets persistence to unavailable", p.persistence === "unavailable", p.persistence);
+  var savecalls = 0;
+  p.save(function () { savecalls++; throw new Error("boom"); }, []);
+  check("S2 save after a failed load is not retried (no throw propagates)", true, "");
+})();
+
+// S3/S4: save caps at 512, evicting longest-unseen first, never a live key.
+(function () {
+  var p = fresh();
+  for (var i = 0; i < 520; i++) {
+    p.assign("figure", "f|s|b|id" + i, { seen: i });
+  }
+  var raw = null;
+  var liveKeys = ["f|s|b|id0"]; // the longest-unseen key, kept alive on purpose
+  p.save(function (v) { raw = v; }, liveKeys);
+  var saved = JSON.parse(raw);
+  var count = Object.keys(saved.entries).length;
+  check("S3 save caps entries at 512", count <= 512, "count=" + count);
+  check("S4 save never evicts a key in liveKeys, even the longest-unseen",
+        saved.entries.hasOwnProperty("f|s|b|id0"), Object.keys(saved.entries).length);
+})();
+
+// S5: save writes slot unchanged for every key already stored.
+(function () {
+  var p = fresh();
+  var slot1 = p.assign("district", "d|acme", { seen: 1 });
+  var raw = null;
+  p.save(function (v) { raw = v; }, ["d|acme"]);
+  var saved = JSON.parse(raw);
+  check("S5 save writes slot unchanged for an already-stored key",
+        saved.entries["d|acme"].slot === slot1, saved.entries["d|acme"].slot + " vs " + slot1);
+})();
+
+process.stdout.write(out.join("\n") + "\n");
+PLOTSJS
+
+  while IFS='|' read -r status name detail; do
+    [ -z "$status" ] && continue
+    if [ "$status" = "PASS" ]; then
+      t_pass "$name"
+    else
+      t_fail "$name" "$detail"
+    fi
+  done < <(node "$WORK/plots-check.js" "$ROOT/web/plots.js" 2>&1)
+else
+  t_skip "plots geometry" "node not installed"
+fi
 
 
 # =============================================================== markdown ====

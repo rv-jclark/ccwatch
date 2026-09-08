@@ -179,18 +179,21 @@ trap cleanup EXIT
 
 # ============================================================== collection ===
 
-# collect_sessions — the live registry, one JSON array on stdout.
+# collect_sessions — the live registry, one JSON object on stdout:
+# {"rows": [...], "parse_failed": N}.
 #
 # Each file is parsed on its own rather than with a single `jq -s`, because a
 # session that is mid-write would otherwise take the whole table down with it.
-# One unreadable file costs one row, and PARSE_FAILED records how many so that
+# One unreadable file costs one row, and parse_failed records how many so that
 # `ccwatch doctor` can report it instead of quietly showing a short list.
-PARSE_FAILED=0
+# The count travels inside the returned object rather than a global, because a
+# global written from inside `$(...)` never survives the subshell back to the
+# caller — see research.md D6 for the entry this fixed.
 collect_sessions() {
   local f n=0 fast count
-  [ -d "$SESS_DIR" ] || { printf '[]'; return 0; }
+  [ -d "$SESS_DIR" ] || { printf '{"rows":[],"parse_failed":0}'; return 0; }
   n=$(find "$SESS_DIR" -maxdepth 1 -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
-  [ "${n:-0}" -gt 0 ] || { printf '[]'; return 0; }
+  [ "${n:-0}" -gt 0 ] || { printf '{"rows":[],"parse_failed":0}'; return 0; }
 
   # Fast path: ONE jq over every file at once. Registry files are single-line
   # JSON, so `fromjson? // empty` per line both parses them and tolerates a
@@ -202,22 +205,33 @@ collect_sessions() {
   count=$(printf '%s' "$fast" | jq 'length' 2>/dev/null) || count=0
 
   if [ "${count:-0}" -eq "$n" ]; then
-    printf '%s' "$fast"
+    jq -cn --argjson rows "$fast" '{rows: $rows, parse_failed: 0}'
     return 0
   fi
 
   # Slow path, taken only when the fast one came up short. Parsing each file on
-  # its own is how PARSE_FAILED gets an accurate count — and an accurate count
-  # is the point, because `ccwatch doctor` reports it. Guessing "n - count"
-  # would also be wrong for a pretty-printed file, which the fast path splits
-  # across lines and drops entirely.
-  {
-    for f in "$SESS_DIR"/*.json; do
-      [ -f "$f" ] || continue
-      jq -c '. as $o | if ($o|type) == "object" then $o else empty end' "$f" 2>/dev/null \
-        || PARSE_FAILED=$((PARSE_FAILED + 1))
-    done
-  } | jq -s '.'
+  # its own is how the count gets accurate — and an accurate count is the
+  # point, because `ccwatch doctor` reports it. Guessing "n - count" would also
+  # be wrong for a pretty-printed file, which the fast path splits across lines
+  # and drops entirely. The loop runs in the function's own shell (no pipeline
+  # stage, no subshell) so the accumulated rows and the failure count both
+  # reach the return value.
+  local -a rows_arr=()
+  local pf=0 line
+  for f in "$SESS_DIR"/*.json; do
+    [ -f "$f" ] || continue
+    line=$(jq -c '. as $o | if ($o|type) == "object" then $o else empty end' "$f" 2>/dev/null)
+    if [ -n "$line" ]; then
+      rows_arr+=("$line")
+    else
+      pf=$((pf + 1))
+    fi
+  done
+  if [ ${#rows_arr[@]} -gt 0 ]; then
+    printf '%s\n' "${rows_arr[@]}" | jq -cs --argjson pf "$pf" '{rows: ., parse_failed: $pf}'
+  else
+    jq -cn --argjson pf "$pf" '{rows: [], parse_failed: $pf}'
+  fi
 }
 
 # collect_live — {pid, start, cpu} for every registry pid still running.
@@ -612,10 +626,12 @@ pids_alive() {
 }
 
 snapshot() {
-  local sessions live transcripts pipelines sids cwds now
+  local sessions_obj sessions parse_failed live transcripts pipelines sids cwds now
   now=$(date '+%s')
   prof start
-  sessions=$(collect_sessions)
+  sessions_obj=$(collect_sessions)
+  sessions=$(printf '%s' "$sessions_obj" | jq -c '.rows')
+  parse_failed=$(printf '%s' "$sessions_obj" | jq -r '.parse_failed // 0')
   prof collect_sessions
 
   live=$(collect_live "$sessions")
@@ -706,6 +722,7 @@ snapshot() {
     >"$CPU_CACHE.tmp" 2>/dev/null && mv "$CPU_CACHE.tmp" "$CPU_CACHE" 2>/dev/null || true
 
   printf '%s' "$live_sessions" | jq \
+    --argjson parse_failed "$parse_failed" \
     --argjson t "$transcripts" \
     --argjson p "$pipelines" \
     --argjson live "$live" \
@@ -902,6 +919,7 @@ snapshot() {
     # row that merely looks busy.
     | sort_by(-([.sev, .psev] | max), -(.waited // .quiet // 0))
     | { sessions: .,
+        parse_failed: $parse_failed,
         usage: $usage,
         host: (if $host == null then null
                else $host + { pressure: (($host.swap_used_pct // 0) >= $swap_warn),
@@ -1127,13 +1145,13 @@ render() {
   fi
 
   # The footer is the part you read from across the room.
-  printf '%s' "$snap" | jq -r --argjson pf "$PARSE_FAILED" '
+  printf '%s' "$snap" | jq -r '
     [ (.sessions | length),
       ([ .sessions[] | select(.sev == 4) ] | length),
       ([ .sessions[] | select(.sev == 3) ] | length),
       ([ .sessions[] | select(.psev == 4) ] | length),
       (.unfinished | length),
-      $pf ] | @tsv' | awk -F'\t' \
+      (.parse_failed // 0) ] | @tsv' | awk -F'\t' \
       -v mag="$_c_magenta" -v red="$_c_red" -v dim="$_c_dim" -v bold="$_c_bold" -v rst="$_c_reset" '
     { out = sprintf("%d live", $1)
       if ($2>0) out = out sprintf(" %s· %d waiting on you%s", mag bold, $2, rst)
@@ -1512,7 +1530,7 @@ cmd_convo() {
   # The pid in it is the only useful part, so it is resolved to the name you
   # know that session by. Cheap: the registry is one jq now.
   local names
-  names=$(collect_sessions | jq -c '[ .[] | {key: (.pid|tostring), value: .name} ] | from_entries')
+  names=$(collect_sessions | jq -c '[ .rows[] | {key: (.pid|tostring), value: .name} ] | from_entries')
   turns=$(printf '%s' "${turns:-[]}" | jq -c --argjson names "${names:-\{\}}" '
     map(if .from == null then .
         else .from = ( (.from | capture("(?<pid>[0-9]+)\\.sock$") | .pid) as $pid
@@ -3082,9 +3100,11 @@ cmd_doctor() {
 
   # Schema check. Missing keys mean our reader has drifted from the format.
   say ""
-  local sessions probe
-  sessions=$(collect_sessions)
-  [ "$PARSE_FAILED" -gt 0 ] && meh "$PARSE_FAILED registry file(s) would not parse (a session mid-write does this; persistent means trouble)"
+  local sessions_obj sessions probe pf
+  sessions_obj=$(collect_sessions)
+  sessions=$(printf '%s' "$sessions_obj" | jq -c '.rows')
+  pf=$(printf '%s' "$sessions_obj" | jq -r '.parse_failed // 0')
+  [ "$pf" -gt 0 ] && meh "$pf registry file(s) would not parse (a session mid-write does this; persistent means trouble)"
   # The union of keys across all sessions, not the keys of one: most fields are
   # optional per session (an SDK session has no `status`), so testing a single
   # entry reports absences that are not defects.
