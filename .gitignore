@@ -5,3 +5,6 @@
 # added, live in .claude/settings.json and ARE committed.
 .claude/settings.local.json
 .claude/.cc-writes/
+specs/*/.pipeline/
+.specify/roadmaps/*.state.json
+.specify/feature.json
