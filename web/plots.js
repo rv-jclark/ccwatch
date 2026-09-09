@@ -17,7 +17,7 @@
 
   var UNITS = {
     figure:   { w:  8, h: 14, pitchX: 12, pitchY: 18, cols: 3, cap: 3 },
-    zone:     { w: 42, h: 28, pitchX: 46, pitchY: 32, cols: 1, cap: 2 },
+    zone:     { w: 42, h: 39, pitchX: 46, pitchY: 43, cols: 1, cap: 2 },
     building: { w: 54, h: 78, pitchX: 60, pitchY: 84, cols: 3, cap: 6 },
     district: { w:192, h:192, pitchX:204, pitchY:204, cols: 4, cap: 8 },
   };
@@ -201,6 +201,41 @@
     }
   }
 
+
+  // ---- dense packing ------------------------------------------------------
+  //
+  // ⚠️ `origin()` turns a slot straight into a grid coordinate, which leaves a
+  // hole wherever a slot is unused. At district level that produced 612 units
+  // of void between two orgs; at the inner levels it is worse, because a
+  // building whose hashed slot is 4 lands outside a district sized for the one
+  // building it actually holds. So every level orders its children by the slot
+  // identity gave them — stable, and still never recomputed for a stored key —
+  // and then packs those in order.
+  var DPAD = 8;   // breathing room inside a district, around its buildings
+  var BPAD = 4;   // and inside a building, below its zones
+  var DGAP = 16;  // between districts
+  function packed(items, unit, parentOrigin, band, pad, pitchY) {
+    var cols = Math.max(1, Math.min(items.length || 1, unit.cols));
+    var py = pitchY || unit.pitchY;
+    items.sort(function (a, b) { return a.slot - b.slot || (a.key < b.key ? -1 : 1); });
+    items.forEach(function (it, i) {
+      var col = i % cols;
+      var row = Math.floor(i / cols);
+      it.x = parentOrigin.x + (pad || 0) + col * unit.pitchX;
+      it.y = parentOrigin.y + (band || 0) + row * py;
+    });
+    return items;
+  }
+
+  // A building is as tall as the zones it holds; a district as tall as the
+  // rows of those buildings. Both are derived, so neither carries the empty
+  // space a capacity-sized box would.
+  function buildingHeight(b) {
+    var nz = Math.max(1, ((b && b.zones) || []).length);
+    var zrows = Math.ceil(nz / Math.max(1, UNITS.zone.cols));
+    return BAND.building + zrows * UNITS.zone.pitchY + BPAD;
+  }
+
   // ---- place(model) → { world, extent, sig } -------------------------------
 
   function origin(level, parentOrigin, slot, band) {
@@ -213,7 +248,11 @@
     };
   }
 
-  var BAND = { district: 12, building: 10, zone: 0, figure: 0 };
+  // ⚠️ zone was 0, which put the figures at the zone's top edge — exactly where
+  // the branch label is drawn. The label and the figure it was meant to caption
+  // overlapped, so at the one zoom level that shows both you could read neither.
+  // The zone box grows by the same amount so the figures still sit inside it.
+  var BAND = { district: 12, building: 10, zone: 11, figure: 0 };
 
   function place(model) {
     var world = { districts: {}, buildings: {}, zones: {}, figures: {} };
@@ -221,40 +260,111 @@
     var seen = model.now || Math.floor(Date.now() / 1000);
     var liveKeysThisTick = [];
 
-    (model.districts || []).forEach(function (d) {
+    // ⚠️ Districts are laid out DENSELY, and sized to what they hold.
+    //
+    // They used to sit on a fixed 4-column grid of 192×192 cells at the slot
+    // `assign` returned, and both halves of that were wrong in use. A district
+    // holding one 54×78 building filled 11% of its cell, and because the slot
+    // comes from a hash, two orgs landed in non-adjacent columns — 612 world
+    // units apart with nothing in between. Measured in a browser at 8× zoom:
+    // no figures on screen at all, and ~4,700px of void between the two orgs.
+    // Zooming in showed nothing and panning traversed emptiness until it hit a
+    // clamp, which is exactly what "I can't move the map to see the other orgs"
+    // and "just two empty squares" describe.
+    //
+    // The slot is still what identity decides, and A3 still holds: a new key
+    // never changes an existing key's slot. What changed is that the slot now
+    // fixes a district's ORDER rather than its coordinate, and the coordinates
+    // are packed. Only the assertion-protected quantity — the slot — has to be
+    // stable for a learned city to stay learned; leaving voids in it to keep
+    // coordinates constant bought stability nobody could navigate.
+    var du = UNITS.district;
+    var bu = UNITS.building;
+    var ordered = (model.districts || []).map(function (d) {
       var dKey = "d|" + d.org;
       liveKeysThisTick.push(dKey);
       var dSlot = assign("district", dKey, { seen: seen });
-      var dOrigin = origin("district", { x: 0, y: 0 }, dSlot, 0);
-      var du = UNITS.district;
-      world.districts[dKey] = { x: dOrigin.x, y: dOrigin.y, w: du.w, h: du.h, org: d.org, isNoRepo: !!d.isNoRepo };
+      var nb = (d.buildings || []).length;
+      var cols = Math.max(1, Math.min(nb || 1, du.cols));
+      var rows = Math.max(1, Math.ceil((nb || 1) / du.cols));
+      var tallest = BAND.building + UNITS.zone.pitchY + BPAD;
+      (d.buildings || []).forEach(function (b) {
+        tallest = Math.max(tallest, buildingHeight(b));
+      });
+      var bPitchY = tallest + 6;
+      return {
+        d: d, key: dKey, slot: dSlot, bPitchY: bPitchY,
+        w: cols * bu.pitchX + DPAD * 2,
+        h: BAND.district + rows * bPitchY - 6 + DPAD,
+      };
+    }).sort(function (a, b) { return a.slot - b.slot || (a.key < b.key ? -1 : 1); });
+
+    // Row-major flow, wrapping at the width the widest row is allowed to
+    // reach, so a machine with many orgs stays roughly square rather than
+    // becoming a single strip that no zoom can frame.
+    var perRow = Math.max(1, Math.ceil(Math.sqrt(ordered.length)));
+    var cursorX = 0, cursorY = 0, rowH = 0, inRow = 0;
+    ordered.forEach(function (o) {
+      if (inRow >= perRow) {
+        cursorX = 0; cursorY += rowH + DGAP; rowH = 0; inRow = 0;
+      }
+      o.x = cursorX; o.y = cursorY;
+      cursorX += o.w + DGAP;
+      rowH = Math.max(rowH, o.h);
+      inRow += 1;
+    });
+
+    ordered.forEach(function (o) {
+      var d = o.d;
+      var dKey = o.key;
+      var dOrigin = { x: o.x, y: o.y };
+      world.districts[dKey] = { x: dOrigin.x, y: dOrigin.y, w: o.w, h: o.h, org: d.org, isNoRepo: !!d.isNoRepo };
       if ((d.buildings || []).length) {
-        occupiedBoxes.push({ x: dOrigin.x, y: dOrigin.y, w: du.w, h: du.h });
+        occupiedBoxes.push({ x: dOrigin.x, y: dOrigin.y, w: o.w, h: o.h });
       }
 
-      (d.buildings || []).forEach(function (b) {
+      var bItems = packed((d.buildings || []).map(function (b) {
         var bKey = "b|" + d.org + "|" + b.slug;
         liveKeysThisTick.push(bKey);
-        var bSlot = assign("building", bKey, { seen: seen });
-        var bOrigin = origin("building", dOrigin, bSlot, BAND.district);
-        var bu = UNITS.building;
-        world.buildings[bKey] = { x: bOrigin.x, y: bOrigin.y, w: bu.w, h: bu.h, slug: b.slug, label: b.label, org: d.org, hasRemote: b.hasRemote !== false };
-        occupiedBoxes.push({ x: bOrigin.x, y: bOrigin.y, w: bu.w, h: bu.h });
+        return { b: b, key: bKey, slot: assign("building", bKey, { seen: seen }) };
+      }), UNITS.building, dOrigin, BAND.district, DPAD, o.bPitchY);
 
-        (b.zones || []).forEach(function (z) {
+      bItems.forEach(function (bi) {
+        var b = bi.b;
+        var bKey = bi.key;
+        var bOrigin = { x: bi.x, y: bi.y };
+        // Sized to the zones it holds, for the same reason districts are: a
+        // building fixed at its full capacity is mostly empty whenever it is
+        // not full, and every unit of that emptiness is a unit the reader has
+        // to pan across to get from one real thing to the next.
+        var bH = buildingHeight(b);
+        world.buildings[bKey] = { x: bOrigin.x, y: bOrigin.y, w: bu.w, h: bH, slug: b.slug, label: b.label, org: d.org, hasRemote: b.hasRemote !== false };
+        occupiedBoxes.push({ x: bOrigin.x, y: bOrigin.y, w: bu.w, h: bH });
+
+        var zItems = packed((b.zones || []).map(function (z) {
           var zKey = "z|" + b.slug + "|" + z.branch;
           liveKeysThisTick.push(zKey);
-          var zSlot = assign("zone", zKey, { seen: seen });
-          var zOrigin = origin("zone", bOrigin, zSlot, BAND.building);
+          return { z: z, key: zKey, slot: assign("zone", zKey, { seen: seen }) };
+        }), UNITS.zone, bOrigin, BAND.building, 0);
+
+        zItems.forEach(function (zi) {
+          var z = zi.z;
+          var zKey = zi.key;
+          var zOrigin = { x: zi.x, y: zi.y };
           var zu = UNITS.zone;
           world.zones[zKey] = { x: zOrigin.x, y: zOrigin.y, w: zu.w, h: zu.h, branch: z.branch, slug: b.slug };
           occupiedBoxes.push({ x: zOrigin.x, y: zOrigin.y, w: zu.w, h: zu.h });
 
-          (z.figures || []).forEach(function (f) {
+          var fItems = packed((z.figures || []).map(function (f) {
             var fKey = "f|" + b.slug + "|" + z.branch + "|" + f.sid;
             liveKeysThisTick.push(fKey);
-            var fSlot = assign("figure", fKey, { seen: seen });
-            var fOrigin = origin("figure", zOrigin, fSlot, BAND.zone);
+            return { f: f, key: fKey, slot: assign("figure", fKey, { seen: seen }) };
+          }), UNITS.figure, zOrigin, BAND.zone, 2);
+
+          fItems.forEach(function (fi) {
+            var f = fi.f;
+            var fKey = fi.key;
+            var fOrigin = { x: fi.x, y: fi.y };
             var fu = UNITS.figure;
             var cx = fOrigin.x + Math.floor(fu.w / 2);
             var cy = fOrigin.y + Math.floor(fu.h / 2);
