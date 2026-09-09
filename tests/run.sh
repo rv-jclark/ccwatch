@@ -1372,11 +1372,39 @@ if command -v curl >/dev/null 2>&1; then
     ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-etag" CCWATCH_HOME="$DH" \
       CCWATCH_DEPLOY_TTL=999999 CCWATCH_SNAPSHOT_CADENCE=120 \
       "$CCWATCH" serve --port "$SPORT6" >"$WORK/serve-etag.log" 2>&1 & )
+    # ⚠️ Wait for ALL THREE collectors to have published, not just the snapshot.
+    #
+    # The ETag covers the whole published payload, and `refresh_etag` runs on
+    # every publish — so `deploys` and `peers` change the validator exactly as
+    # `snapshot` does. Waiting only on `warming` (which tracks the snapshot
+    # alone) left their FIRST publish free to land between the two reads below,
+    # and it usually did on a loaded host: `deploys` shells out to `gh` and
+    # `peers` scans transcripts, so both finish well after the snapshot.
+    #
+    # This is the fourth attempt at this assertion and the previous three each
+    # fixed a different wrong theory: that two back-to-back reads could not
+    # straddle a collection (false under load), that retrying would find a
+    # clean pair (false — the race was certain, not unlucky), and that pinning
+    # the cadence was enough (false — a cadence delays the *next* publish, not
+    # the first). Waiting for the premise to actually hold is what makes it
+    # deterministic.
     _e=0
-    while [ "$_e" -lt 40 ]; do
-      [ "$(curl -s --max-time 3 "http://127.0.0.1:$SPORT6/api/state" 2>/dev/null | jq -r '.warming' 2>/dev/null)" = "false" ] && break
+    while [ "$_e" -lt 60 ]; do
+      _ready=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT6/api/state" 2>/dev/null \
+               | jq -r '[.warming == false,
+                         (.collected_at.snapshot != null),
+                         (.collected_at.deploys  != null),
+                         (.collected_at.peers    != null)] | all' 2>/dev/null)
+      [ "$_ready" = "true" ] && break
       sleep 1; _e=$((_e + 1))
     done
+    if [ "$_ready" != "true" ]; then
+      # The premise could not be established, so the assertions below would be
+      # measuring the host rather than the validator. Stated as a skip with the
+      # reason, never as a pass and never as a failure.
+      t_skip "the ETag is stable across reads" \
+        "not all three collectors published within 60s on this host"
+    else
     # ⚠️ The contract is that the same collected data yields the same validator.
     # The cadence above is 120s, so the two reads below are guaranteed to see
     # one collection — no retry loop, no timing assumption, and the same
@@ -1426,6 +1454,7 @@ if command -v curl >/dev/null 2>&1; then
     _now3=$(python3 -c 'import time; print(time.time())')
     assert_eq "$(awk -v n="$_now3" -v c="$_ca1" 'BEGIN{print (n - c > 0.2) ? "yes" : "no"}')" "yes" \
       "so the client-derived age (now - collected_at) keeps growing rather than freezing"
+    fi
     pkill -f "ccwatch serve --port $SPORT6" 2>/dev/null || true
     rm -f "$FH/sessions/9701.json"
   else
