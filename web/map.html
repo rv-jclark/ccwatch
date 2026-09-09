@@ -57,8 +57,16 @@
      a question a monitoring view should raise. */
   #wrap { position:relative; padding:1.1rem; }
   /* touch-action:none so a one-finger drag pans the map instead of scrolling
-     the page (FR-007). */
-  #world { width:100%; height:calc(100vh - 8rem); display:block; touch-action:none; }
+     the page (FR-007).
+     ⚠️ user-select:none because the map is full of <text> — district, building
+     and zone labels, and the figure names. Without it, a drag that begins on
+     any label starts a TEXT SELECTION instead of a pan: the labels highlight,
+     and once the browser owns the gesture the pan never happens at all. That
+     is the "sometimes I can't drag" and "sometimes it highlights text"
+     behaviour, and which one you get depends only on whether the pointer
+     happened to land on a glyph. */
+  #world { width:100%; height:calc(100vh - 8rem); display:block; touch-action:none;
+           user-select:none; -webkit-user-select:none; }
   #world:focus-visible { outline:2px solid var(--info); outline-offset:2px; }
   /* Page chrome, outside the camera group and outside data-lod on purpose
      (page-camera.md §2): the controls are unaffected by the transform and

@@ -33,6 +33,54 @@
     return LADDER[clampIdx(idx)];
   }
 
+  // §2a — the ladder position as a CONTINUOUS quantity.
+  //
+  // ⚠️ The ladder used to quantise the gesture as well as the buttons, and it
+  // made pinch-zoom unusable. `wheelStep` accumulated 100px of delta and then
+  // jumped a whole rung, and the rungs are 1.5×–2× apart — so one continuous
+  // pinch crossed the threshold several times and rocketed through 2× jumps.
+  // Reported as "it jumps in massive leaps", which is exactly what it did.
+  //
+  // A gesture now moves a fractional distance along the same ladder and the
+  // buttons still move whole rungs, so discrete zoom remains available to
+  // anyone who wants it without being imposed on everyone who does not.
+  //
+  // Interpolation is geometric, not linear: equal fractional movement has to
+  // feel like equal zoom, and the rungs themselves are a geometric series. It
+  // is exact at every integer, so everything asserted against the ladder still
+  // holds.
+  function clampFrac(f) {
+    var x = Number(f);
+    if (!isFinite(x)) return 0;
+    if (x < 0) return 0;
+    if (x > LADDER.length - 1) return LADDER.length - 1;
+    return x;
+  }
+  function scaleAt(f) {
+    var x = clampFrac(f);
+    var i = Math.floor(x);
+    var t = x - i;
+    if (t === 0 || i >= LADDER.length - 1) return LADDER[Math.min(i, LADDER.length - 1)];
+    return LADDER[i] * Math.pow(LADDER[i + 1] / LADDER[i], t);
+  }
+  // Pixels of wheel delta per rung. A trackpad pinch reports far smaller
+  // deltas than a mouse wheel notch, so the pinch path divides by less and
+  // both end up moving the camera at a comparable rate.
+  var WHEEL_PER_RUNG = 220;
+  var PINCH_PER_RUNG = 60;
+  function wheelDelta(event, pageHeight) {
+    var mode = event.deltaMode;
+    var dy = event.deltaY;
+    return mode === 1 ? dy * 16 : mode === 2 ? dy * (pageHeight || 0) : dy;
+  }
+  // Fractional rungs to move for one wheel or pinch event. Negative delta is
+  // zoom IN, matching the wheel convention the page already uses.
+  function zoomRungs(event, pageHeight) {
+    var d = wheelDelta(event, pageHeight);
+    var per = event.ctrlKey ? PINCH_PER_RUNG : WHEEL_PER_RUNG;
+    return -d / per;
+  }
+
   // §3 — one interval per axis, no branch: E.w·k > vw gives b < a and holds
   // the visible rectangle inside the extent; E.w·k < vw gives a < b and holds
   // the world inside the viewport (data-model.md §4).
@@ -47,7 +95,10 @@
   }
   function clampPan(view, extent, vw, vh) {
     if (!vw || !vh) return view;
-    var k = scaleFor(view.idx);
+    // scaleAt, not scaleFor: at a fractional zoom the pan limits have to be
+    // computed against the scale actually in use, or the clamp fights the
+    // gesture on the way between two rungs.
+    var k = scaleAt(view.idx);
     return {
       idx: view.idx,
       tx: clampAxis(view.tx, k, extent.x, extent.x + extent.w, vw),
@@ -67,7 +118,7 @@
   }
   function fitView(extent, vw, vh) {
     var fi = fitIndex(extent, vw, vh);
-    var k = scaleFor(fi.idx);
+    var k = scaleAt(fi.idx);
     var tx = (vw - extent.w * k) / 2 - extent.x * k;
     var ty = (vh - extent.h * k) / 2 - extent.y * k;
     var clamped = clampPan({idx: fi.idx, tx: tx, ty: ty}, extent, vw, vh);
@@ -80,19 +131,19 @@
     return {idx: view.idx, tx: view.tx + dx, ty: view.ty + dy};
   }
   function centreOn(view, wx, wy, vw, vh, idx) {
-    var i = idx == null ? view.idx : clampIdx(idx);
-    var k = scaleFor(i);
+    var i = idx == null ? view.idx : clampFrac(idx);
+    var k = scaleAt(i);
     return {idx: i, tx: vw / 2 - wx * k, ty: vh / 2 - wy * k};
   }
 
   // §6 — one anchored zoom: the world point under (ax, ay) stays under it to
   // within a pixel (SC-004).
   function zoomTo(view, idx, ax, ay) {
-    var k1 = scaleFor(view.idx);
+    var k1 = scaleAt(view.idx);
     var wx = (ax - view.tx) / k1;
     var wy = (ay - view.ty) / k1;
-    var k2 = scaleFor(idx);
-    return {idx: clampIdx(idx), tx: ax - wx * k2, ty: ay - wy * k2};
+    var k2 = scaleAt(idx);
+    return {idx: clampFrac(idx), tx: ax - wx * k2, ty: ay - wy * k2};
   }
 
   // §8 — the hysteretic detail level (data-model.md §3). `prev == null` (the
@@ -164,7 +215,7 @@
   // §11 — the FR-038 intersection test, pure so the suite can assert the
   // "stored viewport far outside the world" case without a browser.
   function visibleWorldRect(view, vw, vh) {
-    var k = scaleFor(view.idx);
+    var k = scaleAt(view.idx);
     return {x: -view.tx / k, y: -view.ty / k, w: vw / k, h: vh / k};
   }
   function intersects(a, b) {
@@ -180,6 +231,12 @@
     DRAG_SLOP: DRAG_SLOP,
     STORAGE_VERSION: STORAGE_VERSION,
     scaleFor: scaleFor,
+    scaleAt: scaleAt,
+    clampFrac: clampFrac,
+    zoomRungs: zoomRungs,
+    wheelDelta: wheelDelta,
+    WHEEL_PER_RUNG: WHEEL_PER_RUNG,
+    PINCH_PER_RUNG: PINCH_PER_RUNG,
     clampIdx: clampIdx,
     clampPan: clampPan,
     fitIndex: fitIndex,
