@@ -151,17 +151,33 @@
 
   /* The inspector: the conversation, then the reply box. Reading before
      writing is the normal order — you rarely want to message an agent without
-     first seeing what it is doing. */
-  #reply { position:fixed; right:1rem; bottom:1rem; top:4.5rem;
+     first seeing what it is doing. A native <dialog> supplies the focus move,
+     the focus trap and the inert background (FR-036, FR-039, D3) — none of
+     that is reimplemented here. */
+  dialog#agentmodal { max-width:min(760px, 92vw); max-height:88vh;
            background:var(--panel); border:1px solid var(--line); border-radius:8px;
-           padding:.7rem; display:none; flex-direction:column; gap:.5rem;
-           box-shadow:0 8px 40px rgba(0,0,0,.5); z-index:10; width:min(560px,94vw); }
-  #reply.on { display:flex; }
+           padding:.7rem; display:flex; flex-direction:column; gap:.5rem;
+           color:var(--ink); box-shadow:0 8px 40px rgba(0,0,0,.5); width:min(560px,94vw); }
+  #agentmodal::backdrop { background:rgba(0,0,0,.55); }
   #ihead { display:flex; align-items:baseline; gap:.5rem; flex-wrap:wrap;
            padding-bottom:.5rem; border-bottom:1px solid var(--line); }
   #iname { font-weight:600; }
-  #imeta { color:var(--dim); font-size:11px; }
+  #istatus { color:var(--dim); font-size:11px; }
   #iclose { margin-left:auto; }
+  /* #ifeed restates the same feed condition the page prints above the map
+     (data-model.md §6) — its own words, never a colour alone. */
+  #ifeed .main { display:block; }
+  #ifeed .main.down { color:var(--bad); }
+  #ifeed .main.warming { color:var(--dim); }
+  #ifeed .unreadable { display:block; color:var(--warn); }
+  #igone { display:none; color:var(--bad); }
+  #igone.on { display:block; }
+  /* Two columns — the label is the <dt>, so a reading is never announced
+     without what it is (principle VII). */
+  #istats { display:grid; grid-template-columns:auto 1fr; gap:.15rem .6rem;
+            font-size:12px; margin:0; }
+  #istats dt { color:var(--dim); }
+  #istats dd { margin:0; }
   #convo { flex:1; overflow-y:auto; font-size:12px; display:flex;
            flex-direction:column; gap:.5rem; padding:.2rem 0; }
   .turn { display:grid; grid-template-columns:64px 1fr; gap:.5rem; }
@@ -217,9 +233,10 @@
   /* Kill: styled as the destructive action it is, and two-step. A single click
      that ends a four-day-old session mid-task is not an affordance, it is a
      trap. */
-  #killbar { display:none; flex-direction:column; gap:.35rem; font-size:11px;
+  /* Always present — whether or not killing is permitted (FR-028); only
+     #killstart's disabled attribute and its reason text change. */
+  #killbar { display:flex; flex-direction:column; gap:.35rem; font-size:11px;
              border-top:1px solid var(--line); padding-top:.45rem; }
-  #killbar.on { display:flex; }
   #killbar .danger { background:none; border:1px solid var(--bad); color:var(--bad);
                      font:inherit; font-size:11px; padding:.15rem .5rem;
                      border-radius:3px; cursor:pointer; align-self:flex-start; }
@@ -250,13 +267,14 @@
               padding-top:.35rem; }
   #ask code { background:var(--bg); border:1px solid var(--line); border-radius:3px;
               padding:0 .25rem; user-select:all; }
-  #reply input { flex:1; background:var(--bg); border:1px solid var(--line); color:var(--ink);
+  #ifoot input { flex:1; background:var(--bg); border:1px solid var(--line); color:var(--ink);
                  font:inherit; padding:.4rem .55rem; border-radius:4px; }
-  #reply input:focus { outline:none; border-color:var(--info); }
-  #reply button { background:var(--info); border:0; color:#fff; font:inherit;
+  #ifoot input:focus { outline:none; border-color:var(--info); }
+  #agentmodal button { background:var(--info); border:0; color:#fff; font:inherit;
                   padding:.4rem .85rem; border-radius:4px; cursor:pointer; }
-  #reply button.ghost { background:none; border:1px solid var(--line); color:var(--dim); }
-  #reply button:disabled { opacity:.5; cursor:default; }
+  #agentmodal button.ghost { background:none; border:1px solid var(--line); color:var(--dim); }
+  #agentmodal button:disabled { opacity:.5; cursor:default; }
+  #sendwhy { color:var(--dim); font-size:11px; }
   #replyOut { font-size:11px; }
   #replyOut.delivered { color:var(--ok); } #replyOut.queued { color:var(--warn); }
   #replyOut.failed { color:var(--bad); }
@@ -297,6 +315,17 @@
     #roster { flex:0 0 auto; max-height:40vh; border-right:0; border-bottom:1px solid var(--line); }
     #rdivider { display:none; }
   }
+  /* Same breakpoint the roster stacks at (CCWATCH_ROSTER.STACK_BREAKPOINT) —
+     one number, not two that can drift apart. */
+  @media (max-width:720px) {
+    dialog#agentmodal { width:100vw; max-width:100vw; height:100vh; max-height:100vh;
+                         border-radius:0; }
+  }
+  /* The drawn keyboard-focus indicator (D7): an SVG group cannot take an
+     outline, and the ring must survive every render the way the selected
+     figure's own emphasis does. */
+  .agent .focusring { display:none; fill:none; stroke:var(--info); stroke-width:1; }
+  .agent:focus-visible .focusring { display:block; }
 </style>
 </head>
 <body>
@@ -317,20 +346,25 @@
   </svg>
 </div>
 <div class="legend" id="legend"></div>
-<div id="reply">
+<dialog id="agentmodal" aria-labelledby="ilead iname">
   <div id="ihead">
-    <span id="iname"></span><span id="imeta"></span>
+    <span id="ilead">agent</span><span id="iname"></span>
+    <span id="istatus"></span>
     <button class="ghost" id="iclose">close</button>
   </div>
+  <div id="ifeed"><span class="main"></span><span class="unreadable"></span></div>
+  <div id="igone"></div>
+  <dl id="istats"></dl>
   <div id="ask"></div>
   <div id="convo"></div>
   <div id="killbar"></div>
   <div id="ifoot">
     <input id="replyText" placeholder="message…" autocomplete="off">
     <button id="replySend">send</button>
+    <span id="sendwhy"></span>
   </div>
   <span id="replyOut"></span>
-</div>
+</dialog>
 <footer id="foot"></footer>
 <!-- Served straight off the web directory by the static fallback in `serve`, so
      it needs no route of its own. The path is absolute because this page
@@ -339,6 +373,7 @@
 <script src="/plots.js"></script>
 <script src="/camera.js"></script>
 <script src="/roster.js"></script>
+<script src="/modal.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -379,6 +414,12 @@ const rosterEls = (function () {
   const note = document.createElement("p");
   note.id = "rosternote";
 
+  // Outside #rosterlist (research.md D6): a listbox's rows carry role="option",
+  // which has presentational children — a real, focusable, disableable button
+  // inside one is not reliably operable by assistive tech.
+  const open = document.createElement("button");
+  open.type = "button"; open.id = "rosteropen";
+
   const cond = document.createElement("div");
   cond.id = "rostercond";
   const condMain = document.createElement("span"); condMain.className = "main";
@@ -401,8 +442,12 @@ const rosterEls = (function () {
   list.id = "rosterlist";
   list.setAttribute("role", "listbox");
   list.setAttribute("aria-labelledby", "rostertitle");
+  // ⚠️ `o` opens the modal for the focused row — the keyboard opener. A
+  // shortcut that is not announced is a shortcut only its author knows about,
+  // so it is declared here rather than living solely in the keydown handler.
+  list.setAttribute("aria-keyshortcuts", "o");
 
-  roster.append(title, note, cond, gone, list);
+  roster.append(title, open, note, cond, gone, list);
 
   const divider = document.createElement("div");
   divider.id = "rdivider";
@@ -414,7 +459,7 @@ const rosterEls = (function () {
   stage.append(roster, divider, wrap);
 
   return {
-    stage, roster, title, note, cond,
+    stage, roster, title, note, open, cond,
     condMain, condUnreadable, condEmpty, gone, goneMsg, goneDismiss, list, divider,
   };
 })();
@@ -791,7 +836,12 @@ function titleBits(r) {
 // node, its hit rect and its dataset are the SAME node across ticks, which is
 // what a click handler, a `:hover` and the reconcile index all key off.
 function makeFigure() {
-  const g = svgEl("g", {class: "agent clickable"});
+  // ⚠️ A figure is one of the four ways into the modal, and two of those four
+  // are keyboard. An SVG <g> is not focusable and has no role by default, so
+  // without these it is reachable by pointer only — which would make the map
+  // a control that some people simply cannot operate, and would leave the
+  // roster as the sole path to an agent rather than the equivalent one.
+  const g = svgEl("g", {class: "agent clickable", tabindex: "0", role: "button"});
   g.appendChild(svgEl("g", {class: "figart"}));
   g.appendChild(svgEl("rect", {class: "hit"}));
   g.appendChild(svgEl("title", {}));
@@ -813,7 +863,15 @@ function updateFigure(g, {geo, row}) {
   figart.appendChild(figure(row, geo.w, geo.h));
   const hit = g.querySelector(".hit");
   hit.setAttribute("width", geo.w); hit.setAttribute("height", geo.h);
+  // ⚠️ Both the <title> and the aria-label are written from titleBits(row), so
+  // a hover tooltip and a screen reader cannot describe the same figure
+  // differently — computing them separately is how they drift apart.
+  //
+  // The aria-label carries the "agent <name>:" prefix that the tooltip gets
+  // for free from its visual context: a pointer user can see which figure they
+  // are over, and someone tabbing through cannot.
   g.querySelector("title").textContent = titleBits(row);
+  g.setAttribute("aria-label", "agent " + row.name + ": " + titleBits(row));
   const label = g.querySelector(".alabel");
   label.setAttribute("x", geo.w / 2); label.setAttribute("y", geo.h - .5);
   label.textContent = shortName(row);
@@ -1018,7 +1076,11 @@ function updateCounts(s, buildingCount) {
 }
 
 // ---- inspector -------------------------------------------------------------
-let target = null;
+// subject is who the modal is open for (data-model.md §2); opener is where
+// focus returns to on close (D5) — kept separate because closing must restore
+// focus even after subject has been cleared.
+let subject = null;
+let opener = null;
 
 // The one and only setInterval in this file, shared by every periodic thing
 // on the page (the roster poll and the open conversation's own cadence) so a
@@ -1087,43 +1149,50 @@ function updateTurn(div, t) {
   else what.textContent = t.text || "";
 }
 
-function renderConvo(data) {
+// atBottom is sampled BEFORE reconciling and, when true, the scroll position
+// is pinned to the new bottom AFTER (FR-018, D14) — so a reader scrolled up
+// to reread something is never yanked down by a tick they did not ask for.
+function renderConvo(row, data, ok, reason) {
   const box = $("convo");
-  if (!data || !data.turns || !data.turns.length) {
-    reconcile(box, {}, "turn", makeTurn, updateTurn);
-    setConvoMessage("No transcript yet. Embedded-SDK sessions never write one.");
-    return;
-  }
-  clearConvoMessage();
-  // No scroll-position save/restore: reconciliation never removes a turn
-  // still in `wanted`, so the browser's own scroll position is never
-  // disturbed by a refresh in the first place (research.md D4).
-  const wanted = {};
-  const seenAt = {};
-  data.turns.forEach(t => {
-    const dupKey = t.timestamp + "|" + t.kind;
-    seenAt[dupKey] = (seenAt[dupKey] || 0) + 1;
-    wanted["at|" + t.kind + "|" + t.timestamp + "|" + seenAt[dupKey]] = t;
+  const wasAtBottom = CCWATCH_MODAL.atBottom({
+    scrollTop: box.scrollTop, scrollHeight: box.scrollHeight, clientHeight: box.clientHeight,
   });
-  reconcile(box, wanted, "turn", makeTurn, updateTurn);
+  const turns = (data && data.turns) || [];
+  const {message, isError} = CCWATCH_MODAL.convoMessage({row, ok, reason, turnCount: turns.length});
+  if (message != null) {
+    reconcile(box, {}, "turn", makeTurn, updateTurn);
+    setConvoMessage(message, isError);
+  } else {
+    clearConvoMessage();
+    // No scroll-position save/restore beyond atBottom above: reconciliation
+    // never removes a turn still in `wanted`, so the browser's own scroll
+    // position is never disturbed by a refresh in the first place (D4).
+    const wanted = {};
+    const seenAt = {};
+    turns.forEach(t => {
+      const dupKey = t.timestamp + "|" + t.kind;
+      seenAt[dupKey] = (seenAt[dupKey] || 0) + 1;
+      wanted["at|" + t.kind + "|" + t.timestamp + "|" + seenAt[dupKey]] = t;
+    });
+    reconcile(box, wanted, "turn", makeTurn, updateTurn);
+  }
+  if (wasAtBottom) box.scrollTop = box.scrollHeight;
 }
 
 async function loadConvo() {
-  if (!target) return;
-  const box = $("convo");
+  if (!subject) return;
+  const row = lastRows[subject.sid] || null;
   try {
-    const res = await fetch(`/api/transcript?sid=${encodeURIComponent(target.sid)}&n=40`,
+    const res = await fetch(`/api/transcript?sid=${encodeURIComponent(subject.sid)}&n=${CCWATCH_MODAL.TRANSCRIPT_N}`,
                             {cache:"no-store"});
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
-      reconcile(box, {}, "turn", makeTurn, updateTurn);
-      setConvoMessage(j.error || "no transcript");
+      renderConvo(row, null, false, j.error || "no transcript");
       return;
     }
-    renderConvo(await res.json());
+    renderConvo(row, await res.json(), true, null);
   } catch (e) {
-    reconcile(box, {}, "turn", makeTurn, updateTurn);
-    setConvoMessage("could not read the transcript: " + e.message, true);
+    renderConvo(row, null, false, e.message);
   }
 }
 
@@ -1178,31 +1247,29 @@ const askEls = (function () {
   [dialogNote, dialogHow, qlist, qHow].forEach(el => { el.style.display = "none"; });
   return {box, dialogNote, dialogHow, qlist, qHow};
 })();
-function renderAsk(row) {
+// Driven by CCWATCH_MODAL.askModel(row) — kind "questions"/"dialog"/"none"
+// (FR-020, FR-023) — rather than re-deriving the same branches here.
+function renderAsk(ask) {
   const {box, dialogNote, dialogHow, qlist, qHow} = askEls;
-  const qs = row && row.questions;
-  if (!qs || !qs.length) {
-    qlist.style.display = "none"; qHow.style.display = "none";
-    reconcile(qlist, {}, "q", makeQuestion, updateQuestion);
-    // A waiting session with no recorded question is a different kind of
-    // dialog — a permission prompt, say — whose text lives only in the TUI.
-    // Saying so beats an empty box that looks like a loading failure.
-    if (row && row.sev === 4) {
-      box.className = "on";
-      dialogNote.style.display = ""; dialogHow.style.display = "";
-      dialogNote.textContent = "Waiting on you: " + (row.note || "input needed");
-    } else {
-      box.className = "";
-      dialogNote.style.display = "none"; dialogHow.style.display = "none";
-    }
+  if (ask.kind === "questions") {
+    box.className = "on";
+    dialogNote.style.display = "none"; dialogHow.style.display = "none";
+    qlist.style.display = ""; qHow.style.display = "";
+    const wanted = {};
+    ask.questions.forEach((q, i) => { wanted["q" + i] = q; });
+    reconcile(qlist, wanted, "q", makeQuestion, updateQuestion);
     return;
   }
-  box.className = "on";
-  dialogNote.style.display = "none"; dialogHow.style.display = "none";
-  qlist.style.display = ""; qHow.style.display = "";
-  const wanted = {};
-  qs.forEach((q, i) => { wanted["q" + i] = q; });
-  reconcile(qlist, wanted, "q", makeQuestion, updateQuestion);
+  qlist.style.display = "none"; qHow.style.display = "none";
+  reconcile(qlist, {}, "q", makeQuestion, updateQuestion);
+  if (ask.kind === "dialog") {
+    box.className = "on";
+    dialogNote.style.display = ""; dialogHow.style.display = "";
+    dialogNote.textContent = ask.note;
+  } else {
+    box.className = "";
+    dialogNote.style.display = "none"; dialogHow.style.display = "none";
+  }
 }
 
 // Two steps, and the second one names what is at stake. The figures come from
@@ -1216,6 +1283,7 @@ const killEls = (function () {
   if (!bar) return null;
   const startBtn = document.createElement("button");
   startBtn.className = "danger"; startBtn.id = "killstart";
+  const killwhy = document.createElement("span"); killwhy.id = "killwhy";
   const confirmDiv = document.createElement("div"); confirmDiv.id = "killconfirm";
   const desc = document.createElement("div");
   const nameB = document.createElement("b");
@@ -1238,38 +1306,43 @@ const killEls = (function () {
   const out = document.createElement("span"); out.id = "killout";
   row.append(goBtn, noBtn, out);
   confirmDiv.append(desc, row);
-  bar.append(startBtn, confirmDiv);
+  bar.append(startBtn, killwhy, confirmDiv);
   startBtn.addEventListener("click", () => confirmDiv.classList.add("on"));
   noBtn.addEventListener("click", () => confirmDiv.classList.remove("on"));
   goBtn.addEventListener("click", () => doKill(killEls.row));
-  return {bar, startBtn, confirmDiv, nameB, memB, resumeCode, phaseWrap, phaseB, busyText, out, row: null};
+  return {bar, startBtn, killwhy, confirmDiv, nameB, memB, resumeCode, phaseWrap, phaseB, busyText, out, row: null};
 })();
 
 // Two steps, and the second one names what is at stake. The figures come from
 // the same snapshot the map draws, so what you are told you will free is what
-// the process is actually holding.
-function renderKill(row) {
+// the process is actually holding. The bar is always present (FR-028); only
+// #killstart's disabled attribute and #killwhy's text change.
+function renderKill(kill) {
   if (!killEls) return;
-  const {bar, startBtn, confirmDiv, nameB, memB, resumeCode, phaseWrap, phaseB, busyText, out} = killEls;
-  if (!CAN_KILL || !row) { bar.className = ""; confirmDiv.classList.remove("on"); return; }
-  killEls.row = row;
-  bar.className = "on";
-  const mem = row.rss_mb != null ? `${row.rss_mb}MB` : "an unknown amount";
-  startBtn.textContent = `kill this session (frees ${mem})`;
-  nameB.textContent = row.name;
-  memB.textContent = mem;
-  resumeCode.textContent = `claude --resume ${row.sid}`;
-  if (row.pipeline && row.pipeline.status === "running") {
-    phaseWrap.style.display = ""; phaseB.textContent = row.pipeline.phase;
-  } else {
-    phaseWrap.style.display = "none";
+  const {startBtn, killwhy, confirmDiv, nameB, memB, resumeCode, phaseWrap, phaseB, busyText} = killEls;
+  killEls.row = subject ? lastRows[subject.sid] : null;
+  startBtn.disabled = kill.state !== "ready";
+  startBtn.textContent = kill.startLabel;
+  killwhy.textContent = kill.reason ?? "";
+  if (!kill.confirmOpen) confirmDiv.classList.remove("on");
+  if (kill.confirm) {
+    nameB.textContent = kill.confirm.name;
+    memB.textContent = kill.confirm.frees ?? kill.confirm.freesNote ?? "";
+    resumeCode.textContent = kill.confirm.resume;
+    if (kill.confirm.phase) {
+      phaseWrap.style.display = ""; phaseB.textContent = kill.confirm.phase;
+    } else {
+      phaseWrap.style.display = "none";
+    }
+    busyText.textContent = kill.confirm.busy
+      ? " It is mid-turn, so a tool call may be left half-applied." : "";
   }
-  busyText.textContent = row.token === "busy"
-    ? " It is mid-turn, so a tool call may be left half-applied." : "";
-  out.className = ""; out.textContent = "";
 }
 
 async function doKill(row) {
+  // Independent of the disabled attribute (D17): a disabled control issues
+  // no request even if the handler is somehow reached (FR-029).
+  if (!CAN_KILL || !row) return;
   const out = $("killout");
   out.className = ""; out.textContent = "killing…";
   try {
@@ -1285,36 +1358,104 @@ async function doKill(row) {
     out.textContent = j.state === "killed"
       ? `killed — ${row.rss_mb != null ? row.rss_mb + "MB" : "memory"} released`
       : (j.detail || j.error || "failed");
-    if (j.state === "killed") setTimeout(closeReply, 1200);
-  } catch (e) { out.className = "failed"; out.textContent = e.message; }
+    if (j.state === "killed") setTimeout(closeModal, 1200);
+  } catch (e) {
+    out.className = "failed";
+    out.textContent = "the kill request did not complete: " + e.message;
+  }
 }
 
-function openReply(sid, name, row) {
-  target = {sid, name};
-  $("iname").textContent = name;
-  $("imeta").textContent = row
-    ? [row.repo, row.branch, row.token].filter(Boolean).join(" · ") : "";
-  renderAsk(row);
-  renderKill(row);
+// One function, called from openModal(), from applyFeed() on every tick, and
+// from the kill/send handlers (page-modal.md §3). Writes into existing nodes
+// only — nothing in the panel is created, removed or replaced by a render.
+function renderModal() {
+  if (!subject) return;
+  const row = lastRows[subject.sid] ?? null;
+  const fields = row ? CCWATCH_ROSTER.rowFields(row, {volatile: VOLATILE}) : null;
+  const names = (lastBody && lastBody.sessions || []).map(r => r.name);
+  const edges = (lastBody && lastBody.peers && lastBody.peers.edges) || [];
+  // ⚠️ `lastCond` — the same object the banner above the map and the roster
+  // read, never a second computation of the same judgement. Two renderings
+  // that decide independently whether the feed can be trusted will eventually
+  // disagree, and a reader has no way to tell which of them is lying
+  // (principle XI).
+  const m = CCWATCH_MODAL.panel({
+    row, fields, subject, names, edges, cond: lastCond,
+    volatile: VOLATILE, canSend: CAN_SEND, canKill: CAN_KILL,
+    confirmOpen: killEls ? killEls.confirmDiv.classList.contains("on") : false,
+  });
+  $("iname").textContent = m.header.name;
+  $("istatus").textContent = m.header.status ?? "";
+  const ifeed = $("ifeed");
+  const main = ifeed.querySelector(".main"), unreadable = ifeed.querySelector(".unreadable");
+  main.textContent = m.feed.main;
+  main.className = "main" + (m.feed.mainKind ? " " + m.feed.mainKind : "");
+  unreadable.textContent = m.feed.unreadable;
+  const igone = $("igone");
+  igone.textContent = m.gone ?? "";
+  igone.classList.toggle("on", m.gone != null);
+  reconcile($("istats"), keyBy(m.stats, l => l.key), "stat", makeStatLine, updateStatLine);
+  renderAsk(m.ask);
+  renderKill(m.kill);
+  $("replyText").disabled = $("replySend").disabled = m.send.state !== "ready";
+  $("sendwhy").textContent = m.send.reason ?? "";
+}
+function keyBy(arr, fn) {
+  const o = {};
+  arr.forEach(x => { o[fn(x)] = x; });
+  return o;
+}
+function makeStatLine() {
+  const div = document.createElement("div");
+  const dt = document.createElement("dt");
+  const dd = document.createElement("dd");
+  div.append(dt, dd);
+  return div;
+}
+function updateStatLine(div, l) {
+  div.querySelector("dt").textContent = l.label;
+  div.querySelector("dd").textContent = l.text;
+}
+
+function openModal(sid, name, kind) {
+  subject = {sid, name};
+  opener = {sid, kind};
+  $("replyText").value = "";
   $("replyOut").textContent = ""; $("replyOut").className = "";
+  $("killout").textContent = ""; $("killout").className = "";
+  if (killEls) killEls.confirmDiv.classList.remove("on");
   reconcile($("convo"), {}, "turn", makeTurn, updateTurn);
   setConvoMessage("reading the transcript…");
-  $("ifoot").style.display = CAN_SEND ? "flex" : "none";
-  $("reply").classList.add("on");
+  renderModal();
+  $("agentmodal").showModal();
+  const canSend = CAN_SEND && !!lastRows[sid];
+  (canSend ? $("replyText") : $("iclose")).focus();
   loadConvo();
   // Followed live while open, on its own slower cadence — the transcript is
   // read from disk per request and is much heavier than the roster poll.
   every("convo", 5000, loadConvo);
-  if (CAN_SEND) $("replyText").focus();
 }
-function closeReply() {
-  target = null;
+// Focus restored by identity (D5): live row for opener.sid, else the live
+// figure, else the roster list, else the map itself — never a stale element.
+function closeModal() {
+  subject = null;
   clearEvery("convo");
-  $("reply").classList.remove("on");
-  $("replyText").value = "";
+  $("agentmodal").close();
+  const o = opener;
+  opener = null;
+  if (!o) return;
+  const row = $(`.rrow[data-sid="${o.sid}"]`);
+  if (row) { row.focus(); return; }
+  const fig = document.querySelector(`.agent[data-sid="${o.sid}"]`);
+  if (fig) { fig.focus(); return; }
+  const list = $("rosterlist");
+  if (list && list.children.length) { list.focus(); return; }
+  $("world").focus();
 }
 async function doSend() {
-  if (!target) return;
+  // Independent of the disabled attribute (D17): a disabled control issues
+  // no request even if the handler is somehow reached (FR-027).
+  if (!CAN_SEND || !subject || !lastRows[subject.sid]) return;
   const msg = $("replyText").value.trim();
   if (!msg) return;
   const btn = $("replySend"), out = $("replyOut");
@@ -1324,7 +1465,7 @@ async function doSend() {
     const res = await fetch("/api/send", {
       method: "POST",
       headers: {"Content-Type": "application/json", "X-CCWatch-Token": SEND_TOKEN},
-      body: JSON.stringify({target: target.sid, message: msg}),
+      body: JSON.stringify({target: subject.sid, message: msg}),
     });
     const j = await res.json();
     out.className = j.state || "failed";
@@ -1332,14 +1473,17 @@ async function doSend() {
                     : j.state === "queued" ? "queued — mid-turn, it will read this next turn"
                     : (j.error || j.detail || "failed");
     if (j.state === "delivered" || j.state === "queued") $("replyText").value = "";
-  } catch (e) { out.className = "failed"; out.textContent = e.message; }
+  } catch (e) {
+    out.className = "failed";
+    out.textContent = "the send request did not complete: " + e.message;
+  }
   btn.disabled = false;
 }
 $("replySend").addEventListener("click", doSend);
-$("iclose").addEventListener("click", closeReply);
+$("iclose").addEventListener("click", closeModal);
+$("agentmodal").addEventListener("cancel", () => { closeModal(); });
 $("replyText").addEventListener("keydown", e => {
   if (e.key === "Enter") doSend();
-  if (e.key === "Escape") closeReply();
 });
 let lastRows = {};
 document.addEventListener("click", e => {
@@ -1349,7 +1493,7 @@ document.addEventListener("click", e => {
   const a = e.target.closest(".agent[data-sid]");
   // Clicking is worth doing even in --read-only: seeing the conversation is
   // the more common reason to click an agent than messaging it.
-  if (a) openReply(a.dataset.sid, a.dataset.name, lastRows[a.dataset.sid]);
+  if (a) openModal(a.dataset.sid, a.dataset.name, "figure");
 });
 
 // ---- camera ------------------------------------------------------------
@@ -1505,6 +1649,17 @@ $("world").addEventListener("keydown", e => {
       (document.activeElement && document.activeElement !== t &&
        (document.activeElement.matches(EDITABLE_SEL) || document.activeElement.isContentEditable)))
     return;
+  // ⚠️ A focused figure opens on Enter or Space, which is what its
+  // role="button" promises. Without this the figures are tabbable and inert —
+  // reachable by keyboard and not operable by it, which is worse than not
+  // being reachable at all. Handled before the camera keys so a focused figure
+  // consumes the key rather than panning the map underneath it.
+  const fig = e.target && e.target.closest && e.target.closest(".agent[data-sid]");
+  if (fig && (e.key === "Enter" || e.key === " " || e.key === "Spacebar")) {
+    e.preventDefault();
+    openModal(fig.dataset.sid, fig.dataset.name, "figure");
+    return;
+  }
   const step = e.shiftKey ? CCWATCH_CAMERA.PAN_STEP_BIG : CCWATCH_CAMERA.PAN_STEP;
   let handled = true;
   switch (e.key) {
@@ -1881,6 +2036,10 @@ function renderRoster(sessions, cond) {
   } else {
     rosterEls.gone.classList.remove("on");
   }
+
+  const focusedRow = rows.find(r => r.sid === focusedSid) || null;
+  rosterEls.open.disabled = !focusedRow;
+  rosterEls.open.textContent = focusedRow ? `open ${focusedRow.name}` : "no agents to open";
 }
 // Names seen in any trusted tick, kept for the tombstone sentence even after
 // the sid it belongs to disappears from a later payload.
@@ -1959,6 +2118,21 @@ rosterEls.list.addEventListener("click", (e) => {
   const row = e.target.closest(".rrow");
   if (row) selectRow(row.dataset.sid);
 });
+// A double click is a shortcut to the same open the button/`o` key give
+// (FR-003, FR-004) — it never changes the row's own single-click selection.
+rosterEls.list.addEventListener("dblclick", (e) => {
+  const row = e.target.closest(".rrow");
+  if (row && lastRows[row.dataset.sid]) {
+    openModal(row.dataset.sid, lastRows[row.dataset.sid].name, "row");
+  }
+});
+// The roster's own pointer opener (page-modal.md §5): a real <button>, kept
+// outside #rosterlist for the same reason the tombstone's dismiss button is.
+rosterEls.open.addEventListener("click", () => {
+  if (focusedSid != null && lastRows[focusedSid]) {
+    openModal(focusedSid, lastRows[focusedSid].name, "row");
+  }
+});
 
 // The tombstone's dismiss button (data-model.md §6): clears the selection
 // and its stored record; the remaining rows keep rendering.
@@ -1994,6 +2168,17 @@ rosterEls.list.addEventListener("keydown", (e) => {
   } else if (e.key === "Enter") {
     e.preventDefault();
     if (focusedSid != null) selectRow(focusedSid);
+  } else if (e.key === "o" || e.key === "O") {
+    // ⚠️ The opener the list advertises with aria-keyshortcuts="o". A declared
+    // shortcut that does nothing is worse than an undeclared one: it is a
+    // promise in the accessibility tree that the page does not keep. Enter
+    // selects (and flies the camera); `o` opens the panel, so selecting and
+    // inspecting stay separate actions.
+    e.preventDefault();
+    if (focusedSid != null) {
+      const r = lastRows[focusedSid];
+      if (r) openModal(r.sid, r.name, "roster");
+    }
   }
 });
 
@@ -2066,13 +2251,10 @@ function applyFeed(s, cond) {
   // identity actually appearing or disappearing.
   lastRows = {};
   for (const r of (s.sessions || [])) lastRows[r.sid] = r;
-  // If the inspector is open, keep its question panel current — a dialog
-  // answered elsewhere should stop being shown here.
-  if (target && lastRows[target.sid]) {
-    renderAsk(lastRows[target.sid]);
-    const row = lastRows[target.sid];
-    $("imeta").textContent = [row.repo, row.branch, row.token].filter(Boolean).join(" · ");
-  }
+  // The modal stays current without being rebuilt (FR-014, FR-040): a
+  // question answered elsewhere, a stat that changed, a session that vanished
+  // all reach the open panel on the very next tick.
+  renderModal();
 
   // R2/R8: districts/buildings/zones stay drawn through (a)/(b)/(c) — a
   // failure never presents as an empty city. In (b) there is nothing yet to
@@ -2125,7 +2307,7 @@ function resume() {
   tick();
   every("tick", 3000, tick);
   // The transcript inspector, if open, follows the same visibility rule.
-  if (target) every("convo", 5000, loadConvo);
+  if (subject) every("convo", 5000, loadConvo);
 }
 // No refit on resize (research.md D9, FR-010, FR-049): the centre world
 // point is held and the view is re-clamped against the unchanged extent, so

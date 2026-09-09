@@ -3109,10 +3109,18 @@ SNAPSHOT_TIMEOUT = float(os.environ.get("CCWATCH_SNAPSHOT_TIMEOUT", "90"))
 # Retrying could not fix that — the race was not unlucky, it was certain — so
 # the cadence is a knob and the test removes the race instead of re-rolling it.
 SNAPSHOT_CADENCE = float(os.environ.get("CCWATCH_SNAPSHOT_CADENCE", "2"))
+# ⚠️ The cadence raises a FLOOR under all three refreshers, not just the
+# snapshot. The ETag covers the whole published payload — deploys and peers
+# included — and `refresh_etag` runs on every publish, so a deploys refresh at
+# 60s or a peers refresh at 45s changes the validator just as a snapshot does.
+# Slowing only the snapshot left the ETag assertions comparing two reads that a
+# peers publish could still slip between, and they failed intermittently for a
+# reason that had nothing to do with the snapshot they were pinning. At the
+# default of 2 the floor is below both, so production cadences are unchanged.
 for _key, _args, _to, _every, _tf in (
         ("snapshot", ["--json"], SNAPSHOT_TIMEOUT, SNAPSHOT_CADENCE, None),
-        ("deploys",  ["deploys", "--json"], 120, 60, None),
-        ("peers",    ["peers", "--days", "2", "--json"], 120, 45, None)):
+        ("deploys",  ["deploys", "--json"], 120, max(60, SNAPSHOT_CADENCE), None),
+        ("peers",    ["peers", "--days", "2", "--json"], 120, max(45, SNAPSHOT_CADENCE), None)):
     threading.Thread(target=refresh_loop(_key, _args, _to, _every, _tf), daemon=True).start()
 try:
     with S(("127.0.0.1", PORT), H) as httpd:

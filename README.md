@@ -295,6 +295,15 @@ A waiting session with **no** recorded question — a permission prompt, say —
 reports that there is none rather than showing an older question or an empty
 panel.
 
+**The modal's ask panel is the same two wordings, not a third.** `askModel(row)`
+returns `kind: "questions"` with the question(s) and their options untruncated
+(the roster still truncates at 100 characters for the table; the modal never
+does) when one is recorded, `kind: "dialog"` with the distinct "waiting on
+you" wording when none is recorded but the session is waiting, and `kind:
+"none"` — no panel at all, not an empty one — otherwise. Both non-`"none"`
+wordings carry the same limitation stated above: a message sent from the
+modal is queued behind the open dialog and does not answer it.
+
 ## Talking to a session that is already running
 
 `claude --resume` opens a *copy* of a conversation in a new process. `ccwatch
@@ -630,6 +639,52 @@ flag and JSON-record shape the selection uses (`validateWidth`/`loadWidth`/
 clamp, it falls back to `WIDTH_DEFAULT` rather than propagating `NaN` into
 the stylesheet.
 
+### The modal says which of five things is true, never two of them at once
+
+Clicking a figure or a roster row opens a panel on one agent: its status and
+the measurement behind it, the peer edges touching it, its conversation, a
+reply box, and a kill control. Four openers reach it — a figure by pointer, a
+figure by keyboard, a roster row by pointer, a roster row by keyboard — and all
+four go through one code path, because four ways in that each set up the panel
+slightly differently is four panels to keep in agreement.
+
+The panel keeps its readings on screen when the feed breaks, so it has to say
+which way it is broken. There are five renderings and they are asserted
+**pairwise distinct**, sharing no leading clause:
+
+| condition | what the panel says |
+|---|---|
+| the feed is down | `the feed is down: <reason> — the readings in this panel are <age> old` |
+| the first snapshot has not landed | `taking the first snapshot — nothing has been collected about this session yet` |
+| the feed is healthy | *nothing* |
+| rows could not be read | `<n> registry file(s) could not be read — run: ccwatch doctor` |
+| the session is gone | `<name> is gone from the snapshot … claude --resume <sid>` |
+
+Three of those are worth explaining.
+
+**A healthy feed says nothing.** Not "feed OK" — a line that appears on every
+refresh to confirm things are fine is a line people learn to skip, and then it
+is not there on the refresh when it matters.
+
+**Unreadable rows are an additive fact, not a consequence.** The string is a
+separate node and is never joined into the main sentence: rows that could not
+be read is equally true of a healthy feed and a broken one, and folding it in
+would make it read as fallout from the breakage. It is empty for `0`, `null`
+and absent, because "0 registry files could not be read" is a sentence nobody
+needs.
+
+**A broken feed is never evidence that a session exited.** A session missing
+from the snapshot means one of two very different things: it left the machine,
+or the read that would have found it failed. The panel only says "gone" when
+the feed is trustworthy; otherwise it reports the feed and says nothing about
+where the session went. Announcing an exit on the strength of a failed read
+invents an event that may never have happened.
+
+The condition object is the same one the banner above the map and the roster
+read — `lastCond`, passed in, not recomputed. Two renderings that decide
+independently whether the feed can be trusted will eventually disagree, and a
+reader has no way to tell which of them is lying.
+
 ### The transcript inspector renders markdown
 
 Clicking a figure opens the recent conversation before it offers the reply box,
@@ -678,6 +733,82 @@ the transcript.
 it under node and assert on the HTML, escaping included. An XSS assertion you
 cannot execute is a comment, not a test.
 
+### The conversation follows you only while you are already at the bottom
+
+Ticks keep arriving while the modal is open, and a reader partway up the
+scrollback is reading something specific — pinning them back to the newest
+turn on every refresh would throw away the thing they opened the panel to
+look at. `atBottom({scrollTop, scrollHeight, clientHeight})` is sampled
+*before* the conversation is reconciled and the scroll position is only reset
+to the bottom *after*, and only when that sample was true. A reader within
+`FOLLOW_EPS` (8px) of the bottom counts as caught up — a fractional scroll
+position or a rounding difference between browsers should not be the reason a
+reader stops following — but one line's worth of scroll above that is enough
+to hold their position through the next refresh. A conversation shorter than
+its own viewport, or a scroll box handed non-finite measurements, is treated
+as "at the bottom" rather than throwing, since there is nothing to scroll
+away from either way.
+
+The empty and failure states are three distinct sentences, not one, because
+each names a different fact: an embedded-SDK session (`entrypoint: "sdk-ts"`)
+never writes a transcript at all, so it states that rather than "no turns
+yet" — the same silence-is-not-evidence rule the status column follows — a
+session that simply has not turned yet states that distinctly, and a
+transcript fetch that failed states its own reason with `isError: true`
+rather than reading like either. None of the three escalates the session's
+silence into a hang; that verdict belongs to the status column, corroborated
+against CPU time and a runner pid, not to an empty conversation panel.
+
+### The per-agent modal reads the roster's own fields, not a second formatting pass
+
+Clicking a figure — or opening the focused roster row with `o` or a double
+click — opens a `<dialog>` with every stat the roster row carries: the same
+silence, age, context percentage, memory figure, pipeline phase, repository
+and peer edges, reading identically because they *are* the same reading.
+`web/modal.js`'s `panel()` is handed `CCWATCH_ROSTER.rowFields(row, {volatile:
+VOLATILE})`'s own output rather than formatting `row` a second time, so "the
+modal agrees with the roster" is true by construction instead of by
+vigilance — a second formatter is a second place the `VOLATILE` staleness
+gate can be forgotten, and the modal's kill confirmation used to be exactly
+that: it read `row.rss_mb` directly, bypassing the gate every other reading on
+the page already honours.
+
+This is also why the panel is a pure function of its input: `panel(input) →
+PanelModel` returns the whole rendering as data — twelve stats' worth of
+strings, an ordered edge list, the header text — and `map.html` writes that
+into DOM nodes built once at load, keyed by `StatLine.key` so a line
+appearing or disappearing never rebuilds the ones around it. Almost everything
+this feature can get wrong is a sentence, not a layout, and a sentence is
+cheap to assert under `node` against a plain object and expensive to assert
+against a live browser.
+
+**Why the kill control is disabled and visible, never hidden.** The previous
+panel hid the kill button entirely when the server did not opt into
+`--allow-kill`, which reads as "this session cannot be killed" when the fact
+is "you did not ask the server to allow it" — a failure that looked like an
+absence. The control is now always present: enabled with its two-step
+confirmation, or disabled and naming the flag that would enable it
+(`ccwatch serve --allow-kill`) beside it. The same `disabled` attribute and an
+independent guard inside the click handler are both required before a
+request is issued, so a stray attribute removal in devtools is not by itself
+enough to fire a kill nobody authorised.
+
+**The two-step confirmation names what is actually at stake, from the same
+gated reading every other stat honours.** What killing would free is
+`fields.mem` when `VOLATILE` is true, "an unknown amount" when volatile but
+the reading has not arrived yet, and — when the reading is stale — not stated
+at all, with a note saying why, rather than showing a number that may no
+longer be true. Two further warnings are additive, not exclusive: a session
+whose `pipeline.status` is `"running"` names the phase and says killing it
+aborts a paid model call, and a session that is mid-turn (`token: "busy"`)
+says a tool call may be left half-applied. Both come from the same snapshot
+row the confirmation already reads, never a second lookup.
+
+A kill request that never gets a reply — a dropped connection, not a refusal
+— is prefixed `the kill request did not complete: <reason>`, so it cannot be
+misread as the server having refused the kill. `doSend`'s transport failure is
+worded the same way, for the same reason (see below).
+
 ### Replying from the page
 
 Click a figure (or the `reply` button in the table view) to send it a message.
@@ -703,6 +834,18 @@ inject prompts into every agent you have running. Two things close that:
 Both are asserted by tests that were verified to fail with either check
 removed. `ccwatch serve --read-only` drops the endpoint entirely and serves no
 token, and the page then shows itself as read-only.
+
+**The send control in the modal is the same present-and-disabled shape as the
+kill control, for the same reason.** `sendModel(input)` yields `state:
+"disabled"` naming `--read-only` when the server was started that way, or
+naming that the session is no longer in the snapshot when it has vanished —
+never `state: "ready"` with a request nobody authorised. `#ifoot` is never
+hidden; only `#replyText`/`#replySend` are disabled, and `doSend()` carries
+its own independent guard so a stray attribute removal in devtools cannot fire
+a send by itself. A transport failure — the fetch itself never completing —
+is worded `the send request did not complete: <reason>`, distinct from both a
+refusal and a delivered/queued outcome, for the same reason `doKill`'s wording
+is (above).
 
 ### Why it refreshes the way it does
 
@@ -1011,6 +1154,29 @@ implementation broken in the specific way it describes:
 | let `stacked` disagree with `STACK_BREAKPOINT` about where the panel stacks | 2 |
 | accept a stored width record with a non-finite or non-number `w` | 1 |
 | drop `role="separator"`, `tabindex="0"`, or an `aria-value*` attribute from `#rdivider` | 3 |
+| reorder `statLines`'s output instead of the fixed silence/age/ctx/mem/pipeline/where/sid/edge sequence | 1 |
+| let `quiet` win over `waited` in `statLines`'s silence line instead of `waited` taking priority | 1 |
+| emit a `0`/`0%`/`0MB`/`-`/`null` line for a `fields` key that is absent instead of omitting the line | 1 |
+| re-aggregate `edgesFor`'s `count` across duplicate edges instead of returning each verbatim | 1 |
+| drop an edge whose far end is absent from `names` instead of marking it `unknown: true` | 1 |
+| let `edgesFor` leak `last`/`sample` into its output | 1 |
+| drop the direction word from an edge's rendered text, leaving only the arrow | 1 |
+| read `row.name` instead of `subject.name` for `panel()`'s header | 1 |
+| let `panel()`'s `header.status` diverge from the roster row's `.rstatus` join for the same `fields` | 1 |
+| let `panel({row: null, ...})` return stats beyond the `sid` line | 1 |
+| let `panel()` mutate its input or return a different model on a second call with the same input | 2 |
+| write a figure's `aria-label` from a string other than the same `titleBits(row)` call the `<title>` uses | 1 |
+| let `killModel({canKill: false, ...})` report `state: "ready"` or open the confirmation anyway | 2 |
+| let `killModel`'s `frees` read `fields.mem` when `volatile: false` instead of withholding it with a note | 1 |
+| drop `confirm.phase`/`confirm.busy` instead of setting them from `pipeline.status`/`token` | 2 |
+| restore `#killbar { display:none }` instead of leaving the bar always present | 1 |
+| drop `doKill()`'s own `!CAN_KILL || !row` guard, leaving only the `disabled` attribute | 1 |
+| widen `atBottom`'s threshold past `FOLLOW_EPS`, so a reader scrolled up is dragged back down | 1 |
+| let `convoMessage` skip the `sdk-ts` check, so an embedded-SDK session reads "no turns yet" instead of its own sentence | 2 |
+| add a second `setInterval`, a `requestAnimationFrame` call, or a second refresh-reachable `innerHTML` write to the rewritten `map.html` | 1 |
+| let `askModel` report `kind: "dialog"` from the same branch as `kind: "questions"` instead of a distinct `how` | 1 |
+| let `sendModel({canSend: false, ...})` report `state: "ready"` instead of naming `--read-only` | 1 |
+| drop one of `doSend`/`doKill`'s `X-CCWatch-Token` headers, or reintroduce an `#ifoot` `style.display` write | 1 |
 
 That last table is not decoration. Two of those mutations are bugs that were
 actually **in** the code and were found this way, and two entries started life
