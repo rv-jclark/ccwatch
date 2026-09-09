@@ -296,13 +296,29 @@
   #rostergone { display:none; font-size:12px; margin-bottom:.5rem; }
   #rostergone.on { display:block; }
   #rosterlist { display:flex; flex-direction:column; gap:.3rem; }
-  .rrow { display:flex; gap:.4rem; align-items:baseline; padding:.25rem .35rem;
+  /* ⚠️ A COLUMN. This was a row, and with six fields in a 320px panel the
+     flex algorithm gave `.rname` and `.rwhere` a computed width of 0 and left
+     `.rasks` 102px, so every field wrapped into a four-character ribbon:
+     "13h `titl" / "be` c" / "22MB PERKS". The panel was unreadable, and no
+     assertion noticed because all 567 of them check structure — roles,
+     handlers, module return values — and none renders the page and measures
+     it. Stacking is the only layout that holds at every width the divider
+     allows, which is what FR-034 actually needs. */
+  .rrow { display:flex; flex-direction:column; gap:.1rem; padding:.3rem .4rem;
           border-radius:4px; cursor:pointer; }
   .rrow:hover { background:color-mix(in srgb, var(--ink) 6%, transparent); }
-  /* Identity truncates first; the status word and its measurement — the two
-     fields FR-034 protects — never do (they carry flex:none below). */
+  /* Identity truncates; the status word and its measurement never do — they
+     wrap instead, because FR-034 protects them from being cut at any width. */
+  .rrow .rname { font-weight:600; }
   .rrow .rname, .rrow .rwhere { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .rrow .rstatus { flex:none; white-space:nowrap; }
+  .rrow .rwhere, .rrow .rmeta { color:var(--dim); font-size:11px; }
+  .rrow .rstatus { white-space:normal; overflow-wrap:anywhere; }
+  /* The ask is the longest field and the least structured. Two lines of it is
+     enough to recognise the question; the modal has the whole thing. */
+  .rrow .rasks { color:var(--block); font-size:11px; display:-webkit-box;
+                 -webkit-line-clamp:2; -webkit-box-orient:vertical;
+                 overflow:hidden; }
+  .rrow .rasks:empty { display:none; }
   /* Selection is a word, not only a colour (Constitution VII, D17). */
   .rrow[aria-selected="true"] { background:color-mix(in srgb, var(--info) 16%, transparent); }
   .rrow .rsel { display:none; color:var(--info); font-weight:600; }
@@ -1520,14 +1536,14 @@ $("world").insertAdjacentElement("afterend", camctl);
 // the viewport centre rather than a pointer position the button click has none of.
 zoutBtn.addEventListener("click", () => {
   view = CCWATCH_CAMERA.clampPan(
-    CCWATCH_CAMERA.zoomTo(view, view.idx - 1, $("world").clientWidth / 2, $("world").clientHeight / 2),
+    CCWATCH_CAMERA.zoomTo(view, Math.ceil(view.idx) - 1, $("world").clientWidth / 2, $("world").clientHeight / 2),
     worldExtent, $("world").clientWidth, $("world").clientHeight);
   applyView();
   flushPendingSave();
 });
 zinBtn.addEventListener("click", () => {
   view = CCWATCH_CAMERA.clampPan(
-    CCWATCH_CAMERA.zoomTo(view, view.idx + 1, $("world").clientWidth / 2, $("world").clientHeight / 2),
+    CCWATCH_CAMERA.zoomTo(view, Math.floor(view.idx) + 1, $("world").clientWidth / 2, $("world").clientHeight / 2),
     worldExtent, $("world").clientWidth, $("world").clientHeight);
   applyView();
   flushPendingSave();
@@ -1578,23 +1594,74 @@ function loadStoredView(placed) {
     if (!hit) restored = null;
   }
   view = restored || CCWATCH_CAMERA.fitView(worldExtent, vw, vh);
-  overflow = view.overflow || false;
+  // ⚠️ Fit-to-world is the wrong FIRST view, and shipping it as one produced a
+  // map that opened showing nothing at all.
+  //
+  // The world is wide and short — districts sit side by side — so with two
+  // orgs it measured 824×192 against a 705×705 viewport, and the widest rung
+  // that fits is 0.5×. `levelFor` calls anything below 2× "far", and the far
+  // level draws district aggregates only: no buildings, no zones, no figures.
+  // So the opening view was two empty boxes, by construction, and it got worse
+  // with more projects rather than better.
+  //
+  // Fit is the right answer for the `0` key, which means "show me everything".
+  // It is the wrong answer for "show me my agents", which is what opening the
+  // page means. So a cold start opens at the closest rung that still renders
+  // figures, centred on whichever session most needs attention.
+  if (!restored) {
+    const cold = CCWATCH_CAMERA.fitView(worldExtent, vw, vh);
+    if (CCWATCH_CAMERA.levelFor(cold.idx, null) === "far") {
+      const focus = firstFigurePlot(placed);
+      view = focus
+        ? CCWATCH_CAMERA.clampPan(
+            CCWATCH_CAMERA.centreOn(cold, focus.x + focus.w / 2, focus.y + focus.h / 2,
+                                    vw, vh, COLD_MIN_IDX),
+            worldExtent, vw, vh)
+        : CCWATCH_CAMERA.clampPan({...cold, idx: COLD_MIN_IDX}, worldExtent, vw, vh);
+      overflow = true; // the whole world no longer fits, and the note says so
+    }
+  }
+  overflow = view.overflow || overflow || false;
   level = CCWATCH_CAMERA.levelFor(view.idx, null); // the cold mapping (FR-041)
 }
 
+// The rung a cold start will not open below, because below it no figure is
+// drawn. Kept next to levelFor's thresholds deliberately: if those move, this
+// has to move with them or the opening view goes blank again.
+const COLD_MIN_IDX = 3; // 2× — the lowest rung levelFor calls "mid"
+
+// Whichever placed figure most deserves the opening view: the loudest session
+// by severity, falling back to any figure at all. A map that opens centred on
+// an idle agent while another is blocked has spent its one free action badly.
+function firstFigurePlot(placed) {
+  const figs = (placed && placed.world && placed.world.figures) || {};
+  const keys = Object.keys(figs);
+  if (!keys.length) return null;
+  let best = null, bestSev = -1;
+  for (const k of keys) {
+    const row = lastRows[k];
+    const sev = row ? Math.max(row.sev || 0, row.psev || 0) : 0;
+    if (sev > bestSev) { bestSev = sev; best = figs[k]; }
+  }
+  return best || figs[keys[0]];
+}
+
 function applyView() {
-  const k = CCWATCH_CAMERA.scaleFor(view.idx);
+  // scaleAt: view.idx is continuous between rungs while a gesture is in
+  // flight, and scaleFor floors — rendering through it would snap the picture
+  // to the rung below while the pan clamp used the real scale.
+  const k = CCWATCH_CAMERA.scaleAt(view.idx);
   $("camera").setAttribute("transform", `translate(${view.tx} ${view.ty}) scale(${k})`);
   const world = $("world");
   world.style.setProperty("--k", k);
   level = CCWATCH_CAMERA.levelFor(view.idx, level);
   world.setAttribute("data-lod", level);
-  const atMin = view.idx === 0, atMax = view.idx === CCWATCH_CAMERA.LADDER.length - 1;
+  const atMin = view.idx <= 0, atMax = view.idx >= CCWATCH_CAMERA.LADDER.length - 1;
   zoutBtn.disabled = atMin;
   zoutBtn.title = atMin ? "already at the widest zoom" : "";
   zinBtn.disabled = atMax;
   zinBtn.title = atMax ? "already at the closest zoom" : "";
-  camstate.textContent = `zoom ${k}× · ${level}`;
+  camstate.textContent = `zoom ${k >= 10 ? Math.round(k) : (Math.round(k * 10) / 10)}× · ${level}`;
   camnote.textContent = overflow ? "the whole world does not fit at this zoom"
     : CCWATCH_CAMERA.persistence === "unavailable" ? "the viewport will not be remembered"
     : "";
@@ -1614,6 +1681,13 @@ let vpSize = {w: 0, h: 0};
 const drag = {active: false, moved: false, id: null, x: 0, y: 0, tx: 0, ty: 0};
 $("world").addEventListener("pointerdown", e => {
   if (e.button !== 0) return;
+  // ⚠️ Suppress the browser's own drag behaviour — text selection, and the
+  // native image/element drag — so the gesture belongs to the camera. Safe
+  // here because #world contains no interactive controls (the zoom buttons are
+  // siblings of the svg, not children), `focus()` below is explicit, and
+  // preventDefault on pointerdown does not cancel the later click that opens a
+  // figure.
+  e.preventDefault();
   drag.active = true; drag.moved = false; drag.id = e.pointerId;
   drag.x = e.clientX; drag.y = e.clientY;
   drag.tx = view.tx; drag.ty = view.ty;
@@ -1668,11 +1742,11 @@ $("world").addEventListener("keydown", e => {
     case "ArrowUp":    view = CCWATCH_CAMERA.panBy(view, 0, step); break;
     case "ArrowDown":  view = CCWATCH_CAMERA.panBy(view, 0, -step); break;
     case "+": case "=":
-      view = CCWATCH_CAMERA.zoomTo(view, view.idx + 1,
+      view = CCWATCH_CAMERA.zoomTo(view, Math.floor(view.idx) + 1,
         $("world").clientWidth / 2, $("world").clientHeight / 2);
       break;
     case "-": case "_":
-      view = CCWATCH_CAMERA.zoomTo(view, view.idx - 1,
+      view = CCWATCH_CAMERA.zoomTo(view, Math.ceil(view.idx) - 1,
         $("world").clientWidth / 2, $("world").clientHeight / 2);
       break;
     case "0":
@@ -1697,13 +1771,19 @@ $("world").addEventListener("wheel", e => {
   e.preventDefault();
   const rect = $("world").getBoundingClientRect();
   const ax = e.clientX - rect.left, ay = e.clientY - rect.top;
-  const r = CCWATCH_CAMERA.wheelStep(wheelAcc, e, $("world").clientHeight);
-  wheelAcc = r.acc;
-  if (r.step !== 0) {
-    // step is -1 (zoom in) or +1 (zoom out) on the negative-delta convention
-    // (contracts/camera-js.md §9); zooming in raises the ladder index.
+  // ⚠️ Fractional rungs, not an accumulate-then-jump step. The old path banked
+  // 100px of delta and then moved a whole rung, and rungs are 1.5×–2× apart —
+  // so a pinch, which fires many small events, leapt through several doublings
+  // in one gesture. Reported as "it jumps in massive leaps".
+  //
+  // Zoom now tracks the gesture continuously and the ladder survives where it
+  // is actually wanted: the buttons below still move exactly one rung, and the
+  // detail level still snaps at rung boundaries, so nothing that depended on
+  // discrete zoom levels changed.
+  const rungs = CCWATCH_CAMERA.zoomRungs(e, $("world").clientHeight);
+  if (rungs !== 0) {
     view = CCWATCH_CAMERA.clampPan(
-      CCWATCH_CAMERA.zoomTo(view, view.idx - r.step, ax, ay),
+      CCWATCH_CAMERA.zoomTo(view, view.idx + rungs, ax, ay),
       worldExtent, $("world").clientWidth, $("world").clientHeight);
     applyView();
   }
@@ -1730,7 +1810,7 @@ window.CCWATCH_MAP_CAMERA = {
     flushPendingSave();
   },
   current() {
-    return {idx: view.idx, scale: CCWATCH_CAMERA.scaleFor(view.idx), level, tx: view.tx, ty: view.ty};
+    return {idx: view.idx, scale: CCWATCH_CAMERA.scaleAt(view.idx), level, tx: view.tx, ty: view.ty};
   },
 };
 
@@ -2318,7 +2398,7 @@ function resume() {
 function reflowWorld() {
   if (document.hidden || !worldExtent) return;
   const world = $("world");
-  const k = CCWATCH_CAMERA.scaleFor(view.idx);
+  const k = CCWATCH_CAMERA.scaleAt(view.idx);
   // The world point that was at the centre of the *old* size — vpSize, held
   // since the last camera action — stays at the centre of the new one.
   const wx = (vpSize.w / 2 - view.tx) / k, wy = (vpSize.h / 2 - view.ty) / k;
