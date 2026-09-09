@@ -31,11 +31,20 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # invisible by construction: nothing else in a passing run distinguishes it from
 # a full run.
 #
-# 242 assertions run on a host with `node` and free loopback ports. 26 of those
-# are the node-gated markdown block, so a host without `node` counts 216 — the
-# floor has to sit below that, not below the full count, or the suite fails on
-# a machine that is merely missing an optional tool.
-TALLY_FLOOR=455
+# ⚠️ There are TWO floors, because a skipped assertion is not a counted one —
+# the check below compares `pass + fail` and ignores `skipped`. Five sections
+# (markdown, plots, camera, roster-module, modal-module) need `node`, and
+# measured 2026-09-09 they are 260 of the 562 assertions. A single floor set
+# from a machine that has node therefore fails on a machine that does not:
+# at 455 against the 302 that run without it, the suite reported "assertions
+# are running but not registering" on a host whose only fault was missing an
+# optional tool. That is one machine's configuration written into the suite,
+# which is the thing a floor must not do.
+#
+# So TALLY_FLOOR is what always runs, and TALLY_FLOOR_NODE is added only when
+# node is actually present.
+TALLY_FLOOR=295
+TALLY_FLOOR_NODE=250
 
 assert_contains() { case "$1" in *"$2"*) t_pass "$3";; *) t_fail "$3" "expected to contain: $2";; esac; }
 assert_not_contains() { case "$1" in *"$2"*) t_fail "$3" "should NOT contain: $2";; *) t_pass "$3";; esac; }
@@ -1633,6 +1642,85 @@ assert_eq "$(grep -c 'setInterval(' "$ROOT/web/map.html")" "1" \
 assert_contains "$_maphtml" 'if (!window.CCWATCH_ROSTER) return;' \
   "renderRoster's own body is guarded by window.CCWATCH_ROSTER"
 
+# T021/contracts/page-modal.md §5: the figure's keyboard-opener aria-label is
+# written from the same titleBits(row) the <title> uses, so the two cannot
+# disagree. Mutation-checked: with the aria-label line removed, or written
+# from a different call, this assertion fails.
+_updatefigure_js=$(awk '/^function updateFigure\(/,/^\}/' "$ROOT/web/map.html")
+assert_contains "$_updatefigure_js" 'g.setAttribute("aria-label", "agent " + row.name + ": " + titleBits(row));' \
+  "updateFigure writes aria-label from the same titleBits(row) call the <title> uses"
+assert_contains "$_updatefigure_js" 'g.querySelector("title").textContent = titleBits(row);' \
+  "and the <title> is still the same titleBits(row) call"
+
+# T029/FR-028/D17: #killbar is present whether or not killing is permitted —
+# no display:none rule left on it — and the disabled attribute and doKill()'s
+# own handler guard are two independent reasons a disabled control issues
+# nothing. Mutation-checked: reintroducing `#killbar { display:none }`, or
+# removing either the disabled write or doKill's early return, fails this.
+assert_not_contains "$(grep '#killbar {' "$ROOT/web/map.html")" 'display:none' \
+  "#killbar carries no display:none rule"
+_dokill_js=$(awk '/^async function doKill\(/,/^\}/' "$ROOT/web/map.html")
+assert_contains "$_dokill_js" 'if (!CAN_KILL || !row) return;' \
+  "doKill() guards independently of the disabled attribute"
+_renderkill_js=$(awk '/^function renderKill\(/,/^\}/' "$ROOT/web/map.html")
+assert_contains "$_renderkill_js" 'startBtn.disabled = kill.state !== "ready";' \
+  "and #killstart's disabled attribute is written from the kill model's state"
+
+# T039/SC-010/FR-016: the conversation's own polling still runs through the
+# page's one shared setInterval, no new requestAnimationFrame loop was added
+# to drive it, and the turn body's single innerHTML write is still md.js's
+# escape-first render. Mutation-checked: adding a second setInterval or a
+# requestAnimationFrame call, or writing .what from anything but
+# CCWATCH_MD.render, fails this.
+_setinterval_count=$(grep -c 'setInterval(' "$ROOT/web/map.html")
+assert_eq "$_setinterval_count" "1" "setInterval still occurs exactly once in web/map.html"
+_raf_count=$(grep -c 'requestAnimationFrame(' "$ROOT/web/map.html")
+assert_eq "$_raf_count" "0" "requestAnimationFrame occurs zero times in web/map.html"
+assert_contains "$_maphtml" 'what.innerHTML = CCWATCH_MD.render(t.text || "");' \
+  "the .what innerHTML write is still CCWATCH_MD.render's escape-first render"
+
+# T049/FR-025/FR-026: doSend and doKill's fetch calls both still carry the
+# per-run token, the SEND_TOKEN placeholder is byte-identical, and #ifoot is
+# never assigned style.display (the send control stays present and disabled,
+# never hidden). Mutation-checked: dropping either X-CCWatch-Token header,
+# rewriting the placeholder, or reintroducing an ifoot.style.display write
+# fails this.
+_tokenheader_count=$(grep -c 'X-CCWatch-Token": SEND_TOKEN' "$ROOT/web/map.html")
+assert_eq "$_tokenheader_count" "2" \
+  "doSend and doKill's fetch calls both carry X-CCWatch-Token (2 occurrences)"
+assert_contains "$_maphtml" 'const SEND_TOKEN = "__CCWATCH_SEND_TOKEN__";' \
+  "the SEND_TOKEN placeholder line is byte-identical"
+assert_not_contains "$_maphtml" '"ifoot").style.display' \
+  "#ifoot is never assigned style.display in web/map.html"
+
+# T056/FR-036/FR-038/D3: the dialog has no <form method="dialog"> (Enter would
+# otherwise submit and close it unexpectedly), showModal() is called exactly
+# once (the native trap/inert-background is supplied by the browser, not
+# reimplemented), and every figure carries the attributes its keyboard opener
+# needs. Mutation-checked: adding a <form method="dialog"> inside #agentmodal,
+# a second showModal() call, or dropping tabindex/role from makeFigure all
+# fail this.
+assert_not_contains "$_maphtml" 'method="dialog"' \
+  "web/map.html contains no <form method=\"dialog\">"
+_showmodal_count=$(grep -c '\.showModal()' "$ROOT/web/map.html")
+assert_eq "$_showmodal_count" "1" "showModal() occurs exactly once in web/map.html"
+_makefigure_js=$(awk '/^function makeFigure\(/,/^\}/' "$ROOT/web/map.html")
+assert_contains "$_makefigure_js" 'tabindex: "0"' \
+  "makeFigure gives each .agent group tabindex"
+assert_contains "$_makefigure_js" 'role: "button"' \
+  "and role=\"button\""
+
+# T057/research.md D6: #rosteropen is built outside #rosterlist (role="option"
+# rows have presentational children and cannot themselves host a button), and
+# #rosterlist carries aria-keyshortcuts for its "o" opener. Mutation-checked:
+# moving #rosteropen's creation inside the list builder, or dropping the
+# aria-keyshortcuts write, fails this.
+_rosterbuild_js=$(awk '/const list = document.createElement\("div"\);/,/roster.append\(/' "$ROOT/web/map.html")
+assert_contains "$_rosterbuild_js" 'list.setAttribute("aria-keyshortcuts", "o");' \
+  "#rosterlist carries aria-keyshortcuts"
+assert_contains "$_maphtml" 'roster.append(title, open, note, cond, gone, list);' \
+  "and #rosteropen is a sibling of #rosterlist under #roster, not appended into the listbox"
+
 # ============================================================ repo identity ==
 printf '\nrepo identity\n'
 
@@ -2918,6 +3006,508 @@ else
 fi
 
 
+# =============================================================== modal-module ===
+printf '\nmodal-module\n'
+#
+# web/modal.js is the pure per-agent-modal module (contracts/modal-js.md). It
+# lives in its own file for the same reason web/md.js, web/plots.js,
+# web/camera.js and web/roster.js do: so these assertions can require() it
+# under node without a browser.
+if command -v node >/dev/null 2>&1; then
+  cat > "$WORK/modal-check.js" <<'MODALJS'
+var M = require(process.argv[2]);
+var out = [];
+function check(name, cond, detail) {
+  out.push((cond ? "PASS|" : "FAIL|") + name + "|" + (detail || ""));
+}
+
+// Seed: the module loads under node and exports an object.
+(function () {
+  check("seed require(modal.js) succeeds and exports an object",
+        typeof M === "object" && M !== null, typeof M);
+})();
+
+// statLines (contracts/modal-js.md §4, S-A..S-I)
+(function () {
+  var full = {age: "1m", ctx: "ctx 42%", mem: "200MB", pipeline: "plan/running", where: "acme/checkout · main"};
+  var row = {sid: "s1", waited: 90, quiet: 700};
+
+  check("S-A order is exactly silence, age, ctx, mem, pipeline, where, sid, edge:* for a row carrying all of them",
+        (function () {
+          var lines = M.statLines(full, row, {edges: [{dir: "out", other: "peer", count: 2, unknown: false}]});
+          return lines.map(function (l) { return l.key; }).join(",")
+            === "silence,age,ctx,mem,pipeline,where,sid,edge:0";
+        })());
+
+  check("S-B a waited row yields one silence line labelled waiting",
+        M.statLines({}, {sid: "s", waited: 90}, {}).filter(function (l) { return l.key === "silence"; })[0].label
+          === "waiting");
+  check("S-B a quiet-only row yields one silence line labelled silent",
+        M.statLines({}, {sid: "s", quiet: 700}, {}).filter(function (l) { return l.key === "silence"; })[0].label
+          === "silent");
+  check("S-B waited wins over quiet when both are present",
+        M.statLines({}, {sid: "s", waited: 90, quiet: 700}, {}).filter(function (l) { return l.key === "silence"; }).length === 1
+          && M.statLines({}, {sid: "s", waited: 90, quiet: 700}, {}).filter(function (l) { return l.key === "silence"; })[0].label === "waiting");
+
+  check("S-C a row with neither waited nor quiet yields no silence line",
+        M.statLines({}, {sid: "s", waited: null, quiet: null}, {}).filter(function (l) { return l.key === "silence"; }).length === 0);
+
+  check("S-D an absent fields key yields no line at all — no 0/0%/0MB/-/null in any text",
+        (function () {
+          var lines = M.statLines({where: "no repo"}, {sid: "s", waited: null, quiet: null}, {});
+          var s = JSON.stringify(lines);
+          return lines.every(function (l) { return l.text !== "0" && l.text !== "0%" && l.text !== "0MB"
+            && l.text !== "-" && l.text !== null; })
+            && s.indexOf("0%") === -1 && s.indexOf("0MB") === -1;
+        })());
+
+  check("S-E with volatile: false (no ctx/mem keys), where and sid are still present",
+        (function () {
+          var lines = M.statLines({where: "acme/checkout · main"}, {sid: "s1"}, {});
+          var keys = lines.map(function (l) { return l.key; });
+          return keys.indexOf("ctx") === -1 && keys.indexOf("mem") === -1
+            && keys.indexOf("where") !== -1 && keys.indexOf("sid") !== -1;
+        })());
+
+  check("S-F sid line text is row.sid verbatim, including a sid the module has never seen",
+        M.statLines({}, {sid: "sid-never-seen-before"}, {}).filter(function (l) { return l.key === "sid"; })[0].text
+          === "sid-never-seen-before");
+
+  check("S-G where is exactly \"no repo\" with no repository named when row.repo is null",
+        M.statLines({where: "no repo"}, {sid: "s"}, {}).filter(function (l) { return l.key === "where"; })[0].text
+          === "no repo");
+
+  check("S-H a crashed pipeline reads <phase>/CRASHED via fields.pipeline, not re-derived",
+        M.statLines({pipeline: "plan/CRASHED"}, {sid: "s"}, {}).filter(function (l) { return l.key === "pipeline"; })[0].text
+          === "plan/CRASHED");
+
+  check("S-I every key in the returned array is unique",
+        (function () {
+          var lines = M.statLines(full, row, {edges: [
+            {dir: "out", other: "a", count: 1, unknown: false},
+            {dir: "in", other: "b", count: 2, unknown: false},
+          ]});
+          var keys = lines.map(function (l) { return l.key; });
+          return keys.length === new Set(keys).size;
+        })());
+
+  // FR-011 spot-check (quickstart.md §2): a row with neither waited nor quiet
+  // and no ctx/mem/age yields exactly where/sid, no 0/0%/0MB/-/null.
+  check("FR-011 a row with nothing but where/sid yields exactly those two lines",
+        (function () {
+          var lines = M.statLines({where: "no repo"}, {sid: "s1", waited: null, quiet: null}, {});
+          return lines.map(function (l) { return l.key; }).join(",") === "where,sid";
+        })());
+})();
+
+// edgesFor (contracts/modal-js.md §5, E-A..E-H)
+(function () {
+  check("E-A an edge with neither end equal to name is excluded",
+        M.edgesFor("me", [{from: "a", to: "b", count: 1}], ["a", "b", "me"]).length === 0);
+
+  check("E-B from === name yields dir out",
+        M.edgesFor("me", [{from: "me", to: "b", count: 1}], ["me", "b"])[0].dir === "out");
+  check("E-B to === name yields dir in",
+        M.edgesFor("me", [{from: "a", to: "me", count: 1}], ["me", "a"])[0].dir === "in");
+
+  check("E-C count is e.count verbatim, no re-aggregation",
+        M.edgesFor("me", [{from: "me", to: "b", count: 7}, {from: "me", to: "b", count: 3}], ["me", "b"])
+          .map(function (e) { return e.count; }).join(",") === "7,3");
+
+  check("E-D a far end absent from names sets unknown: true rather than dropping the edge",
+        M.edgesFor("me", [{from: "me", to: "ghost", count: 1}], ["me"])[0].unknown === true);
+
+  check("E-E a self-edge yields exactly one line",
+        M.edgesFor("me", [{from: "me", to: "me", count: 1}], ["me"]).length === 1);
+
+  check("E-F edges: [] yields []",
+        M.edgesFor("me", [], ["me"]).length === 0);
+  check("E-F edges: null yields []",
+        M.edgesFor("me", null, ["me"]).length === 0);
+  check("E-F an absent peers (undefined edges) yields []",
+        M.edgesFor("me", undefined, ["me"]).length === 0);
+
+  check("E-G neither last nor sample appears anywhere in the output",
+        (function () {
+          var out = M.edgesFor("me", [{from: "me", to: "b", count: 1, last: 123, sample: "secret text"}], ["me", "b"]);
+          var s = JSON.stringify(out);
+          return s.indexOf("123") === -1 && s.indexOf("secret text") === -1;
+        })());
+
+  check("E-H the rendered text carries the direction as a word as well as the arrow",
+        (function () {
+          var lines = M.statLines({}, {sid: "s"}, {edges: M.edgesFor("me", [{from: "me", to: "b", count: 2}], ["me", "b"])});
+          var edgeLine = lines.filter(function (l) { return l.key.indexOf("edge:") === 0; })[0];
+          return edgeLine.text.indexOf("→") !== -1 && edgeLine.text.indexOf("to") !== -1;
+        })());
+})();
+
+// panel (contracts/modal-js.md §3, M-A..M-F)
+(function () {
+  var subject = {sid: "s1", name: "Foo"};
+  var fields = {word: "busy", measure: "3m"};
+  var row = {sid: "s1", name: "Foo"};
+
+  check("M-A header.name is subject.name verbatim, not row.name",
+        M.panel({row: {sid: "s1", name: "Different"}, fields: fields, subject: subject, names: [], edges: []})
+          .header.name === "Foo");
+
+  check("M-B header.status is \"<word> · <measure>\" when a measure exists",
+        M.panel({row: row, fields: fields, subject: subject, names: [], edges: []}).header.status === "busy · 3m");
+  check("M-B header.status is \"<word>\" when there is no measure",
+        M.panel({row: row, fields: {word: "idle"}, subject: subject, names: [], edges: []}).header.status === "idle");
+  check("M-B header.status is null when row is null",
+        M.panel({row: null, fields: null, subject: subject, names: [], edges: []}).header.status === null);
+
+  check("M-C header.status is byte-identical to the roster row's .rstatus join for the same fields",
+        (function () {
+          var status = M.panel({row: row, fields: fields, subject: subject, names: [], edges: []}).header.status;
+          var rstatus = fields.measure != null ? `${fields.word} · ${fields.measure}` : fields.word;
+          return status === rstatus;
+        })());
+
+  check("M-D panel invents no status word absent from row/fields — the header is a fixed join over fields alone",
+        M.panel({row: row, fields: fields, subject: subject, names: [], edges: []}).header.status.indexOf("busy") !== -1);
+
+  check("M-E with row: null, stats contains exactly the sid line",
+        (function () {
+          var m = M.panel({row: null, fields: null, subject: subject, names: [], edges: []});
+          return m.stats.length === 1 && m.stats[0].key === "sid" && m.stats[0].text === "s1";
+        })());
+
+  check("M-F panel is a pure function: called twice with the same input it returns deeply equal models",
+        (function () {
+          var input = {row: row, fields: fields, subject: subject, names: ["Foo"], edges: []};
+          var a = JSON.stringify(M.panel(input));
+          var b = JSON.stringify(M.panel(input));
+          return a === b;
+        })());
+  check("M-F panel mutates no part of its input",
+        (function () {
+          var edges = [{from: "Foo", to: "b", count: 1}];
+          var input = {row: row, fields: fields, subject: subject, names: ["Foo", "b"], edges: edges};
+          var before = JSON.stringify(input);
+          M.panel(input);
+          return JSON.stringify(input) === before;
+        })());
+})();
+
+// killModel (contracts/modal-js.md §8, K-A..K-K)
+(function () {
+  var row = {sid: "s1", name: "web-app", rss_mb: 1832, token: "idle",
+             pipeline: {status: "idle", phase: "plan"}};
+  var fields = {mem: "1832MB"};
+
+  check("K-A canKill: false yields state: disabled with a reason naming --allow-kill",
+        (function () {
+          var k = M.killModel({row: row, fields: fields, volatile: true, canKill: false, confirmOpen: false});
+          return k.state === "disabled" && k.reason.indexOf("ccwatch serve --allow-kill") !== -1
+            && k.startLabel.toLowerCase().indexOf("kill") !== -1;
+        })());
+
+  check("K-B canKill: false yields confirmOpen: false even when the caller passed confirmOpen: true",
+        M.killModel({row: row, fields: fields, volatile: true, canKill: false, confirmOpen: true}).confirmOpen === false);
+
+  check("K-C canKill: true with a row yields state: ready and a confirm object",
+        (function () {
+          var k = M.killModel({row: row, fields: fields, volatile: true, canKill: true, confirmOpen: true});
+          return k.state === "ready" && k.confirm !== null && typeof k.confirm === "object";
+        })());
+
+  check("K-D frees is fields.mem verbatim when volatile and present",
+        M.killModel({row: row, fields: fields, volatile: true, canKill: true, confirmOpen: false}).confirm.frees === "1832MB");
+
+  check("K-E volatile: true with rss_mb/mem absent yields frees: an unknown amount",
+        M.killModel({row: row, fields: {}, volatile: true, canKill: true, confirmOpen: false}).confirm.frees === "an unknown amount");
+
+  check("K-F volatile: false yields frees: null and a freesNote",
+        (function () {
+          var c = M.killModel({row: row, fields: fields, volatile: false, canKill: true, confirmOpen: false}).confirm;
+          return c.frees === null && typeof c.freesNote === "string" && c.freesNote.length > 0;
+        })());
+
+  check("K-G confirm.resume is exactly \"claude --resume <sid>\"",
+        M.killModel({row: row, fields: fields, volatile: true, canKill: true, confirmOpen: false}).confirm.resume
+          === "claude --resume s1");
+
+  check("K-H pipeline.status === running sets confirm.phase; any other status leaves it null",
+        (function () {
+          var running = M.killModel({row: {sid: "s1", name: "n", pipeline: {status: "running", phase: "plan"}},
+            fields: fields, volatile: true, canKill: true, confirmOpen: false}).confirm.phase;
+          var idle = M.killModel({row: {sid: "s1", name: "n", pipeline: {status: "idle", phase: "plan"}},
+            fields: fields, volatile: true, canKill: true, confirmOpen: false}).confirm.phase;
+          return running === "plan" && idle === null;
+        })());
+
+  check("K-I token === busy sets confirm.busy; any other token leaves it null",
+        (function () {
+          var busy = M.killModel({row: {sid: "s1", name: "n", token: "busy"},
+            fields: fields, volatile: true, canKill: true, confirmOpen: false}).confirm.busy;
+          var idle = M.killModel({row: {sid: "s1", name: "n", token: "idle"},
+            fields: fields, volatile: true, canKill: true, confirmOpen: false}).confirm.busy;
+          return busy === true && idle === null;
+        })());
+
+  check("K-J row: null yields state: disabled with a reason distinct from K-A's",
+        (function () {
+          var noRow = M.killModel({row: null, fields: null, volatile: true, canKill: true, confirmOpen: false});
+          var noGate = M.killModel({row: row, fields: fields, volatile: true, canKill: false, confirmOpen: false});
+          return noRow.state === "disabled" && noRow.reason !== noGate.reason;
+        })());
+
+  check("K-K no input yields a state other than ready or disabled",
+        ["disabled", "ready"].indexOf(M.killModel({}).state) !== -1
+          && ["disabled", "ready"].indexOf(M.killModel({row: row, fields: fields, volatile: true, canKill: true, confirmOpen: false}).state) !== -1);
+
+  // quickstart.md §2 spot-checks
+  check("SC-001/FR-028 ungated must still render a control naming the flag",
+        (function () {
+          var k = M.killModel({row: row, fields: fields, volatile: true, canKill: false, confirmOpen: true});
+          return k.state === "disabled" && k.reason.indexOf("ccwatch serve --allow-kill") !== -1 && k.confirmOpen === false;
+        })());
+
+  check("FR-033/D10 withheld is not unmeasured across the three volatile/mem inputs",
+        (function () {
+          var f = function (volatile, mem) {
+            return M.killModel({row: row, fields: mem ? {mem: mem} : {}, volatile: volatile, canKill: true, confirmOpen: true}).confirm;
+          };
+          var present = f(true, "1832MB");
+          var absent = f(true, null);
+          var stale = f(false, "1832MB");
+          return present.frees === "1832MB" && absent.frees === "an unknown amount"
+            && stale.frees === null && stale.freesNote !== null;
+        })());
+})();
+
+// atBottom (contracts/modal-js.md §7, B-A..B-E)
+(function () {
+  check("B-A exactly at the bottom is true",
+        M.atBottom({scrollTop: 100, scrollHeight: 200, clientHeight: 100}) === true);
+
+  check("B-B within FOLLOW_EPS of the bottom is true",
+        M.atBottom({scrollTop: 100 - (M.FOLLOW_EPS - 1), scrollHeight: 200, clientHeight: 100}) === true);
+
+  check("B-C one 12px line above the bottom is false",
+        M.atBottom({scrollTop: 100 - 12, scrollHeight: 200, clientHeight: 100}) === false);
+
+  check("B-D a box shorter than its viewport is true",
+        M.atBottom({scrollTop: 0, scrollHeight: 50, clientHeight: 100}) === true);
+
+  check("B-E non-finite or missing measurements return true rather than throwing",
+        M.atBottom({scrollTop: NaN, scrollHeight: 200, clientHeight: 100}) === true
+          && M.atBottom({}) === true
+          && M.atBottom(undefined) === true);
+})();
+
+// convoMessage (contracts/modal-js.md §11, C-A..C-E)
+(function () {
+  check("C-A row.entrypoint === sdk-ts yields the embedded-SDK sentence, whatever turnCount says",
+        (function () {
+          var withTurns = M.convoMessage({row: {entrypoint: "sdk-ts"}, ok: true, turnCount: 5});
+          var without = M.convoMessage({row: {entrypoint: "sdk-ts"}, ok: true, turnCount: 0});
+          return withTurns.message === without.message && withTurns.isError === false
+            && withTurns.message.indexOf("embedded-SDK") !== -1;
+        })());
+
+  check("C-B ok: true, turnCount: 0 on a non-sdk-ts row yields a no-turns-yet sentence distinct from C-A's",
+        (function () {
+          var noTurns = M.convoMessage({row: {entrypoint: "cli"}, ok: true, turnCount: 0});
+          var sdk = M.convoMessage({row: {entrypoint: "sdk-ts"}, ok: true, turnCount: 0});
+          return noTurns.isError === false && noTurns.message !== sdk.message;
+        })());
+
+  check("C-C ok: false yields the reason verbatim with isError: true, distinct from C-A/C-B",
+        (function () {
+          var failed = M.convoMessage({row: {entrypoint: "cli"}, ok: false, reason: "server not reachable", turnCount: 0});
+          return failed.isError === true && failed.message.indexOf("server not reachable") !== -1
+            && failed.message !== M.convoMessage({row: {entrypoint: "cli"}, ok: true, turnCount: 0}).message
+            && failed.message !== M.convoMessage({row: {entrypoint: "sdk-ts"}, ok: true, turnCount: 0}).message;
+        })());
+
+  check("C-D ok: true, turnCount > 0 yields message: null",
+        M.convoMessage({row: {entrypoint: "cli"}, ok: true, turnCount: 3}).message === null);
+
+  check("C-E no branch mentions a hang or the session's status",
+        (function () {
+          var all = [
+            M.convoMessage({row: {entrypoint: "sdk-ts"}, ok: true, turnCount: 0}),
+            M.convoMessage({row: {entrypoint: "cli"}, ok: true, turnCount: 0}),
+            M.convoMessage({row: {entrypoint: "cli"}, ok: false, reason: "x", turnCount: 0}),
+          ];
+          return all.every(function (r) {
+            return (r.message || "").toLowerCase().indexOf("hung") === -1
+              && (r.message || "").toLowerCase().indexOf("status") === -1;
+          });
+        })());
+})();
+
+// askModel (contracts/modal-js.md §10, A-A..A-E)
+(function () {
+  var questions = [{text: "proceed?", options: ["yes", "no"]}];
+
+  check("A-A a row with questions yields kind: questions, untruncated, and a how naming both phrases",
+        (function () {
+          var m = M.askModel({sid: "s", questions: questions});
+          return m.kind === "questions" && m.questions === questions
+            && m.how.indexOf("queued behind it") !== -1 && m.how.indexOf("does not answer it") !== -1;
+        })());
+
+  check("A-B no questions and sev === 4 yields kind: dialog with a how distinct from A-A's",
+        (function () {
+          var q = M.askModel({sid: "s", questions: questions});
+          var d = M.askModel({sid: "s", sev: 4, note: "approve the plan"});
+          return d.kind === "dialog" && d.note.indexOf("approve the plan") !== -1 && d.how !== q.how;
+        })());
+
+  check("A-C no questions and sev !== 4 yields kind: none and no sentences at all",
+        (function () {
+          var m = M.askModel({sid: "s", sev: 1});
+          return m.kind === "none" && m.note === null && m.how === "" && m.questions.length === 0;
+        })());
+
+  check("A-D row: null yields kind: none",
+        M.askModel(null).kind === "none");
+
+  check("A-E a 4KB question and a fifteen-option question are returned whole",
+        (function () {
+          var big = new Array(4096 + 1).join("x");
+          var opts = [];
+          for (var i = 0; i < 15; i++) opts.push("option " + i);
+          var m = M.askModel({sid: "s", questions: [{text: big, options: opts}]});
+          return m.questions[0].text.length === big.length && m.questions[0].options.length === 15;
+        })());
+})();
+
+// sendModel (contracts/modal-js.md §9, N-A..N-C)
+(function () {
+  var row = {sid: "s1", name: "web-app"};
+
+  check("N-A canSend: false yields state: disabled with a reason naming --read-only",
+        (function () {
+          var m = M.sendModel({row: row, canSend: false});
+          return m.state === "disabled" && m.reason.indexOf("--read-only") !== -1;
+        })());
+
+  check("N-B canSend: true with a row yields state: ready, reason: null",
+        (function () {
+          var m = M.sendModel({row: row, canSend: true});
+          return m.state === "ready" && m.reason === null;
+        })());
+
+  check("N-C row: null yields state: disabled with a reason distinct from N-A's",
+        (function () {
+          var noRow = M.sendModel({row: null, canSend: true});
+          var noGate = M.sendModel({row: row, canSend: false});
+          return noRow.state === "disabled" && noRow.reason !== noGate.reason;
+        })());
+})();
+
+// feedLines / goneText (contracts/modal-js.md §6, F-A..F-H)
+(function () {
+  var down = M.feedLines({trust: "feed_down", reason: "HTTP 500", dataAge: 42, unreadable: 0});
+  var warm = M.feedLines({trust: "warming", reason: null, dataAge: null, unreadable: null});
+  var ok   = M.feedLines({trust: "ok", reason: null, dataAge: 3, unreadable: null});
+
+  check("a feed that is down names the reason it gave, verbatim",
+        down.mainKind === "down" && down.main.indexOf("HTTP 500") >= 0, down.main);
+  check("and states how old the readings still on screen are",
+        down.main.indexOf("42s") >= 0, down.main);
+  check("a warming feed says nothing has been collected yet, and states no age",
+        warm.mainKind === "warming" && warm.main.indexOf("first snapshot") >= 0
+        && !/\d/.test(warm.main), warm.main);
+  // Principle XII: a line that appears on every refresh to say things are fine
+  // is a line people stop reading, and then it is not there when it matters.
+  check("a healthy feed says nothing at all",
+        ok.main === "" && ok.mainKind === "", JSON.stringify(ok));
+
+  // F-D/F-E: additive, never folded into the main sentence.
+  var okUnread = M.feedLines({trust: "ok", unreadable: 2});
+  var downUnread = M.feedLines({trust: "feed_down", reason: "boom", dataAge: 9, unreadable: 1});
+  check("unreadable rows are reported on a healthy feed",
+        okUnread.unreadable.indexOf("2 registry file") === 0, okUnread.unreadable);
+  check("and on a broken one too — it is an additive fact, not a consequence",
+        downUnread.unreadable !== "" && downUnread.main.indexOf("registry") < 0,
+        downUnread.main + " / " + downUnread.unreadable);
+  check("and never as a substring of the main sentence",
+        okUnread.main.indexOf(okUnread.unreadable) < 0, okUnread.main);
+  check("zero, null and undefined unreadable rows produce no sentence",
+        M.feedLines({trust: "ok", unreadable: 0}).unreadable === ""
+        && M.feedLines({trust: "ok", unreadable: null}).unreadable === ""
+        && M.feedLines({trust: "ok"}).unreadable === "",
+        JSON.stringify([M.feedLines({trust: "ok", unreadable: 0}).unreadable]));
+
+  // F-H: an absent reading must not surface as null, undefined or 0s.
+  var sparse = JSON.stringify([M.feedLines({trust: "feed_down"}),
+                               M.feedLines({trust: "warming"}),
+                               M.feedLines({trust: "ok"})]);
+  check("no branch prints null, undefined or a fabricated zero for a missing reading",
+        !/null|undefined|NaN/.test(sparse), sparse);
+
+  // F-F
+  var gone = M.goneText("web-app-fc", "abc-123");
+  check("a session gone from the snapshot is named, with the command that reopens it",
+        gone.indexOf("web-app-fc") === 0 && gone.indexOf("claude --resume abc-123") > 0, gone);
+
+  // F-G/SC-009: five renderings, pairwise distinct, no shared leading clause.
+  var five = [down.main, warm.main, ok.main, okUnread.unreadable, gone];
+  var uniq = {}, dupes = 0, i;
+  for (i = 0; i < five.length; i++) {
+    if (uniq[five[i]]) dupes++;
+    uniq[five[i]] = 1;
+  }
+  check("the five feed renderings are pairwise distinct", dupes === 0, five.join(" // "));
+  var leads = five.filter(function (s) { return s !== ""; })
+                  .map(function (s) { return s.split(" ").slice(0, 3).join(" "); });
+  check("and share no leading clause, so which one you are reading is never in doubt",
+        new Set(leads).size === leads.length, leads.join(" // "));
+
+  // ⚠️ A missing row means either the session left or the read failed. Saying
+  // "it is gone" on a failed read invents an exit (principle VI).
+  var subj = {name: "web-app-fc", sid: "abc-123"};
+  var goneOnOk = M.panel({row: null, subject: subj, cond: {trust: "ok"}});
+  var goneOnDown = M.panel({row: null, subject: subj,
+                            cond: {trust: "feed_down", reason: "boom", dataAge: 5}});
+  check("a session missing from a trustworthy snapshot is reported as gone",
+        goneOnOk.gone !== null, String(goneOnOk.gone));
+  check("but a broken feed is never evidence that a session exited",
+        goneOnDown.gone === null && goneOnDown.feed.mainKind === "down",
+        String(goneOnDown.gone));
+})();
+
+// The export surface (contracts/modal-js.md §13). Asserted as a set, so a
+// function that is written but never exported — or exported and then dropped
+// in a refactor — fails here rather than in a browser.
+(function () {
+  var want = ["FOLLOW_EPS", "TRANSCRIPT_N", "dur", "panel", "statLines",
+              "edgesFor", "feedLines", "goneText", "atBottom", "killModel",
+              "sendModel", "askModel", "convoMessage"];
+  var missing = want.filter(function (k) { return !(k in M); });
+  check("every name the contract lists is exported", missing.length === 0,
+        "missing: " + missing.join(", "));
+  var callable = want.filter(function (k) {
+    return typeof M[k] === "function" || typeof M[k] === "number";
+  });
+  check("and each is callable or a constant, not an accidental undefined",
+        callable.length === want.length,
+        want.filter(function (k) { return callable.indexOf(k) < 0; }).join(", "));
+})();
+
+process.stdout.write(out.join("\n") + "\n");
+MODALJS
+
+  while IFS='|' read -r status name detail; do
+    [ -z "$status" ] && continue
+    if [ "$status" = "PASS" ]; then
+      t_pass "$name"
+    else
+      t_fail "$name" "$detail"
+    fi
+  done < <(node "$WORK/modal-check.js" "$ROOT/web/modal.js" 2>&1)
+else
+  t_skip "modal module" "node not installed"
+fi
+
+
 # =============================================================== markdown ====
 printf '\nmarkdown\n'
 #
@@ -3039,10 +3629,17 @@ fi
 printf '\n%s passed, %s failed' "$pass" "$fail"
 [ "$skipped" -gt 0 ] && printf ', %s skipped' "$skipped"
 printf '\n'
-if [ $((pass + fail)) -lt "$TALLY_FLOOR" ]; then
+floor="$TALLY_FLOOR"
+if command -v node >/dev/null 2>&1; then
+  floor=$((floor + TALLY_FLOOR_NODE))
+fi
+if [ $((pass + fail)) -lt "$floor" ]; then
   printf '\n  \033[31m✗\033[0m only %s assertions were COUNTED, expected at least %s.\n' \
-    "$((pass + fail))" "$TALLY_FLOOR"
-  printf '    Assertions are running but not registering.\n\n'
+    "$((pass + fail))" "$floor"
+  printf '    Assertions are running but not registering.\n'
+  command -v node >/dev/null 2>&1 \
+    || printf '    (node is absent, so the five module sections were skipped and the\n     lower floor applied — this is not that.)\n'
+  printf '\n'
   exit 1
 fi
 [ "$fail" -eq 0 ] || exit 1
