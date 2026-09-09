@@ -147,6 +147,26 @@ produced a specific wrong output that someone believed.
   restore. An assertion that passes against a broken implementation is worse
   than none, because it is counted as coverage. Add a row to the mutation table
   in `README.md`.
+- **And mutation-check every check, not just the ones in `tests/run.sh`.** The
+  rule above reads as though it were about the suite, and that reading is how a
+  whole day's worth of broken checks got trusted. It applies to anything whose
+  answer you are about to believe: a `verify-ui` check, a `grep` that gates a
+  decision, a `pgrep` in a wait loop, a one-off diagnostic. Before trusting one,
+  make it report the failure you are looking for — or establish that it can.
+  Every one of these was written, run, and believed here:
+
+  | The check | What it actually did |
+  |---|---|
+  | `grep -c 'calc(100vh -'` guarding a layout fix | failed on the comment explaining why the guard exists |
+  | `getBBox()` overlap between labels and figures | measured each element in its own local space, so everything sat at (0,0) and 14 collisions were reported on a map with none |
+  | "has text but zero rendered width" | flagged `.rsel`, which is `display:none` until selected, seven times |
+  | `pgrep -f "bash ./bin/ccwatch verify-ui"` in an until-loop | matched its own shell's command line, so the loop could never exit |
+  | four successive fixes to the ETag assertions | three of them tuned timings under a theory of the race that had never been checked against what the validator actually covers |
+
+  The shape is always the same: a check is trusted because it is *green*, when
+  green and broken are indistinguishable until you have seen it go red on
+  purpose. A check that has never failed has not been tested, it has only been
+  run.
 - **Fixtures must be able to fail.** A fixture where the behaviour under test
   could not have succeeded anyway will pass either way — that has happened here
   (the de-duplication assertion) and is a test defect.

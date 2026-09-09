@@ -1045,7 +1045,9 @@ registry and transcripts; `CCWATCH_FAKE_PS` substitutes the liveness probe,
 without which no fabricated pid is ever live and every row would be filtered
 out before reaching the classification — the part most worth testing.
 
-**Mutation-checked.** Every assertion was confirmed to fail against an
+**Mutation-checked.** Rows marked `(verify-ui)` were confirmed against
+`ccwatch verify-ui`, which renders the pages in a browser rather than reading
+them; the rest are `tests/run.sh`. Every assertion was confirmed to fail against an
 implementation broken in the specific way it describes:
 
 | Mutation | Caught by |
@@ -1092,6 +1094,8 @@ implementation broken in the specific way it describes:
 | remove `web/md.js` from the web directory | 1 |
 | revert the idle gate so collection never stops when nobody reads `/api/state` | 4 |
 | latch the idle gate, so collection stops but a read never resumes it | 2 |
+| disable the cold-start guard, so the map opens on fit-to-world where every figure is `display:none` | 1 (verify-ui) |
+| drop `user-select:none` from `#world`, so a drag beginning on a label can select text | 1 (verify-ui) |
 | add a second `setInterval` to a page instead of routing through the shared scheduler | 1 |
 | include `ages` in the ETag hash, so no two reads ever share a validator | 1 |
 | restore the old `snapshot_ok()` fabrication of an empty result on failure | 3 |
