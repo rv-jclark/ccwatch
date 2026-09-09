@@ -35,7 +35,7 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # are the node-gated markdown block, so a host without `node` counts 216 — the
 # floor has to sit below that, not below the full count, or the suite fails on
 # a machine that is merely missing an optional tool.
-TALLY_FLOOR=345
+TALLY_FLOOR=455
 
 assert_contains() { case "$1" in *"$2"*) t_pass "$3";; *) t_fail "$3" "expected to contain: $2";; esac; }
 assert_not_contains() { case "$1" in *"$2"*) t_fail "$3" "should NOT contain: $2";; *) t_pass "$3";; esac; }
@@ -480,6 +480,81 @@ _res4=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-empty" CCWATCH_HOME="$
         NO_COLOR=1 "$CCWATCH" resume 2>&1)
 assert_not_contains "$_res4" "ffffffff-0000-0000-0000-000000000001" \
   "a sidechain at the scanned depth is rejected on its content too"
+# --- FR-008–FR-010: the roster's order is the payload's own order -----------
+# The roster (web/roster.js) contains no comparator (data-model.md §3, D2) —
+# these assertions are on the ONE place the order is actually decided, so a
+# regression there is caught before it ever reaches the panel.
+printf '\nordering\n'
+ORD="$WORK/ordering-repo"
+mkdir -p "$ORD"
+
+# (1) five sessions, one per severity, sort strictly descending by
+# max(sev, psev).
+mksess 9020 90000001-0000-0000-0000-000000000001 sev-waiting "$ORD" waiting cli needsinput
+mksess 9021 90000002-0000-0000-0000-000000000001 sev-notranscript "$ORD" busy cli
+mksess 9022 90000003-0000-0000-0000-000000000001 sev-busy "$ORD" busy cli
+mktrans 90000003-0000-0000-0000-000000000001 30
+mksess 9023 90000004-0000-0000-0000-000000000001 sev-shell "$ORD" shell cli
+mktrans 90000004-0000-0000-0000-000000000001 30
+mksess 9024 90000005-0000-0000-0000-000000000001 sev-idle "$ORD" idle cli
+mktrans 90000005-0000-0000-0000-000000000001 30
+mkps 9020 "0:30.00" >  "$WORK/ps-ord"
+mkps 9021 "0:30.00" >> "$WORK/ps-ord"
+mkps 9022 "0:30.00" >> "$WORK/ps-ord"
+mkps 9023 "0:30.00" >> "$WORK/ps-ord"
+mkps 9024 "0:30.00" >> "$WORK/ps-ord"
+_ord=$(ccwatch_json "$WORK/ps-ord")
+assert_eq "$(printf '%s' "$_ord" \
+  | jq -r '[.sessions[] | select(.name | startswith("sev-")) | .name] | join(",")')" \
+  "sev-waiting,sev-notranscript,sev-busy,sev-shell,sev-idle" \
+  "sessions at severities 4, 3, 2, 1, 0 sort descending by max(sev, psev)"
+rm -f "$FH/sessions/9020.json" "$FH/sessions/9021.json" "$FH/sessions/9022.json" \
+      "$FH/sessions/9023.json" "$FH/sessions/9024.json"
+
+# (2)+(3) two rows tied on max(sev, psev) — one a genuinely waiting session
+# with a modest `waited`, the other an idle session whose pipeline stopped to
+# ask a question and has been quiet far longer. The tie-break is the raw
+# number (data-model.md §3 O1: `-(waited // quiet // 0)`), so the bigger
+# number wins whichever field it came from — and a needs_input pipeline never
+# rewrites the session's own token.
+mksess 9025 90000006-0000-0000-0000-000000000001 tie-waited "$ORD" waiting cli needsinput
+mksess 9026 90000007-0000-0000-0000-000000000001 tie-needsinput "$ORD" idle cli
+mktrans 90000007-0000-0000-0000-000000000001 800
+FSPEC2="$ORD/specs/002-tie/.pipeline"
+mkdir -p "$FSPEC2"
+cat > "$FSPEC2/state.json" <<EOF
+{"version":1,"feature_dir":"$ORD/specs/002-tie","branch":"002-tie",
+ "phases":{"plan":{"status":"needs_input","session_id":"90000007-0000-0000-0000-000000000001","model":"opus","cost_usd":0}}}
+EOF
+mkps 9025 "0:30.00" >  "$WORK/ps-tie"
+mkps 9026 "0:30.00" >> "$WORK/ps-tie"
+_tie=$(ccwatch_json "$WORK/ps-tie")
+assert_eq "$(printf '%s' "$_tie" \
+  | jq -r '[.sessions[] | select(.name | startswith("tie-")) | .name] | join(",")')" \
+  "tie-needsinput,tie-waited" \
+  "tied on max(sev, psev), the row with the larger waited/quiet number sorts first regardless of which field carried it"
+assert_eq "$(printf '%s' "$_tie" | jq -r '.sessions[] | select(.name=="tie-needsinput") | .token')" \
+  "idle" "a needs_input pipeline on an idle session sorts with the waiting rows via psev while its own token stays idle"
+assert_eq "$(printf '%s' "$_tie" | jq -r '.sessions[] | select(.name=="tie-needsinput") | .psev')" \
+  "4" "psev, not sev, is what pulled the idle session up to the waiting tier"
+rm -f "$FH/sessions/9025.json" "$FH/sessions/9026.json"
+
+# (4) two rows tied on every ordering field: the same order on two
+# consecutive runs, not merely a plausible-looking one.
+mksess 9027 90000008-0000-0000-0000-000000000001 stable-a "$ORD" idle cli
+mktrans 90000008-0000-0000-0000-000000000001 30
+mksess 9028 90000009-0000-0000-0000-000000000001 stable-b "$ORD" idle cli
+mktrans 90000009-0000-0000-0000-000000000001 30
+mkps 9027 "0:30.00" >  "$WORK/ps-stable"
+mkps 9028 "0:30.00" >> "$WORK/ps-stable"
+_stab_names() { printf '%s' "$(ccwatch_json "$WORK/ps-stable")" \
+  | jq -r '[.sessions[] | select(.name | startswith("stable-")) | .name] | join(",")'; }
+_stab1=$(_stab_names)
+_stab2=$(_stab_names)
+assert_eq "$_stab1" "$_stab2" \
+  "two rows tied on every ordering field produce the same order across two consecutive ccwatch --json runs"
+rm -f "$FH/sessions/9027.json" "$FH/sessions/9028.json"
+
 # ============================================================== statusline ===
 printf '\nusage feed\n'
 
@@ -1396,11 +1471,94 @@ assert_eq "$(awk -v a="$_ih_legend_line" -v b="$_ih_tick_line" 'BEGIN{print (a>0
 assert_contains "$(grep '\.innerHTML *=' "$ROOT/web/map.html" | grep -v legend)" "CCWATCH_MD.render" \
   "the one refresh-reachable innerHTML write is the turn body, filled from md.js's escape-first render"
 
+# FR-016/FR-017 (contracts/page-roster.md §1/§4): the roster's listbox, its
+# row template and its keydown binding, checked statically so no browser is
+# needed to know a screen reader would see the right roles.
+assert_contains "$_maphtml" 'list.setAttribute("role", "listbox")' \
+  "#rosterlist carries role=\"listbox\""
+_makerow_js=$(awk '/^function makeRow\(sid\)/,/^\}/' "$ROOT/web/map.html")
+assert_contains "$_makerow_js" 'el.setAttribute("role", "option")' \
+  "the .rrow template carries role=\"option\""
+assert_contains "$_makerow_js" 'el.tabIndex' \
+  "and a tabindex, for roving focus"
+assert_contains "$_maphtml" 'rosterEls.list.addEventListener("keydown"' \
+  "the roster's keydown listener is bound to #rosterlist"
+assert_not_contains "$_maphtml" 'document.addEventListener("keydown"' \
+  "and never to document, so it cannot also catch the map's own arrow keys"
+assert_contains "$_world_label" "companion" \
+  "FR-013: #world's aria-label still names itself a companion view of the agent list"
+assert_contains "$_world_label" "Arrow keys" \
+  "and still names the keys (unchanged by this story)"
+
+# contracts/page-roster.md §6: the selection ring is its own rule, applied to
+# the outer .agent group (which applySelectionEmphasis toggles), never inside
+# .figart which updateFigure rebuilds wholesale every tick.
+assert_contains "$_maphtml" '.agent.selected .hit' \
+  "the selection ring is a distinct .agent.selected .hit rule"
+assert_not_contains "$(grep '\.agent\.sev' "$ROOT/web/map.html")" '.hit' \
+  "and no status-appearance .agent.sevN rule also targets .hit"
+_applyselemph_js=$(awk '/^function applySelectionEmphasis\(\)/,/^\}/' "$ROOT/web/map.html")
+assert_contains "$_applyselemph_js" 'g.classList.toggle("selected"' \
+  "applySelectionEmphasis toggles .selected directly on g (the outer .agent node), not on a child it queries"
+assert_not_contains "$_applyselemph_js" 'figart' \
+  "and never reaches into .figart, which updateFigure rebuilds wholesale every tick"
+
 # V16 (FR-047): the placeholder ships byte-identical in the source; the served
 # page substitutes a real token in its place (asserted against a live server
 # above, in the serve section).
 assert_contains "$(cat "$ROOT/web/map.html")" 'const SEND_TOKEN = "__CCWATCH_SEND_TOKEN__";' \
   "the SEND_TOKEN placeholder is byte-identical in the map.html source"
+
+# FR-028/D13 (contracts/page-roster.md §3, data-model.md §5): renderRoster's
+# call inside applyFeed must sit after VOLATILE is set for this tick, so
+# ctx/mem are withheld through that one gate and no second one.
+_applyfeed_js=$(awk '/^function applyFeed\(/,/^\}/' "$ROOT/web/map.html")
+_volatile_line=$(printf '%s\n' "$_applyfeed_js" | grep -n 'VOLATILE = cond.trust' | head -1 | cut -d: -f1)
+_renderroster_line=$(printf '%s\n' "$_applyfeed_js" | grep -n 'renderRoster(' | head -1 | cut -d: -f1)
+assert_eq "$(awk -v a="$_volatile_line" -v b="$_renderroster_line" 'BEGIN{print (a>0 && b>0 && a<b) ? "yes" : "no"}')" "yes" \
+  "applyFeed's renderRoster call sits after its VOLATILE = cond.trust === \"ok\" line"
+
+# FR-032 (contracts/page-roster.md §1): #rdivider carries the separator role,
+# a tabindex so the keyboard path reaches it, and the three aria-value*
+# attributes the width-by-keyboard path (T059) writes on every change.
+assert_contains "$_maphtml" 'divider.setAttribute("role", "separator")' \
+  "#rdivider carries role=\"separator\""
+assert_contains "$_maphtml" 'divider.setAttribute("tabindex", "0")' \
+  "and tabindex=\"0\", so it is reachable by Tab"
+assert_contains "$_maphtml" 'divider.setAttribute("aria-label", "Roster width")' \
+  "and an aria-label naming what it controls"
+assert_contains "$_maphtml" 'rosterEls.divider.setAttribute("aria-valuenow"' \
+  "setWidth writes aria-valuenow on every width change"
+assert_contains "$_maphtml" 'rosterEls.divider.setAttribute("aria-valuemin"' \
+  "and aria-valuemin"
+assert_contains "$_maphtml" 'rosterEls.divider.setAttribute("aria-valuemax"' \
+  "and aria-valuemax"
+
+# T008: the roster's stylesheet rules were required to land after the
+# existing #camera.eased prefers-reduced-motion block so that block stays the
+# first one in the file — the one the FR-045/SC-012 assertion above reads.
+_first_reduced_motion_line=$(grep -n '@media (prefers-reduced-motion: reduce)' "$ROOT/web/map.html" | head -1 | cut -d: -f1)
+_camera_eased_line=$(grep -n '#camera\.eased { transition: transform' "$ROOT/web/map.html" | head -1 | cut -d: -f1)
+assert_eq "$(awk -v a="$_first_reduced_motion_line" -v b="$_camera_eased_line" 'BEGIN{print (a>0 && b>0 && a>b) ? "yes" : "no"}')" "yes" \
+  "the first @media (prefers-reduced-motion: reduce) block in map.html still follows #camera.eased's rule, unchanged by the roster's own stylesheet additions"
+
+# FR-041: the roster is rendered event-driven, on a data change, a selection,
+# a focus move, or a width change — never on its own timer or animation
+# frame, so it cannot drift out of step with the map's one shared scheduler.
+assert_eq "$(grep -c requestAnimationFrame "$ROOT/web/map.html")" "0" \
+  "web/map.html still has no animation-frame loop after the roster panel was added"
+assert_eq "$(grep -c 'setInterval(' "$ROOT/web/map.html")" "1" \
+  "and still exactly one setInterval — the roster renders on calls from applyFeed/selection/focus/width, not a timer of its own"
+
+# T069 (contracts/page-roster.md, FR-036): the roster render path is guarded
+# so a page served without roster.js keeps working rather than throwing.
+# Mutation-checked by hand: with this guard line removed from web/map.html,
+# this assertion fails; restored, it passes again. Not exercised through a
+# live serve process here, because that would mean pointing a real server at
+# the suite's shared fixture directories mid-run, which corrupts state for
+# every section that follows (confirmed while writing this assertion).
+assert_contains "$_maphtml" 'if (!window.CCWATCH_ROSTER) return;' \
+  "renderRoster's own body is guarded by window.CCWATCH_ROSTER"
 
 # ============================================================ repo identity ==
 printf '\nrepo identity\n'
@@ -2261,6 +2419,429 @@ CAMERAJS
   done < <(node "$WORK/camera-check.js" "$ROOT/web/camera.js" 2>&1)
 else
   t_skip "camera arithmetic" "node not installed"
+fi
+
+
+# ============================================================ roster-module ===
+printf '\nroster-module\n'
+#
+# web/roster.js is the pure roster-row-shaping module for the docked agent
+# panel (contracts/roster-js.md). It lives in its own file for the same
+# reason web/md.js, web/plots.js and web/camera.js do: so these assertions
+# can require() it under node without a browser.
+if command -v node >/dev/null 2>&1; then
+  cat > "$WORK/roster-check.js" <<'ROSTERJS'
+var R = require(process.argv[2]);
+var out = [];
+function check(name, cond, detail) {
+  out.push((cond ? "PASS|" : "FAIL|") + name + "|" + (detail || ""));
+}
+
+// Seed: the module loads under node and exports an object.
+(function () {
+  check("seed require(roster.js) succeeds and exports an object",
+        typeof R === "object" && R !== null, typeof R);
+})();
+
+// rowFields (contracts/roster-js.md §2, R-A..R-K)
+(function () {
+  check("R-A word is row.token verbatim, including an unrecognised token",
+        R.rowFields({sid: "s", name: "n", token: "TELEPORTING"}, {}).word === "TELEPORTING");
+
+  check("R-B where is repo · branch when repo is set",
+        R.rowFields({sid: "s", name: "n", token: "idle", repo: "acme/checkout", branch: "main"}, {}).where
+          === "acme/checkout · main");
+  check("R-B where is exactly \"no repo\" when row.repo is null",
+        R.rowFields({sid: "s", name: "n", token: "idle", repo: null}, {}).where === "no repo");
+
+  check("R-C measure follows the waited row",
+        R.rowFields({sid: "s", name: "n", token: "waiting", note: "input needed", waited: 90}, {}).measure
+          === "input needed 1m");
+  check("R-C measure follows the quiet note row",
+        R.rowFields({sid: "s", name: "n", token: "HUNG?", note: "quiet", quiet: 700}, {}).measure
+          === "quiet 11m");
+  check("R-C measure falls back to a non-empty note",
+        R.rowFields({sid: "s", name: "n", token: "sdk", note: "no status published", quiet: 5}, {}).measure
+          === "no status published");
+  check("R-C measure falls back to \"<quiet> ago\" with no note",
+        R.rowFields({sid: "s", name: "n", token: "idle", note: "", quiet: 30}, {}).measure === "30s ago");
+
+  check("R-D a null quiet with no note and no waited yields no measure key at all — never 0s",
+        !("measure" in R.rowFields({sid: "s", name: "n", token: "idle", note: "", quiet: null}, {})));
+
+  check("R-E no ctx key when context is null",
+        !("ctx" in R.rowFields({sid: "s", name: "n", token: "busy", context: null}, {volatile: true})));
+  check("R-E no ctx key when used_percentage is null",
+        !("ctx" in R.rowFields({sid: "s", name: "n", token: "busy",
+            context: {used_percentage: null}}, {volatile: true})));
+  check("R-E no ctx key when not volatile, even with a real reading",
+        !("ctx" in R.rowFields({sid: "s", name: "n", token: "busy",
+            context: {used_percentage: 42}}, {volatile: false})));
+  check("R-E ctx present and floored when volatile with a real reading",
+        R.rowFields({sid: "s", name: "n", token: "busy",
+          context: {used_percentage: 42.9}}, {volatile: true}).ctx === "ctx 42%");
+
+  check("R-F no mem key when rss_mb is null",
+        !("mem" in R.rowFields({sid: "s", name: "n", token: "busy", rss_mb: null}, {volatile: true})));
+  check("R-F no mem key when not volatile, even with a real reading",
+        !("mem" in R.rowFields({sid: "s", name: "n", token: "busy", rss_mb: 200}, {volatile: false})));
+  check("R-F mem present when volatile with a real reading",
+        R.rowFields({sid: "s", name: "n", token: "busy", rss_mb: 200}, {volatile: true}).mem === "200MB");
+
+  check("R-G pipeline is a separate key from word, never concatenated",
+        (function () {
+          var f = R.rowFields({sid: "s", name: "n", token: "idle",
+            pipeline: {phase: "plan", status: "running", crashed: true}}, {});
+          return f.word === "idle" && f.pipeline === "plan/CRASHED" && f.word.indexOf("plan") === -1;
+        })());
+  check("R-H pipeline reads phase/CRASHED when crashed",
+        R.rowFields({sid: "s", name: "n", token: "idle",
+          pipeline: {phase: "plan", status: "running", crashed: true}}, {}).pipeline === "plan/CRASHED");
+  check("R-H pipeline reads phase/status when not crashed",
+        R.rowFields({sid: "s", name: "n", token: "idle",
+          pipeline: {phase: "plan", status: "needs_input", crashed: false}}, {}).pipeline === "plan/needs_input");
+
+  check("R-I an sdk-ts row carries its note and no invented measurement",
+        R.rowFields({sid: "s", name: "n", token: "sdk-ts", note: "cannot verify progress", quiet: null}, {}).measure
+          === "cannot verify progress");
+
+  check("R-J asks present only with a question, bounded to ASK_CHARS",
+        (function () {
+          var noQ = R.rowFields({sid: "s", name: "n", token: "waiting", questions: null}, {});
+          var longQ = "x".repeat(R.ASK_CHARS + 50);
+          var f = R.rowFields({sid: "s", name: "n", token: "waiting",
+            questions: [{question: longQ}]}, {});
+          return !("asks" in noQ) && f.asks.length === R.ASK_CHARS;
+        })());
+
+  check("R-K age is absent when row.age is null — never dur(null)'s \"-\" as a reading",
+        !("age" in R.rowFields({sid: "s", name: "n", token: "idle", age: null}, {})));
+  check("R-K age present as a duration when row.age is a number",
+        R.rowFields({sid: "s", name: "n", token: "idle", age: 90}, {}).age === "1m");
+
+  // FR-006 spot-check (quickstart.md §2): every absent reading absent, never
+  // 0/0%/0MB anywhere in the object.
+  check("FR-006 a row with everything null yields no ctx, no mem, no 0/0%/0MB anywhere",
+        (function () {
+          var f = R.rowFields({sid: "s", name: "n", token: "sdk-ts", repo: null, branch: null,
+            note: "cannot verify progress", quiet: null, waited: null, age: null,
+            context: null, rss_mb: null, pipeline: null, questions: null}, {volatile: true});
+          var s = JSON.stringify(f);
+          return !("ctx" in f) && !("mem" in f)
+            && s.indexOf("0%") === -1 && s.indexOf("0MB") === -1 && s.indexOf('"0"') === -1;
+        })());
+})();
+
+// titleText (contracts/roster-js.md §3, T-A, T-B)
+(function () {
+  var row = {sid: "s", name: "n", token: "busy", note: "quiet but cpu moving", waited: null,
+    quiet: 90, age: 300, pipeline: {phase: "plan", status: "running", crashed: false},
+    questions: [{question: "proceed?"}], context: {used_percentage: 50}, rss_mb: 100};
+  check("T-A titleText(row, true) contains every value rowFields produced",
+        (function () {
+          var f = R.rowFields(row, {volatile: true});
+          var t = R.titleText(row, true);
+          return t.indexOf(f.word) !== -1 && t.indexOf(f.measure) !== -1
+            && t.indexOf(f.pipeline) !== -1 && t.indexOf(f.age) !== -1
+            && t.indexOf(f.ctx) !== -1 && t.indexOf(f.mem) !== -1
+            && t.indexOf("ASKS: " + f.asks) !== -1;
+        })());
+  check("T-B titleText(row, false) contains no % and no MB",
+        R.titleText(row, false).indexOf("%") === -1 && R.titleText(row, false).indexOf("MB") === -1);
+})();
+
+// keysOf / reorderPlan (contracts/roster-js.md §4, O-A..O-E)
+(function () {
+  check("keysOf returns sids in arrival order, dropping any row with no sid",
+        JSON.stringify(R.keysOf([{sid: "a"}, {sid: "b"}, {}, {sid: "c"}])) === '["a","b","c"]');
+
+  check("O-A an unchanged order produces zero moves",
+        R.reorderPlan(["a", "b", "c"], ["a", "b", "c"]).length === 0);
+
+  check("O-B one row moving from last to first produces exactly one move",
+        R.reorderPlan(["a", "b", "c", "d"], ["d", "a", "b", "c"]).length === 1);
+
+  check("O-C a key in currentKeys but not wantedKeys produces no move for that key",
+        R.reorderPlan(["a", "b", "x"], ["b", "a"]).every(function (m) { return m.key !== "x"; }));
+
+  function applyPlan(current, plan) {
+    var seq = current.slice();
+    plan.forEach(function (m) {
+      var pos = seq.indexOf(m.key);
+      if (pos !== -1) seq.splice(pos, 1);
+      var idx = m.before == null ? seq.length : seq.indexOf(m.before);
+      seq.splice(idx === -1 ? seq.length : idx, 0, m.key);
+    });
+    return seq;
+  }
+  check("O-D applying the plan in order yields exactly wantedKeys",
+        (function () {
+          var current = ["a", "b", "c", "d"], wanted = ["c", "a", "d", "b"];
+          var plan = R.reorderPlan(current, wanted);
+          return JSON.stringify(applyPlan(current, plan)) === JSON.stringify(wanted);
+        })());
+
+  check("O-E a reversal of n keys produces at most n-1 moves",
+        (function () {
+          var current = ["a", "b", "c", "d", "e"];
+          var wanted = current.slice().reverse();
+          return R.reorderPlan(current, wanted).length <= current.length - 1;
+        })());
+})();
+
+// nextFocus / focusTarget (contracts/roster-js.md §4, K-A..K-E, D4)
+(function () {
+  var keys = ["a", "b", "c"];
+
+  check("K-A ArrowDown from the last row stays on the last row",
+        R.nextFocus(keys, "c", "ArrowDown") === "c");
+  check("K-B ArrowUp from the first row stays on the first row",
+        R.nextFocus(keys, "a", "ArrowUp") === "a");
+  check("ArrowDown moves to the next row",
+        R.nextFocus(keys, "a", "ArrowDown") === "b");
+  check("ArrowUp moves to the previous row",
+        R.nextFocus(keys, "c", "ArrowUp") === "b");
+  check("K-C Home returns the first key",
+        R.nextFocus(keys, "c", "Home") === "a");
+  check("K-C End returns the last key",
+        R.nextFocus(keys, "a", "End") === "c");
+  check("K-D a currentSid no longer in keys resolves to the first key",
+        R.nextFocus(keys, "gone", "ArrowDown") === "a");
+  check("K-E an empty keys list returns null for every key",
+        R.nextFocus([], "a", "ArrowDown") === null
+          && R.nextFocus([], null, "Home") === null);
+
+  check("focusTarget keeps prevSid when it is still present",
+        R.focusTarget("b", keys) === "b");
+  check("D4 focusTarget returns null when prevSid has been dropped",
+        R.focusTarget("gone", keys) === null);
+})();
+
+// resolveSelection / flyIdx (contracts/roster-js.md §5, S-A..S-I)
+(function () {
+  var sessions = [{sid: "a"}, {sid: "b"}];
+
+  check("S-A sid present in a trusted payload resolves to present",
+        R.resolveSelection("a", sessions, {trust: "ok"}).state === "present");
+  check("S-B sid absent from a trusted payload resolves to gone",
+        R.resolveSelection("z", sessions, {trust: "ok"}).state === "gone");
+  check("S-C sid absent while the feed is down resolves to unknown, not gone",
+        R.resolveSelection("z", sessions, {trust: "feed_down"}).state === "unknown");
+  check("S-D sid absent while warming resolves to unknown",
+        R.resolveSelection("z", sessions, {trust: "warming"}).state === "unknown");
+  check("S-E no stored sid resolves to none regardless of the condition",
+        R.resolveSelection(null, sessions, {trust: "ok"}).state === "none"
+          && R.resolveSelection(null, sessions, {trust: "feed_down"}).state === "none");
+  check("S-F sid present while the feed is down still resolves to present",
+        R.resolveSelection("a", sessions, {trust: "feed_down"}).state === "present");
+  check("S-G a malformed cond with no trust field is treated as untrusted, never ok",
+        R.resolveSelection("z", sessions, {}).state === "unknown");
+
+  check("S-H flyIdx(\"far\") is NEAR_IDX; flyIdx(\"mid\")/flyIdx(\"near\") are null",
+        R.flyIdx("far") === R.NEAR_IDX && R.NEAR_IDX === 5
+          && R.flyIdx("mid") === null && R.flyIdx("near") === null);
+
+  var camera = require(process.argv[3]);
+  check("S-I NEAR_IDX resolves to \"near\" in camera.js's levelFor from every prior level",
+        camera.levelFor(R.NEAR_IDX, null) === "near"
+          && camera.levelFor(R.NEAR_IDX, "far") === "near"
+          && camera.levelFor(R.NEAR_IDX, "mid") === "near"
+          && camera.levelFor(R.NEAR_IDX, "near") === "near");
+})();
+
+// Selection/width storage (contracts/roster-js.md §7, P-A..P-I)
+(function () {
+  var V = R.STORAGE_VERSION;
+
+  check("P-A unparseable JSON returns null and does not throw",
+        R.validateSelection("{not json") === null);
+  check("P-B a wrong storage version returns null",
+        R.validateSelection({v: V + 1, sid: "abc123"}) === null);
+  check("P-C a sid that is not session-id-shaped returns null",
+        R.validateSelection({v: V, sid: "not/a/sid!"}) === null);
+  check("P-C a session-id-shaped sid round-trips",
+        R.validateSelection({v: V, sid: "abc-123"}).sid === "abc-123");
+  check("P-E an array, null or a primitive returns null",
+        R.validateSelection([1, 2]) === null
+          && R.validateSelection(null) === null
+          && R.validateSelection("just a string, not json") === null);
+
+  check("P-F a throwing getItem returns null and flips persistence to unavailable",
+        (function () {
+          var throwing = function () { throw new Error("boom"); };
+          var before = R.persistence;
+          var out = R.loadSelection(throwing);
+          return out === null && R.persistence === "unavailable" && before !== undefined;
+        })());
+  check("P-G a throwing setItem flips persistence to unavailable and does not throw",
+        (function () {
+          var threw = false;
+          try { R.saveSelection(function () { throw new Error("boom"); }, "x"); }
+          catch (e) { threw = true; }
+          return !threw && R.persistence === "unavailable";
+        })());
+  check("P-H persistence never returns to ok once unavailable, even after a call that succeeds",
+        (function () {
+          var calls = 0;
+          R.saveSelection(function () { calls++; }, "x");
+          return R.persistence === "unavailable" && calls === 1;
+        })());
+  check("P-I saveSelection(setItem, null) writes a fresh record clearing the old sid",
+        (function () {
+          var written = null;
+          var freshSetItem = function (v) { written = v; };
+          R.saveSelection(freshSetItem, null);
+          if (written == null) return false;
+          var parsed = JSON.parse(written);
+          return parsed.sid === null && R.validateSelection(written) === null;
+        })());
+})();
+
+// statements (contracts/roster-js.md §8, data-model.md §5, C-A..C-I)
+(function () {
+  check("C-A feed_down names the reason and the measured age of the rows still shown",
+        (function () {
+          var s = R.statements({trust: "feed_down", reason: "ECONNREFUSED", dataAge: 125, unreadable: 0});
+          return s.main.indexOf("ECONNREFUSED") !== -1 && s.main.indexOf("2m") !== -1
+            && s.mainKind === "down";
+        })());
+  check("C-B warming says the first snapshot is still being taken and carries no age",
+        (function () {
+          var s = R.statements({trust: "warming", unreadable: 0});
+          return s.mainKind === "warming" && /\d/.test(s.main) === false;
+        })());
+  check("C-C unreadable: 3 states the count and names ccwatch doctor",
+        R.statements({trust: "ok", unreadable: 3}).unreadable.indexOf("3") !== -1
+          && R.statements({trust: "ok", unreadable: 3}).unreadable.indexOf("ccwatch doctor") !== -1);
+  check("C-D unreadable 0 or null is empty, never \"0 registry files\"",
+        R.statements({trust: "ok", unreadable: 0}).unreadable === ""
+          && R.statements({trust: "ok", unreadable: null}).unreadable === "");
+  check("C-E empty:true, trust:ok states there are no live sessions",
+        R.statements({trust: "ok", empty: true, unreadable: 0}).empty !== "");
+  // FR-029/SC-007 spot-check (quickstart.md §2): empty:true produces a
+  // sentence only when trust:"ok" — the exclusion is enforced inside
+  // statements() itself, whatever the caller passed for cond.empty.
+  check("C-F empty:true, trust:feed_down is withheld regardless of the caller's cond.empty",
+        R.statements({trust: "feed_down", reason: "x", dataAge: 1, empty: true, unreadable: 0}).empty === "");
+  check("C-G empty:true, trust:warming is withheld",
+        R.statements({trust: "warming", empty: true, unreadable: 0}).empty === "");
+  check("C-H the four sentences are pairwise distinct, and main/empty are never both non-empty",
+        (function () {
+          var down = R.statements({trust: "feed_down", reason: "x", dataAge: 1, unreadable: 0});
+          var warming = R.statements({trust: "warming", unreadable: 0});
+          var unreadable = R.statements({trust: "ok", unreadable: 3}).unreadable;
+          var empty = R.statements({trust: "ok", empty: true, unreadable: 0});
+          var strs = [down.main, warming.main, unreadable, empty.empty];
+          var uniq = {};
+          strs.forEach(function (s) { uniq[s] = true; });
+          return Object.keys(uniq).length === strs.length
+            && (down.empty === "" ) && (warming.empty === "") && (empty.main === "");
+        })());
+  check("C-I unreadable is additive: it may accompany the down sentence",
+        (function () {
+          var s = R.statements({trust: "feed_down", reason: "x", dataAge: 1, unreadable: 2});
+          return s.main !== "" && s.unreadable !== "";
+        })());
+})();
+
+// goneText (contracts/roster-js.md §8, C-J). statements() is US4's export
+// (Phase 6); once it lands the cross-check below runs for real, but the
+// invariant it enforces — the tombstone's leading clause is its own, never
+// "the feed"/"registry" wording — is checked either way so this assertion is
+// not vacuous while statements() does not yet exist.
+(function () {
+  var gone = R.goneText("s1", "alpha");
+  var goneLead = gone.split(" ").slice(0, 3).join(" ");
+
+  check("C-J the tombstone names the session, not the feed",
+        gone.indexOf("alpha") !== -1 && gone.toLowerCase().indexOf("the feed") === -1
+          && gone.toLowerCase().indexOf("registry") === -1);
+
+  if (typeof R.statements === "function") {
+    var statementsShapes = [
+      R.statements({trust: "feed_down", unreadable: 0}),
+      R.statements({trust: "warming", unreadable: 0}),
+      R.statements({trust: "ok", empty: true, unreadable: 0}),
+      R.statements({trust: "ok", empty: false, unreadable: 3}),
+    ];
+    check("C-J goneText shares no leading clause with any string statements() can produce",
+          statementsShapes.every(function (s) {
+            return [s.main, s.unreadable, s.empty].every(function (str) {
+              if (!str) return true;
+              var lead = String(str).split(" ").slice(0, 3).join(" ");
+              return lead !== goneLead;
+            });
+          }));
+  }
+})();
+
+// clampWidth/stacked (contracts/roster-js.md §6, W-A..W-F)
+(function () {
+  check("W-A a width below WIDTH_MIN clamps up",
+        R.clampWidth(10, 1200) === R.WIDTH_MIN);
+  check("W-B a width above WIDTH_MAX_PX clamps down",
+        R.clampWidth(9999, 2000) === R.WIDTH_MAX_PX);
+  check("W-C on a narrow window the fraction bound wins",
+        R.clampWidth(500, 900) === 405);
+  check("W-D a non-finite or non-number width returns WIDTH_DEFAULT",
+        R.clampWidth(NaN, 1200) === R.WIDTH_DEFAULT
+          && R.clampWidth("320", 1200) === R.WIDTH_DEFAULT
+          && R.clampWidth(Infinity, 1200) === R.WIDTH_DEFAULT);
+  check("W-E clampWidth is idempotent",
+        (function () {
+          var once = R.clampWidth(500, 900);
+          return R.clampWidth(once, 900) === once;
+        })());
+  check("W-F the result never exceeds windowWidth for any windowWidth >= WIDTH_MIN / WIDTH_MAX_FRAC",
+        (function () {
+          var widths = [500, 1000, 2000, 4000];
+          return widths.every(function (ww) {
+            return R.clampWidth(99999, ww) <= ww;
+          });
+        })());
+  check("stacked: below STACK_BREAKPOINT is stacked",
+        R.stacked(500) === true);
+  check("stacked: at or above STACK_BREAKPOINT is not stacked",
+        R.stacked(720) === false && R.stacked(1200) === false);
+})();
+
+// width storage (contracts/roster-js.md §7, P-D plus the shared persistence
+// flag from T035's selection storage)
+(function () {
+  check("P-D validateWidth returns null for a non-finite or non-number w",
+        R.validateWidth({v: R.STORAGE_VERSION, w: "320"}) === null
+          && R.validateWidth({v: R.STORAGE_VERSION, w: NaN}) === null);
+  check("P-D validateWidth accepts a real number w at the current version",
+        R.validateWidth({v: R.STORAGE_VERSION, w: 400}).w === 400);
+  check("width storage round-trips through saveWidth/loadWidth",
+        (function () {
+          var store = {};
+          R.saveWidth(function (v) { store.w = v; }, 444);
+          return R.loadWidth(function () { return store.w; }).w === 444;
+        })());
+  check("saveWidth with a throwing setItem does not throw",
+        (function () {
+          var threw = false;
+          try {
+            R.saveWidth(function () { throw new Error("quota"); }, 400);
+          } catch (e) { threw = true; }
+          return !threw;
+        })());
+})();
+
+process.stdout.write(out.join("\n") + "\n");
+ROSTERJS
+
+  while IFS='|' read -r status name detail; do
+    [ -z "$status" ] && continue
+    if [ "$status" = "PASS" ]; then
+      t_pass "$name"
+    else
+      t_fail "$name" "$detail"
+    fi
+  done < <(node "$WORK/roster-check.js" "$ROOT/web/roster.js" "$ROOT/web/camera.js" 2>&1)
+else
+  t_skip "roster module" "node not installed"
 fi
 
 

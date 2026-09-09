@@ -497,6 +497,139 @@ change every tick (context fill, gauge percentages, host-pressure numbers) are
 withheld, because a stale percentage read as current is a false claim, and
 "no sessions" and "can't tell" are different facts that must read differently.
 
+### Why volatile ordering lives in the roster, not the map
+
+`/map` also docks a roster panel: one row per session, in the payload's own
+needs-you-first order (`bin/ccwatch:953` sorts `-max(sev, psev)`, then
+`-(waited // quiet // 0)`), each row carrying its name, repo/branch, status
+word and the measurement behind it, as text. `web/roster.js` shapes that text
+— `rowFields`, `titleText`, `keysOf`, `reorderPlan` — and contains **no
+comparator of its own**: the order it reconciles `#rosterlist` to is exactly
+`s.sessions`'s own array order, nothing recomputed and nothing re-derived.
+
+The reason the ordering has to live somewhere that never touches a
+coordinate is the bug an earlier version of this page actually had: severity
+was once folded into the same per-tick sort that decided a district's
+position, and a status change on one session reordered the CSS grid — moving
+a whole project's district to the front of the page and dragging every other
+project's district along with it on the very same repaint. A monitoring view
+that rearranges itself on every refresh answers "did that agent move, or do I
+misremember" with "sometimes, whenever the severity sort changes," which is
+the one question this view exists to never raise (see "The city's geography
+comes from identity, not from a layout pass" above). Splitting the roster's
+ordering into its own reconciled list — keyed by `sid`, moved by
+`reorderPlan`'s minimal `insertBefore` plan, never a wholesale rebuild — means
+a status change can reorder *rows in a list* without ever being in a position
+to move a *figure*, because nothing in `web/plots.js`'s placement ever reads
+a severity, a status word or an ordering value at all.
+
+### The roster is operable without a mouse or without sight
+
+Every row `web/roster.js`'s `rowFields`/`titleText` can produce is also a row
+in `#rosterlist`, `role="listbox"` with each `.rrow` carrying `role="option"`
+and a roving `tabindex`: exactly one row is reachable by `Tab` at a time, moved
+by `ArrowDown`/`ArrowUp`/`Home`/`End` (`nextFocus`, clamped — never wrapping
+past the first or last row) and restored **by `sid`**, not by position, after
+a tick reorders the list (`focusTarget`), so a status change mid-navigation
+never drops focus onto the wrong agent or out of the list altogether. `Enter`
+selects the focused row. The listener is bound to `#rosterlist` itself, never
+`document`, so the roster's arrow keys can never pan the map and the map's own
+arrow-key panning (bound to `#world`) can never move roster focus — two
+independent keyboard surfaces on the same page, each scoped to the element it
+operates.
+
+`#world`'s own `aria-label` now names itself a companion view of the agent
+list, rather than the sole carrier of the page's meaning: a screen reader
+lands on the roster and hears every claim the figures draw — the status word,
+the measurement, the repo/branch — as text, before it ever reaches the map.
+
+### Selecting a row flies the camera there, and remembers the choice
+
+Clicking a roster row — or activating it with `Enter` — marks that row
+selected, outlines the matching figure with its own rule (`.agent.selected
+.hit`, applied to the outer `<g class="agent">` node `applySelectionEmphasis`
+toggles, never to the `.figart` group `updateFigure` rebuilds wholesale every
+tick, so a status change can never clobber the ring mid-flight), and flies
+`CCWATCH_MAP_CAMERA` to that figure's own `cx`/`cy` — the same coordinates
+`web/plots.js` already computed, read once out of `drawWorld`'s figure loop
+rather than recomputed. This is the camera module's first caller: entry 003
+shipped it with none. The fly only fires when the selection actually changes
+(`sid !== lastFlownSid`), so a tick that merely re-renders the same selection
+never re-triggers a flight, and it reads
+`matchMedia("(prefers-reduced-motion: reduce)")` at the moment of the fly
+rather than trusting the stylesheet alone — a `transition: none` fires no
+`transitionend`, which would leave the camera's `.eased` class on forever.
+
+The selection persists across a reload the same way the camera's own viewport
+does — one JSON record, one storage version, validated on the way back in —
+and is *not* the same file `ccwatch resume` reads: this feature reads and
+writes neither `~/.claude/ccwatch/roster.json` (the `write_roster` record) nor
+anything else under `~/.claude/ccwatch/`, only the browser's own storage. If
+the stored session has since left the machine's session list, the roster says
+so with its own sentence, worded so it shares no leading clause with any of
+`statements()`'s four failure sentences — "that session is gone" and "the feed
+is gone" describe different facts and must never be mistaken for each other
+mid-read. That tombstone pins above the row list, carries a real `<button>` to
+dismiss it, and never blocks the remaining rows from continuing to render.
+
+A session absent from a payload the map does not yet trust (`warming`) or has
+lost entirely (`feed_down`) resolves to "unknown", never "gone" — a feed that
+cannot be read is not evidence that a session exited, only that this run has
+nothing to say about it either way.
+
+### The roster states when it cannot be believed, in four distinct sentences
+
+The map's own trust model (`computeFeedCondition`) already decides, every
+tick, whether the payload is `ok`, `feed_down`, or `warming`, and whether
+`s.sessions` came back empty. `statements(cond)` reads that *same* object —
+never a second derivation of trust — and maps it to the roster's own wording,
+because two renderings that compute trust separately will eventually disagree,
+and there is no way to tell which one is lying:
+
+- **feed down** — the reason the read failed, and the measured age of the
+  rows still shown, because those rows are retained, not current.
+- **warming** — the first snapshot has not landed yet; no rows are listed at
+  all, because there is nothing yet to state an order over.
+- **N registry files unreadable** — additive, can accompany any of the other
+  three, and disappears the moment `cond.unreadable` is `0` or absent, never
+  printed as `"0 registry files"`.
+- **no live sessions** — stated only when the feed is `ok` and genuinely
+  reports zero sessions. This exclusion is enforced *inside* `statements()`
+  itself, not by its caller, so a warming or down tick can never be misread as
+  "nothing is running" — those are different facts.
+
+Nothing here is latched: `cond` is recomputed fresh every tick from the read
+outcome and the body, so a good snapshot right after a down one clears the
+statement and restores `ctx`/`mem` on that same repaint, through the same
+`VOLATILE` gate `applyFeed` already sets before calling `renderRoster` — one
+gate, read once, not two gates that could drift apart.
+
+### The roster's width is yours, not the map's
+
+The panel is dragged wider or narrower from `#rdivider`, a `role="separator"`
+between it and `#wrap`, reachable by `Tab` and operable with `ArrowLeft`/
+`ArrowRight` (`Shift` for the larger step) and `Home`/`End` to the clamped
+extremes — the same three `aria-value*` attributes a native range control
+carries, kept current on every change rather than set once at load.
+
+`clampWidth(w, windowWidth)` is the one place a width is ever bounded: never
+below `WIDTH_MIN`, never above the smaller of a fixed pixel ceiling and a
+fraction of the current window, so a panel sized against a wide monitor does
+not swallow a laptop's viewport on the next load. The stored width is
+re-clamped against *this* load's `innerWidth`, not the one it was saved
+under. Below `STACK_BREAKPOINT` the stored width is not applied and the
+divider is hidden at all — `stacked(windowWidth)` reads the same constant the
+`@media` rule does, so the two can never disagree about where the panel
+stacks above the map instead of beside it. Changing the width calls
+`reflowWorld()`, never `fitView`, because a drag is the visitor choosing how
+much city to see, not a request to re-frame it.
+
+The width persists across a reload through the same one-way `persistence`
+flag and JSON-record shape the selection uses (`validateWidth`/`loadWidth`/
+`saveWidth`): a wrong storage version or a non-finite `w` is not a reading to
+clamp, it falls back to `WIDTH_DEFAULT` rather than propagating `NaN` into
+the stylesheet.
+
 ### The transcript inspector renders markdown
 
 Clicking a figure opens the recent conversation before it offers the reply box,
@@ -846,6 +979,38 @@ implementation broken in the specific way it describes:
 | accept a stored viewport with a non-finite `tx`/`ty` | 2 |
 | skip the once-only latch and re-flip `persistence` on a second throwing storage call | 2 |
 | let `intersects` report an overlap for a viewport far outside the world | 1 |
+| drop the `volatile` gate from `rowFields`'s `ctx`/`mem` withholding | 1 |
+| make `reorderPlan` always return no moves | 1 |
+| sort sessions by `sev` alone instead of `max(sev, psev)` | 1 |
+| let `nextFocus`'s `ArrowDown`/`ArrowUp` wrap instead of clamping at the ends | 2 |
+| let `focusTarget` return `prevSid` even when it has dropped out of `wantedKeys` | 1 |
+| drop `role="listbox"` from `#rosterlist` | 1 |
+| drop `role="option"` or the roving `tabindex` from the `.rrow` template | 2 |
+| bind the roster's keydown handling to `document` instead of `#rosterlist` | 2 |
+| drop the "companion view" clause from `#world`'s `aria-label` | 1 |
+| resolve a session absent from a `feed_down`/`warming` payload to `gone` instead of `unknown` | 2 |
+| let `flyIdx` return a rung for `"mid"`/`"near"` instead of only `"far"` | 1 |
+| let `validateSelection` accept a `sid` that is not session-id-shaped | 1 |
+| re-flip `persistence` back to `"ok"` after a throwing selection read/write | 2 |
+| let `saveSelection(setItem, null)` leave the previous sid's record in place | 1 |
+| word the tombstone with the same leading clause as a `statements()` sentence | 1 |
+| merge the selection ring into a status-appearance `.agent.*` rule instead of its own `.agent.selected .hit` | 1 |
+| drop the reason or the measured age from the feed-down sentence | 1 |
+| leak an age into the warming sentence | 1 |
+| hardcode the unreadable count instead of reading `cond.unreadable` | 1 |
+| treat `unreadable: 0` as truthy, printing "0 registry file(s)" | 1 |
+| always render the empty-sessions sentence regardless of `empty` | 1 |
+| drop the `trust === "ok"` gate `statements()` enforces on its own `empty` output | 2 |
+| leak the down/empty sentences into each other instead of keeping the four pairwise distinct | 1 |
+| drop `unreadable` when the feed is down, instead of keeping it additive | 1 |
+| word the tombstone with the same leading clause as the feed-down sentence | 1 |
+| move `renderRoster`'s call in `applyFeed` ahead of the `VOLATILE =` line | 1 |
+| toggle the selection class on a queried child (e.g. inside `.figart`) instead of on `g` itself | 2 |
+| drop `clampWidth`'s upper or lower bound, or let it return the raw width unclamped | 1 |
+| drop the `WIDTH_DEFAULT` fallback for a non-finite or non-number width | 1 |
+| let `stacked` disagree with `STACK_BREAKPOINT` about where the panel stacks | 2 |
+| accept a stored width record with a non-finite or non-number `w` | 1 |
+| drop `role="separator"`, `tabindex="0"`, or an `aria-value*` attribute from `#rdivider` | 3 |
 
 That last table is not decoration. Two of those mutations are bugs that were
 actually **in** the code and were found this way, and two entries started life
@@ -933,6 +1098,10 @@ from an empty table.
 
 It writes nothing except its own event log, its CPU-sample cache in `$TMPDIR`,
 and — only when you run `install-hooks` and confirm — your `settings.json`.
+The docked agent roster panel (`web/roster.js`) is unrelated despite the
+name-collision: it writes only the browser's own storage, never
+`~/.claude/ccwatch/roster.json` — see [Selecting a row flies the camera
+there](#selecting-a-row-flies-the-camera-there-and-remembers-the-choice).
 
 ## Releases
 
