@@ -45,17 +45,59 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/ccwatch-tests.XXXXXX")
 # The serve tests start real servers. Reaping them on exit is not optional:
 # a leaked one holds a port that a later run may pick, and then that run tests
 # the leaked binary instead of its own.
+# ⚠️ Ports are recorded as they are handed out, never enumerated by hand.
+#
+# This function used to reap $SPORT through $SPORT6, one line each. The suite
+# then grew SPORT7, SPORT8 and SPORT9, and nobody added the lines — so three
+# servers leaked on every single run, including runs that passed. Measured
+# 2026-09-09: 1686 orphaned `ccwatch serve` processes on the development
+# machine, the oldest more than a day old, holding roughly 5GB between them.
+# Swap fell from 95% to 76% when they were reaped, which had been read as the
+# host simply being short of memory.
+#
+# The fix is not a seventh line. Any list a new test has to remember to extend
+# will eventually not be extended, so `free_port` records every port it issues
+# and cleanup reaps exactly what was recorded.
+SERVE_PORTS="$WORK/serve-ports"
+SUITE_PID_FILE="$WORK/suite-pid"
+: > "$SERVE_PORTS"
+printf '%s\n' "$$" > "$SUITE_PID_FILE"
+
 cleanup_suite() {
-  [ -n "${SPORT:-}" ] && pkill -f "ccwatch serve --port $SPORT" 2>/dev/null
-  [ -n "${SPORT2:-}" ] && pkill -f "ccwatch serve --port $SPORT2" 2>/dev/null
-  [ -n "${SPORT3:-}" ] && pkill -f "ccwatch serve --port $SPORT3" 2>/dev/null
-  [ -n "${SPORT4:-}" ] && pkill -f "ccwatch serve --port $SPORT4" 2>/dev/null
-  [ -n "${SPORT5:-}" ] && pkill -f "ccwatch serve --port $SPORT5" 2>/dev/null
-  [ -n "${SPORT6:-}" ] && pkill -f "ccwatch serve --port $SPORT6" 2>/dev/null
+  if [ -f "$SERVE_PORTS" ]; then
+    while IFS= read -r _p; do
+      [ -n "$_p" ] && pkill -f "ccwatch serve --port $_p" 2>/dev/null
+    done < "$SERVE_PORTS"
+  fi
   rm -rf "$WORK"
   return 0
 }
-trap cleanup_suite EXIT
+# ⚠️ EXIT alone is not enough: a suite stopped with Ctrl-C or SIGTERM never ran
+# it, and left every server it had started behind.
+trap cleanup_suite EXIT INT TERM HUP
+
+# ⚠️ SIGKILL runs no trap at all, and the OOM killer sends SIGKILL — which is
+# how most of those 1686 accumulated, each aborted run making the next OOM more
+# likely. Nothing inside the suite can catch that, so instead each run cleans
+# up after previous runs that were killed: the work directory survives a
+# SIGKILL, and it records both the ports and the pid of the suite that owned
+# them. A directory whose owning pid is gone is finished, whatever happened to
+# it, and its ports are safe to reap. A concurrently running suite keeps a live
+# pid and is left alone.
+for _stale in "${TMPDIR:-/tmp}"/ccwatch-tests.*; do
+  [ -d "$_stale" ] || continue
+  [ "$_stale" = "$WORK" ] && continue
+  _owner=$(cat "$_stale/suite-pid" 2>/dev/null)
+  # No pid recorded means it predates this mechanism; treat as finished.
+  if [ -n "$_owner" ] && kill -0 "$_owner" 2>/dev/null; then continue; fi
+  if [ -f "$_stale/serve-ports" ]; then
+    while IFS= read -r _p; do
+      [ -n "$_p" ] && pkill -f "ccwatch serve --port $_p" 2>/dev/null
+    done < "$_stale/serve-ports"
+  fi
+  rm -rf "$_stale"
+done
+unset _stale _owner _p
 
 for t in jq awk; do
   command -v "$t" >/dev/null 2>&1 || { printf 'ccwatch needs %s\n' "$t" >&2; exit 2; }
@@ -82,6 +124,29 @@ b4=$(grep -nE '(^|[^[:alnum:]_])(mapfile|readarray)([^[:alnum:]_]|$)|declare -A|
        "$CCWATCH" 2>/dev/null | grep -v '^\s*#' || true)
 assert_eq "$b4" "" "no bash-4-only construct (macOS ships 3.2)"
 t_note "running under bash ${BASH_VERSION}"
+
+# ⚠️ This suite starts real servers, so how it reaps them is itself worth
+# asserting. `cleanup_suite` used to reap $SPORT..$SPORT6 by name, one line
+# each; the suite grew SPORT7, SPORT8 and SPORT9, the lines were not added, and
+# three servers leaked on every run that passed. Measured 2026-09-09: 1686
+# orphaned `ccwatch serve` processes, the oldest over a day old, ~5GB between
+# them — reaping them moved swap from 95% to 76%, which had been read as the
+# host merely being short of memory.
+#
+# So the guard is against the SHAPE of the old bug, not the symptom: cleanup
+# must not name port variables, because any list a new test has to remember to
+# extend will eventually not be extended.
+_cln=$(sed -n '/^cleanup_suite()/,/^}/p' "$ROOT/tests/run.sh" | grep -cE 'SPORT[0-9]*' || true)
+assert_eq "$_cln" "0" \
+  "cleanup reaps recorded ports, not a hand-maintained list of SPORT variables"
+_fp=$(sed -n '/free_port() {/,/^  }/p' "$ROOT/tests/run.sh" | grep -c 'SERVE_PORTS' || true)
+[ "$_fp" -ge 1 ] \
+  && t_pass "taking a port registers it, so a new server cannot forget to" \
+  || t_fail "taking a port registers it, so a new server cannot forget to" \
+            "free_port does not append to SERVE_PORTS"
+# A run stopped with Ctrl-C or SIGTERM must reap too; only EXIT was trapped.
+_tr=$(grep -cE "^trap cleanup_suite .*INT.*TERM" "$ROOT/tests/run.sh" || true)
+assert_eq "$_tr" "1" "the cleanup trap covers interruption, not just a clean exit"
 
 # ================================================================== ccwatch ===
 printf '\nclassification\n'
@@ -952,11 +1017,19 @@ if command -v curl >/dev/null 2>&1; then
   # it predates whatever route is under test, the failure reads as a missing
   # feature rather than as a dirty environment. Seven of them were found this
   # way.
+  # ⚠️ Every port issued is recorded, so `cleanup_suite` reaps what was
+  # actually used rather than a hand-maintained list of variable names. A test
+  # that starts a server cannot forget to register it, because taking the port
+  # IS the registration.
   free_port() {
     local try n=0
     while [ "$n" -lt 25 ]; do
       try=$((18000 + RANDOM % 1500))
-      curl -s --max-time 1 -o /dev/null "http://127.0.0.1:$try/" 2>/dev/null || { printf '%s' "$try"; return 0; }
+      if ! curl -s --max-time 1 -o /dev/null "http://127.0.0.1:$try/" 2>/dev/null; then
+        printf '%s\n' "$try" >> "$SERVE_PORTS"
+        printf '%s' "$try"
+        return 0
+      fi
       n=$((n + 1))
     done
     return 1
