@@ -2751,7 +2751,12 @@ cmd_serve() {
   trap 'if [ -n "$srv_pid" ]; then kill "$srv_pid" 2>/dev/null; wait "$srv_pid" 2>/dev/null; fi' \
     EXIT INT TERM
 
-  CCWATCH_SELF="$root/bin/ccwatch" CCWATCH_WEB="$root/web" CCWATCH_BIND_PORT="$port" \
+  # ⚠️ CCWATCH_WEB is an override, not a fixed path, so `verify-ui` can serve a
+  # directory holding the real pages PLUS its own harness. The harness has to
+  # be same-origin with /map to reach into an iframe of it, and copying the
+  # pages somewhere writable is the only way to get that without putting test
+  # scaffolding in web/.
+  CCWATCH_SELF="$root/bin/ccwatch" CCWATCH_WEB="${CCWATCH_WEB:-$root/web}" CCWATCH_BIND_PORT="$port" \
   CCWATCH_SEND_TOKEN="$send_token" CCWATCH_ALLOW_KILL="$allowkill" \
   CCWATCH_IDLE_GRACE="$idle_grace" CCWATCH_SNAPSHOT_TIMEOUT="$snapshot_timeout" \
   CCWATCH_SNAPSHOT_CADENCE="$snapshot_cadence" \
@@ -3135,6 +3140,390 @@ except OSError as e:
   wait "$srv_pid"
 }
 
+# =========================================================== verify-ui ======
+#
+# ⚠️ This exists because 567 assertions passed while the map showed nothing.
+#
+# All of them check structure — a role attribute, which node a handler is bound
+# to, what a module function returns — and none renders the page and looks at
+# it. So a roster whose rows collapsed into a four-character ribbon, a map that
+# opened on a zoom level where figures are `display:none`, a drag that selected
+# text instead of panning, and 258px of page scroll with an unreachable panel
+# below the fold were all green at once. Every one was found in the first ten
+# minutes of a person opening the page, which is the single thing the suite
+# could not do.
+#
+# The checks are those bugs restated as numbers a script can read. None of them
+# is clever; they did not exist because the suite is entirely browserless, so
+# nobody reached for a browser.
+CHROME_CANDIDATES='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+/Applications/Chromium.app/Contents/MacOS/Chromium
+/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
+
+find_chrome() {
+  if [ -n "${CCWATCH_CHROME:-}" ] && [ -x "${CCWATCH_CHROME}" ]; then
+    printf '%s' "$CCWATCH_CHROME"; return 0
+  fi
+  printf '%s\n' "$CHROME_CANDIDATES" | while IFS= read -r c; do
+    if [ -x "$c" ]; then printf '%s' "$c"; break; fi
+  done
+}
+
+free_verify_port() {
+  python3 -c 'import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()'
+}
+
+# The harness page. It lives in a COPIED web directory, never in web/ itself:
+# a production page does not carry its own test scaffolding. Serving it from
+# the same origin as /map is what lets it reach into an iframe of the real
+# page, dispatch genuine pointer and wheel events at it, and read computed
+# styles and rendered boxes back out.
+write_verify_harness() {
+  cat > "$1" <<'CCWATCH_HARNESS_EOF'
+<!doctype html>
+<meta charset="utf-8">
+<title>ccwatch . verify-ui</title>
+<style>
+  html, body { margin:0; background:#111; }
+  /* A fixed frame size, so a proportion check means the same thing on every
+     machine that runs this. */
+  #frame { width:1180px; height:760px; border:0; display:block; }
+  #verify-out { color:#ddd; font:12px monospace; white-space:pre-wrap; }
+</style>
+<iframe id="frame" src="/map"></iframe>
+<pre id="verify-out"></pre>
+<script>
+var out = [];
+function ok(name)          { out.push("PASS|" + name + "|"); }
+function bad(name, detail) { out.push("FAIL|" + name + "|" + String(detail)); }
+function check(name, cond, detail) { if (cond) { ok(name); } else { bad(name, detail); } }
+function done() { document.getElementById("verify-out").textContent = out.join("\n"); }
+
+function boxOf(el) {
+  var r = el.getBoundingClientRect();
+  return {t: r.top, l: r.left, b: r.bottom, r: r.right, w: r.width, h: r.height};
+}
+function onScreen(b, vw, vh) {
+  return b.r > 0 && b.l < vw && b.b > 0 && b.t < vh && b.w > 0 && b.h > 0;
+}
+
+function run(doc, win) {
+  var de = doc.documentElement;
+  var vw = de.clientWidth, vh = de.clientHeight;
+  var world = doc.getElementById("world");
+  var cam = doc.getElementById("camera");
+
+  // 1 - "just two empty squares". A default view that draws no agent answers
+  // no question, and it was empty by construction: fit-to-world always landed
+  // on a zoom level whose level-of-detail sets display:none on the figures.
+  var agents = [].slice.call(doc.querySelectorAll("#camera .agent[data-sid]"));
+  var shown = agents.filter(function (a) { return onScreen(boxOf(a), vw, vh); });
+  check("an agent is visible in the default view", shown.length > 0,
+        agents.length + " in the DOM, " + shown.length + " rendered on screen");
+
+  // 2 - "I can still scroll down on the map page".
+  check("the page does not scroll", de.scrollHeight - de.clientHeight === 0,
+        "overflows by " + (de.scrollHeight - de.clientHeight) + "px");
+
+  // 3 - the map, not the chrome, gets the leftover height.
+  var wh = world ? boxOf(world).h : 0;
+  check("the map takes most of the viewport height", wh > vh * 0.55,
+        Math.round(wh) + "px of " + vh + "px");
+
+  // 4 - "an agent chat window below the map that I can't interact with": an
+  // unconditional display:flex overrode the UA's dialog:not([open]) rule.
+  var ghosts = [].slice.call(doc.querySelectorAll("dialog")).filter(function (d) {
+    return !d.open && boxOf(d).h > 0;
+  });
+  check("no closed dialog is rendered", ghosts.length === 0,
+        ghosts.map(function (d) { return "#" + d.id; }).join(", "));
+
+  // 5 - the roster ribbon: six fields in a flex ROW gave .rname width 0, and
+  // every field then wrapped into a four-character column.
+  // ⚠️ Skip anything deliberately hidden. `.rsel` carries the word "selected"
+  // and is display:none until its row is selected, so a naive "has text but
+  // zero width" test reported it seven times on the first run. A check that
+  // cries wolf is a check people stop reading.
+  var collapsed = [].slice.call(doc.querySelectorAll("#rosterlist [role=option] > *"))
+    .filter(function (el) {
+      if ((el.textContent || "").trim() === "") { return false; }
+      if (win.getComputedStyle(el).display === "none") { return false; }
+      return el.getBoundingClientRect().width === 0;
+    });
+  check("no roster field with text collapses to zero width", collapsed.length === 0,
+        collapsed.map(function (e) { return "." + e.className; }).join(", "));
+
+  // 6 - a drag beginning on a label selected text instead of panning.
+  check("the map suppresses text selection",
+        win.getComputedStyle(world).userSelect === "none",
+        win.getComputedStyle(world).userSelect);
+
+  // 7 - the world is mostly content, not void. Districts were 192x192 around
+  // one 54x78 building, and hash placement left 612 units between two orgs.
+  var camBB = cam.getBBox();
+  var area = 0;
+  [].slice.call(doc.querySelectorAll("#camera .building")).forEach(function (b) {
+    var r = b.getBBox();
+    area += r.width * r.height;
+  });
+  var span = camBB.width * camBB.height;
+  var fill = span > 0 ? area / span : 0;
+  check("buildings fill a real share of the world", fill > 0.06,
+        (fill * 100).toFixed(1) + "% of " + Math.round(camBB.width) + "x" + Math.round(camBB.height));
+
+  // 8 - a zone label sat exactly where its own figures were drawn.
+  // ⚠️ getBoundingClientRect, not getBBox. getBBox returns a box in the
+  // element's OWN user space, ignoring the transforms of its ancestors — so
+  // every zone label and every figure measured from near (0,0) and the naive
+  // version reported 14 overlaps on a map that had none. Screen space is the
+  // only space in which "do these two things visually collide" is a question
+  // with an answer.
+  var overlaps = 0;
+  var figRects = [].slice.call(doc.querySelectorAll("#camera .agent"))
+    .map(function (a) { return a.getBoundingClientRect(); })
+    .filter(function (r) { return r.width > 0 && r.height > 0; });
+  [].slice.call(doc.querySelectorAll("#camera .zone")).forEach(function (z) {
+    var lbl = z.querySelector("text");
+    if (!lbl) { return; }
+    var lb = lbl.getBoundingClientRect();
+    if (lb.width === 0 || lb.height === 0) { return; }
+    figRects.forEach(function (ab) {
+      if (lb.left < ab.right && lb.right > ab.left &&
+          lb.top < ab.bottom && lb.bottom > ab.top) { overlaps++; }
+    });
+  });
+  check("no zone label overlaps a figure", overlaps === 0, overlaps + " overlapping pairs");
+
+  // 9 - pinch zoom leapt through 1.5x-2x rungs, because 100px of delta banked
+  // up and then moved a whole rung. Smooth means monotonic, with no single
+  // event moving the scale by more than a fifth.
+  var scales = [];
+  var rect = world.getBoundingClientRect();
+  var i;
+  for (i = 0; i < 10; i++) {
+    world.dispatchEvent(new win.WheelEvent("wheel", {
+      deltaY: -12, deltaMode: 0, ctrlKey: true, bubbles: true, cancelable: true,
+      clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2
+    }));
+    var m = /scale\(([\d.]+)\)/.exec(cam.getAttribute("transform") || "");
+    scales.push(m ? parseFloat(m[1]) : 0);
+  }
+  var worst = 1, monotonic = true;
+  for (i = 1; i < scales.length; i++) {
+    if (scales[i] < scales[i - 1]) { monotonic = false; }
+    if (scales[i - 1] > 0) { worst = Math.max(worst, scales[i] / scales[i - 1]); }
+  }
+  check("a pinch zooms smoothly rather than in leaps", monotonic && worst < 1.2,
+        "largest single step " + worst.toFixed(3) + "x, monotonic=" + monotonic);
+
+  // 10 - and the drag it lost to text selection actually pans.
+  var lbl2 = doc.querySelector("#camera text");
+  if (lbl2) {
+    var before = cam.getAttribute("transform");
+    var lr = lbl2.getBoundingClientRect();
+    var sx = lr.left + lr.width / 2, sy = lr.top + lr.height / 2;
+    world.dispatchEvent(new win.PointerEvent("pointerdown", {
+      pointerId: 77, button: 0, buttons: 1, clientX: sx, clientY: sy,
+      bubbles: true, cancelable: true, isPrimary: true}));
+    [30, 90, 150].forEach(function (d) {
+      world.dispatchEvent(new win.PointerEvent("pointermove", {
+        pointerId: 77, buttons: 1, clientX: sx - d, clientY: sy,
+        bubbles: true, cancelable: true, isPrimary: true}));
+    });
+    world.dispatchEvent(new win.PointerEvent("pointerup", {
+      pointerId: 77, buttons: 0, clientX: sx - 150, clientY: sy,
+      bubbles: true, cancelable: true, isPrimary: true}));
+    check("a drag starting on a label pans the map",
+          cam.getAttribute("transform") !== before, "transform unchanged");
+    check("and selects no text", String(win.getSelection()) === "",
+          "selected: " + String(win.getSelection()).slice(0, 40));
+  }
+
+  // 11 - the key is reachable, and named rather than identified by a glyph.
+  var keyBtn = doc.getElementById("keyhelp");
+  check("the map key is behind a named control",
+        !!keyBtn && !!keyBtn.getAttribute("aria-label"),
+        keyBtn ? "no aria-label" : "#keyhelp missing");
+  if (keyBtn) {
+    keyBtn.click();
+    var km = doc.getElementById("keymodal");
+    check("and it opens on demand", !!km && km.open,
+          km ? "did not open" : "#keymodal missing");
+    if (km && km.open) { km.close(); }
+  }
+
+  done();
+}
+
+document.getElementById("frame").addEventListener("load", function () {
+  var f = document.getElementById("frame");
+  var doc = f.contentDocument, win = f.contentWindow;
+  // The server has already published a snapshot, but the roster and the camera
+  // settle over a frame or two. A figure existing is the signal; the timeout is
+  // the honest failure if it never arrives, rather than a set of checks that
+  // quietly measure an empty page and pass.
+  var waited = 0;
+  (function settle() {
+    var list = doc.getElementById("rosterlist");
+    var ready = doc.querySelector("#camera .agent[data-sid]") && list && list.children.length > 0;
+    if (ready || waited > 8000) {
+      if (!ready) { bad("the map rendered at all", "no figures after 8s - see the server log"); }
+      try { run(doc, win); } catch (e) { bad("the harness ran without throwing", e && e.message); done(); }
+      return;
+    }
+    waited += 250;
+    setTimeout(settle, 250);
+  })();
+});
+</script>
+CCWATCH_HARNESS_EOF
+}
+
+cmd_verify_ui() {
+  local port="" shots="" keep=0 vw=1280 vh=900
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --port)  port="${2:-}"; shift 2 || exit 3;;
+      --shots) shots="${2:-}"; shift 2 || exit 3;;
+      --size)  vw="${2%%x*}"; vh="${2##*x}"; shift 2 || exit 3;;
+      --keep)  keep=1; shift;;
+      -h|--help)
+        say "usage: ccwatch verify-ui [--port N] [--shots DIR] [--size WxH] [--keep]"
+        return 0;;
+      *) err "unknown option: $1"; return 3;;
+    esac
+  done
+
+  local chrome
+  chrome=$(find_chrome)
+  if [ -z "$chrome" ]; then
+    # A host that cannot supply what a check needs is skipped with the reason,
+    # never failed. A red result meaning "this machine has no Chrome" costs the
+    # same attention as a real regression.
+    say "${_c_yellow}-${_c_reset} verify-ui skipped: no Chrome or Chromium found"
+    printf '  %s\n' "set CCWATCH_CHROME=/path/to/chrome to point at one" >&2
+    return 0
+  fi
+
+  local root work
+  root=$(cd -- "$(dirname -- "$(resolved_self)")/.." && pwd)
+  work=$(mktemp -d "${TMPDIR:-/tmp}/ccwatch-verify.XXXXXX") || { err "mktemp failed"; return 1; }
+  # ⚠️ NOT a local. The trap body is evaluated when the trap fires, which for
+  # EXIT is after this function has already returned — a local is gone by then,
+  # and under `set -u` the trap died with "vport: unbound variable" instead of
+  # reaping the server it exists to reap. A cleanup that fails silently at the
+  # moment it is needed is worse than none, because the leak it was meant to
+  # prevent is the thing that then goes unnoticed.
+  VERIFY_PORT=""
+  # Reaped on every exit path including interruption: a leaked server holds a
+  # port a later run may pick, which cost 1686 orphaned processes once already.
+  # shellcheck disable=SC2064
+  trap "if [ -n \"\${VERIFY_PORT:-}\" ]; then pkill -f \"ccwatch serve --port \${VERIFY_PORT}\" 2>/dev/null; fi; if [ $keep -eq 0 ]; then rm -rf '$work'; fi" EXIT INT TERM HUP
+
+  mkdir -p "$work/web" "$work/profile"
+  cp "$root/web/"*.html "$work/web/" 2>/dev/null || true
+  cp "$root/web/"*.js "$work/web/" 2>/dev/null || true
+  write_verify_harness "$work/web/verify.html" || { err "could not write the harness"; return 1; }
+
+  VERIFY_PORT="${port:-$(free_verify_port)}"
+  [ -n "$VERIFY_PORT" ] || { err "no free port for the verification server"; return 1; }
+
+  CCWATCH_WEB="$work/web" "$root/bin/ccwatch" serve --port "$VERIFY_PORT" >"$work/serve.log" 2>&1 &
+  local i=0 ready=""
+  while [ "$i" -lt 90 ]; do
+    ready=$(curl -s --max-time 3 "http://127.0.0.1:$VERIFY_PORT/api/state" 2>/dev/null \
+            | jq -r '[.warming == false, (.collected_at.snapshot != null)] | all' 2>/dev/null)
+    [ "$ready" = "true" ] && break
+    sleep 1; i=$((i + 1))
+  done
+  if [ "$ready" != "true" ]; then
+    err "the verification server never published a snapshot"
+    printf '  %s\n' "see $work/serve.log" >&2
+    return 1
+  fi
+
+  say "${_c_bold}verify-ui${_c_reset} ${_c_dim}— ${vw}x${vh}, 127.0.0.1:$VERIFY_PORT${_c_reset}"
+
+  # ⚠️ Chrome writes the DOM and then does NOT exit — `--headless=new` with a
+  # `--user-data-dir` lingers, and the first run of this command hung for
+  # minutes with a complete dom.html already on disk. macOS has no `timeout`,
+  # so the wait is explicit: run it in the background, wait for the harness's
+  # closing tag to appear, then reap it. A bounded wait that fails loudly beats
+  # an unbounded one that looks like work.
+  "$chrome" --headless=new --disable-gpu --no-first-run --no-default-browser-check \
+    --user-data-dir="$work/profile" --window-size="$vw,$vh" \
+    --virtual-time-budget=20000 --dump-dom \
+    "http://127.0.0.1:$VERIFY_PORT/verify.html" >"$work/dom.html" 2>/dev/null &
+  local chrome_pid=$! waited=0
+  while [ "$waited" -lt 60 ]; do
+    grep -q '</pre>' "$work/dom.html" 2>/dev/null && break
+    kill -0 "$chrome_pid" 2>/dev/null || break
+    sleep 1; waited=$((waited + 1))
+  done
+  kill "$chrome_pid" 2>/dev/null
+  wait "$chrome_pid" 2>/dev/null || true
+
+  local results
+  results=$(python3 -c 'import io, re, sys, html
+raw = io.open(sys.argv[1], encoding="utf-8", errors="replace").read()
+m = re.search(r"<pre id=\"verify-out\">(.*?)</pre>", raw, re.S)
+sys.stdout.write(html.unescape(m.group(1)) if m else "")' "$work/dom.html")
+
+  if [ -z "$results" ]; then
+    err "the harness produced no results — the page never ran"
+    printf '  %s\n' "re-run with --keep and open $work/web/verify.html by hand" >&2
+    return 1
+  fi
+
+  local pass=0 fail=0 line name detail
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    name=${line#*|}; name=${name%%|*}
+    detail=${line##*|}
+    case "$line" in
+      PASS\|*) pass=$((pass + 1)); say "  ${_c_green}✓${_c_reset} $name";;
+      FAIL\|*) fail=$((fail + 1))
+               say "  ${_c_red}✗${_c_reset} $name"
+               [ -n "$detail" ] && printf '      %s\n' "$detail" >&2;;
+      *)       fail=$((fail + 1)); say "  ${_c_yellow}?${_c_reset} unparsed: $line";;
+    esac
+  done <<EOF
+$results
+EOF
+
+  # ⚠️ Screenshots are written every run, not on request, and that is the point:
+  # a change under web/ that nobody looked at leaves a stale image next to a
+  # newer page, which is visible. The suite checks their freshness.
+  if [ -n "$shots" ]; then
+    mkdir -p "$shots"
+    local p
+    for p in map ""; do
+      "$chrome" --headless=new --disable-gpu --no-first-run --no-default-browser-check \
+        --user-data-dir="$work/profile" --window-size="$vw,$vh" \
+        --virtual-time-budget=12000 --hide-scrollbars \
+        --screenshot="$shots/${p:-table}.png" \
+        "http://127.0.0.1:$VERIFY_PORT/$p" >/dev/null 2>&1 &
+      local shot_pid=$! sw=0
+      while [ "$sw" -lt 45 ]; do
+        [ -s "$shots/${p:-table}.png" ] && break
+        kill -0 "$shot_pid" 2>/dev/null || break
+        sleep 1; sw=$((sw + 1))
+      done
+      kill "$shot_pid" 2>/dev/null
+      wait "$shot_pid" 2>/dev/null || true
+    done
+    say "${_c_dim}screenshots: $shots${_c_reset}"
+  fi
+
+  printf '\n%s checked, %s failed\n' "$((pass + fail))" "$fail"
+  [ "$fail" -eq 0 ] || return 1
+  return 0
+}
+
 # ============================================================== doctor ======
 #
 # This is the load-bearing command for the "nothing fails silently" promise.
@@ -3347,6 +3736,7 @@ USAGE
   ccwatch install-statusline  wrap your statusline to report rate limits and
                            context fill. Wraps, does not replace.
   ccwatch doctor             check that ccwatch's own view is trustworthy
+  ccwatch verify-ui          render the pages in a browser and check what they look like
   ccwatch -h | --version
 
   <who> is a session name, a session id, or a pid. Names must match whole; a
@@ -3428,6 +3818,7 @@ case "${1:-}" in
   serve)           shift; cmd_serve "$@";;
   daemon)          cmd_daemon;;
   tick)            daemon_tick;;
+  verify-ui)       shift; cmd_verify_ui "$@";;
   doctor)          cmd_doctor;;
   -h|--help|help)  usage;;
   --version)       say "ccwatch $CCWATCH_VERSION";;

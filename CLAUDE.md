@@ -31,8 +31,18 @@ entry in `usage()`.
 ./tests/run.sh                  # everything: shellcheck, then the assertions
 ./bin/ccwatch once              # one paint against the real ~/.claude
 ./bin/ccwatch doctor            # is ccwatch's own view still trustworthy
+./bin/ccwatch verify-ui --shots .screens   # render the pages and check them
 CCWATCH_PROFILE=1 ./bin/ccwatch --json >/dev/null   # per-stage timings
 ```
+
+`verify-ui` boots its own `serve`, drives headless Chrome against a harness
+that iframes the real pages, and asserts on rendered boxes, computed styles and
+synthetic pointer/wheel gestures. It skips with the reason when there is no
+Chrome. **It exists because 567 assertions were green while the map showed
+nothing**: the suite is entirely browserless, so a roster whose rows collapsed
+to a four-character ribbon, a default view whose zoom level sets `display:none`
+on every figure, a drag that selected text instead of panning, and 258px of
+page scroll with an unreachable dialog below the fold all passed at once.
 
 The `markdown` section runs `web/md.js` under `node`. That is the only optional
 tool the suite uses: with no `node` the section skips with the reason and
@@ -99,7 +109,15 @@ produced a specific wrong output that someone believed.
     say things are fine is a line people learn to skip, and then it is not
     there when it matters. Warnings appear at a threshold and are absent below
     it — not green, absent. The host-pressure line works this way.
-13. **An assertion must not encode one machine's configuration.** Where the host
+13. **A change under `web/` is not done until it has been rendered and looked
+    at.** Not "the assertions pass" — rendered, in a browser, and looked at,
+    with `ccwatch verify-ui` and a screenshot. Every UI bug this project has
+    had was found in the first minutes of somebody opening the page and by
+    nothing else: structure-only assertions cannot see a collapsed column, a
+    figure hidden by its own level-of-detail rule, or a panel below the fold.
+    Reporting "the manual browser pass is not done" and shipping anyway is the
+    specific mistake this rule exists to prevent.
+14. **An assertion must not encode one machine's configuration.** Where the host
     cannot supply what a test needs — no swap, a slow CPU, no `curl` — skip with
     the reason stated rather than failing. A red suite that means "this runner
     is configured differently" costs the same attention as a real regression.

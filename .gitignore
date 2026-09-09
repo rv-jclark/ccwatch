@@ -8,3 +8,8 @@
 specs/*/.pipeline/
 .specify/roadmaps/*.state.json
 .specify/feature.json
+
+# `ccwatch verify-ui --shots` writes rendered pages here. Local artefacts, not
+# committed: the repo deliberately ships no binary assets, and a screenshot's
+# value is in being looked at now, not in being diffed later.
+.screens/
