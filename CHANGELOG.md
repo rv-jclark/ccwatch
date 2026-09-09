@@ -8,6 +8,44 @@ subject is the changelog entry, which is why the subject line is expected to
 describe the user-visible change rather than the diff. The 1.0.0 entry predates
 that and is written by hand.
 
+## [1.1.0](https://github.com/rv-jclark/ccwatch/compare/v1.0.0...v1.1.0) (2026-09-09)
+
+
+### Features
+
+* draw the map as a city whose geography never moves ([#2](https://github.com/rv-jclark/ccwatch/issues/2)) ([23dfeb0](https://github.com/rv-jclark/ccwatch/commit/23dfeb01d3c9c41cadd89779573fc0eb45052a58))
+* list every agent beside the map, ordered by what needs you ([#5](https://github.com/rv-jclark/ccwatch/issues/5)) ([f756536](https://github.com/rv-jclark/ccwatch/commit/f756536b662f1bbea587598058ecba29f33b233b))
+* make the map a place you can navigate ([#4](https://github.com/rv-jclark/ccwatch/issues/4)) ([016e5d3](https://github.com/rv-jclark/ccwatch/commit/016e5d3b51e4e3f2468e992146a1a4b31f17bb95))
+* open an agent, read it, reply to it, and stop it ([#7](https://github.com/rv-jclark/ccwatch/issues/7)) ([15b1ed4](https://github.com/rv-jclark/ccwatch/commit/15b1ed42b62cd6f0b80ebe5eaf8833e990cb1647))
+* render markdown in the transcript view ([e35d542](https://github.com/rv-jclark/ccwatch/commit/e35d542e3756eafcf098b263f2bdc7e1182f300a))
+* verify-ui — render the pages and check what they look like ([03a36e2](https://github.com/rv-jclark/ccwatch/commit/03a36e2d0dc518b37a3435b540b83ad497cf9b0e))
+
+
+### Bug Fixes
+
+* drag to pan, and zoom that tracks the gesture ([6acad43](https://github.com/rv-jclark/ccwatch/commit/6acad4356fc2c997d08a3c95753936f3e6defb92))
+* open the map where the agents are, and make the roster legible ([384f2d8](https://github.com/rv-jclark/ccwatch/commit/384f2d8611db0d3372bc5c9c6316b5a4a46e1a63))
+* pack the city so panning crosses content, not void ([fcdc49e](https://github.com/rv-jclark/ccwatch/commit/fcdc49e8a2c1288c678e6640063e9601796deb2c))
+* reap every test server, not the six someone remembered to list ([#6](https://github.com/rv-jclark/ccwatch/issues/6)) ([927fd18](https://github.com/rv-jclark/ccwatch/commit/927fd1852ff4e1a951c80e801a8cb066387c293f))
+* reclaim the map's height, and put the key behind a button ([5fc281a](https://github.com/rv-jclark/ccwatch/commit/5fc281ad549da45980364a256410e8a10bc0446d))
+* report a failed snapshot as a failure, not an ambiguous match ([#3](https://github.com/rv-jclark/ccwatch/issues/3)) ([5d9e23d](https://github.com/rv-jclark/ccwatch/commit/5d9e23df1b5f03c973db006cb8752a497155484b))
+
+
+### Performance
+
+* stop collecting when nobody is reading the dashboard ([#1](https://github.com/rv-jclark/ccwatch/issues/1)) ([535e3f6](https://github.com/rv-jclark/ccwatch/commit/535e3f65667b81817e25d36ab06acb19292a582d))
+
+
+### Documentation
+
+* require conventional, small, logically grouped commits ([a18ca67](https://github.com/rv-jclark/ccwatch/commit/a18ca67e23f8288dca18d5c2c8fa8c7b14dd62a2))
+
+
+### Tests
+
+* assert the transcript renderer escapes, and never links ([c7442b1](https://github.com/rv-jclark/ccwatch/commit/c7442b1dfd5b800bdfc9b3827c5d4b08c3353a66))
+* establish the ETag premise instead of hoping for it ([6a24c6e](https://github.com/rv-jclark/ccwatch/commit/6a24c6e9963da953ec220e6c29a08f8c45103945))
+
 ## 1.0.0 — first public release
 
 The whole point: a session must never be able to fail quietly.
