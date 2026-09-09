@@ -20,8 +20,24 @@
             --ground:#f6f8fb; }
   }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--ink);
+  /* ⚠️ The page fills the viewport and does NOT scroll; the map takes whatever
+     height the chrome leaves. `#world` used to be `calc(100vh - 8rem)`, and
+     8rem was a guess at the chrome that ignored three of its four parts — the
+     host-pressure banner (which only appears sometimes, so the guess was wrong
+     only sometimes), the legend and the footer. Measured: 223px of chrome
+     against a 128px allowance, so the page scrolled by 258px and the map was
+     shorter than the space available to it. A flex column cannot be wrong
+     about a height it never has to predict. */
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--ink); overflow:hidden;
+         display:flex; flex-direction:column;
          font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  header, #trust, #hostwarn, #foot { flex:none; }
+  /* min-height:0 so the map can be SHORTER than its content wants; without it
+     a flex item refuses to shrink below its intrinsic height and the overflow
+     comes straight back. */
+  #stage { flex:1 1 auto; min-height:0; }
+  #wrap { flex:1 1 auto; min-width:0; display:flex; }
   header { display:flex; align-items:baseline; gap:1rem; flex-wrap:wrap;
            padding:.9rem 1.1rem; border-bottom:1px solid var(--line); }
   h1 { font-size:15px; margin:0; }
@@ -65,7 +81,7 @@
      is the "sometimes I can't drag" and "sometimes it highlights text"
      behaviour, and which one you get depends only on whether the pointer
      happened to land on a glyph. */
-  #world { width:100%; height:calc(100vh - 8rem); display:block; touch-action:none;
+  #world { width:100%; height:100%; flex:1 1 auto; display:block; touch-action:none;
            user-select:none; -webkit-user-select:none; }
   #world:focus-visible { outline:2px solid var(--info); outline-offset:2px; }
   /* Page chrome, outside the camera group and outside data-lod on purpose
@@ -152,7 +168,19 @@
   .wreck .feat { color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .wreck .cost { margin-left:auto; color:var(--dim); }
 
-  .legend { display:flex; gap:1rem; flex-wrap:wrap; padding:.2rem 1.1rem 1.4rem;
+  /* ⚠️ A column inside the key dialog, not a strip under the map. As a strip it
+     held 73px of viewport permanently to explain something a reader needs once
+     and then knows — and the map, which is the thing you actually look at, was
+     73px shorter for the whole session because of it. */
+  dialog#keymodal { max-width:min(560px, 92vw); background:var(--panel);
+           border:1px solid var(--line); border-radius:8px; padding:.8rem;
+           color:var(--ink); box-shadow:0 8px 40px rgba(0,0,0,.5); }
+  dialog#keymodal[open] { display:flex; flex-direction:column; gap:.6rem; }
+  #keymodal::backdrop { background:rgba(0,0,0,.55); }
+  #keyhead { display:flex; align-items:baseline; justify-content:space-between;
+             gap:.6rem; padding-bottom:.4rem; border-bottom:1px solid var(--line); }
+  #keyhelp { min-width:1.9rem; }
+  .legend { display:flex; flex-direction:column; gap:.35rem; padding:0;
             color:var(--dim); font-size:11px; }
   .legend b { font-weight:600; }
   footer { padding:0 1.1rem 2rem; color:var(--dim); font-size:11px; }
@@ -162,10 +190,16 @@
      first seeing what it is doing. A native <dialog> supplies the focus move,
      the focus trap and the inert background (FR-036, FR-039, D3) — none of
      that is reimplemented here. */
+  /* ⚠️ `[open]`. Without it this rule's `display:flex` overrode the user-agent's
+     `dialog:not([open]) { display:none }`, so the closed panel rendered in the
+     document flow below the map — a chat window sitting under the fold that
+     could be seen and not used, and 176px of the page scroll. A <dialog> is
+     the one element whose visibility is not this stylesheet's business. */
   dialog#agentmodal { max-width:min(760px, 92vw); max-height:88vh;
            background:var(--panel); border:1px solid var(--line); border-radius:8px;
-           padding:.7rem; display:flex; flex-direction:column; gap:.5rem;
+           padding:.7rem; gap:.5rem;
            color:var(--ink); box-shadow:0 8px 40px rgba(0,0,0,.5); width:min(560px,94vw); }
+  dialog#agentmodal[open] { display:flex; flex-direction:column; }
   #agentmodal::backdrop { background:rgba(0,0,0,.55); }
   #ihead { display:flex; align-items:baseline; gap:.5rem; flex-wrap:wrap;
            padding-bottom:.5rem; border-bottom:1px solid var(--line); }
@@ -369,7 +403,13 @@
     <g id="camera"></g>
   </svg>
 </div>
-<div class="legend" id="legend"></div>
+<dialog id="keymodal" aria-labelledby="keytitle">
+  <div id="keyhead">
+    <strong id="keytitle">map key</strong>
+    <button type="button" id="keyclose" class="ghost">close</button>
+  </div>
+  <div class="legend" id="legend"></div>
+</dialog>
 <dialog id="agentmodal" aria-labelledby="ilead iname">
   <div id="ihead">
     <span id="ilead">agent</span><span id="iname"></span>
@@ -1537,8 +1577,16 @@ const camstate = document.createElement("span");
 camstate.id = "camstate"; camstate.setAttribute("aria-live", "polite");
 const camnote = document.createElement("span");
 camnote.id = "camnote";
-camctl.append(zoutBtn, zinBtn, zfitBtn, camstate, camnote);
+const keyBtn = document.createElement("button");
+keyBtn.id = "keyhelp"; keyBtn.type = "button"; keyBtn.textContent = "?";
+keyBtn.className = "ghost";
+keyBtn.setAttribute("aria-label", "map key — what the figures mean");
+keyBtn.title = "map key — what the figures mean";
+camctl.append(zoutBtn, zinBtn, zfitBtn, keyBtn, camstate, camnote);
 $("world").insertAdjacentElement("afterend", camctl);
+
+keyBtn.addEventListener("click", () => $("keymodal").showModal());
+$("keyclose").addEventListener("click", () => $("keymodal").close());
 
 // FR-004, FR-039 — same ladder step and fit the keyboard uses, anchored at
 // the viewport centre rather than a pointer position the button click has none of.

@@ -974,11 +974,18 @@ assert_contains "$_world_tag" 'aria-label="' "#world carries a non-empty aria-la
 _world_label=$(printf '%s' "$_world_tag" | sed -n 's/.*aria-label="\([^"]*\)".*/\1/p')
 assert_contains "$_world_label" "Arrow keys" "and the aria-label names the keys"
 
-# FR-016, FR-047: #camctl is built with three real, focusable, named buttons —
-# not divs with click handlers, which a screen reader and Tab both skip.
+# FR-016, FR-047: #camctl is built with real, focusable, named buttons — not
+# divs with click handlers, which a screen reader and Tab both skip. Four now:
+# zoom out, zoom in, fit, and the `?` that opens the map key. The key used to
+# be a permanent 73px strip under the map, which spent viewport on something a
+# reader needs once; behind a button it costs nothing until asked for.
 _camctl_js=$(awk '/const camctl = document.createElement/,/insertAdjacentElement/' "$ROOT/web/map.html")
-assert_eq "$(printf '%s' "$_camctl_js" | grep -c 'createElement("button")')" "3" \
-  "#camctl is built from three real <button> elements"
+assert_eq "$(printf '%s' "$_camctl_js" | grep -c 'createElement("button")')" "4" \
+  "#camctl is built from four real <button> elements"
+# Every one of them is named for a screen reader, by text content or aria-label:
+# a control whose only label is a glyph ("?") is a control nobody can identify.
+assert_eq "$(printf '%s' "$_camctl_js" | grep -cE 'textContent = "|setAttribute\("aria-label"')" "5" \
+  "and each is named, the glyph-only one by aria-label"
 assert_contains "$_camctl_js" 'zoom out' "and #zout has an accessible name"
 assert_contains "$_camctl_js" 'zoom in' "and #zin has an accessible name"
 assert_contains "$_camctl_js" '"fit"' "and #zfit has an accessible name"
@@ -1731,8 +1738,34 @@ assert_not_contains "$_maphtml" '"ifoot").style.display' \
 # fail this.
 assert_not_contains "$_maphtml" 'method="dialog"' \
   "web/map.html contains no <form method=\"dialog\">"
+# Two: the agent panel and the map key. Both are <dialog> + showModal() rather
+# than styled divs, so the focus trap, the inert background and Escape-to-close
+# come from the platform instead of being reimplemented twice.
 _showmodal_count=$(grep -c '\.showModal()' "$ROOT/web/map.html")
-assert_eq "$_showmodal_count" "1" "showModal() occurs exactly once in web/map.html"
+assert_eq "$_showmodal_count" "2" "showModal() opens both dialogs, and nothing else"
+# ⚠️ A closed <dialog> must stay closed. An unconditional `display:flex` on the
+# dialog overrode the user agent's `dialog:not([open]) { display:none }`, so the
+# closed agent panel rendered in the document flow below the map — a chat window
+# you could see and not use, and 176px of the page scroll it caused.
+assert_eq "$(grep -c 'dialog#[a-z]*\[open\]' "$ROOT/web/map.html")" "2" \
+  "each dialog's display is scoped to [open], so a closed one cannot render"
+
+# ⚠️ The page fills the viewport and does not scroll. `#world` was
+# `calc(100vh - 8rem)`, and 8rem was a guess at the chrome that missed three of
+# its four parts — the host-pressure banner (present only sometimes, so the
+# guess was wrong only sometimes), the legend and the footer. Measured 223px of
+# chrome against a 128px allowance: the page scrolled by 258px and the map was
+# shorter than the room it had. A flex column cannot be wrong about a height it
+# never has to predict, so the guard is against the return of the prediction.
+# ⚠️ Matches a DECLARATION, not the word. The first version grepped the whole
+# file for `calc(100vh -` and was tripped by the comment above the fix that
+# explains why the fix exists — an assertion failing on its own documentation.
+assert_eq "$(grep -cE 'height: *calc\(100vh' "$ROOT/web/map.html")" "0" \
+  "no hardcoded viewport-minus-chrome height — the page column derives it"
+assert_contains "$_maphtml" 'html, body { height:100%; }' \
+  "the page is a full-height column"
+assert_contains "$_maphtml" '#stage { flex:1 1 auto; min-height:0; }' \
+  "and the map stage takes the space the chrome leaves, shrinking below content"
 _makefigure_js=$(awk '/^function makeFigure\(/,/^\}/' "$ROOT/web/map.html")
 assert_contains "$_makefigure_js" 'tabindex: "0"' \
   "makeFigure gives each .agent group tabindex"
