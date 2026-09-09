@@ -261,6 +261,42 @@
   #replyOut.delivered { color:var(--ok); } #replyOut.queued { color:var(--warn); }
   #replyOut.failed { color:var(--bad); }
   .empty { color:var(--dim); padding:1rem; }
+
+  /* The docked roster panel (contracts/page-roster.md §2). --roster-w is the
+     only width writer (D9); setWidth() never touches #roster's own flex-basis
+     any other way, so there is exactly one place a width change originates. */
+  #stage { display:flex; align-items:stretch; }
+  #roster { flex:0 0 var(--roster-w, 320px); overflow-y:auto; min-width:0;
+            border-right:1px solid var(--line); padding:.8rem; }
+  #rostertitle { font-size:13px; margin:0 0 .5rem; }
+  #rosternote { color:var(--warn); font-size:11px; margin:0 0 .5rem; }
+  #rostercond { font-size:12px; margin-bottom:.5rem; }
+  #rostercond .main.down { display:block; color:var(--bad); }
+  #rostercond .main.warming { display:block; color:var(--dim); }
+  #rostercond .unreadable { display:block; color:var(--warn); }
+  #rostercond .emptymsg { display:block; color:var(--dim); }
+  #rostergone { display:none; font-size:12px; margin-bottom:.5rem; }
+  #rostergone.on { display:block; }
+  #rosterlist { display:flex; flex-direction:column; gap:.3rem; }
+  .rrow { display:flex; gap:.4rem; align-items:baseline; padding:.25rem .35rem;
+          border-radius:4px; cursor:pointer; }
+  .rrow:hover { background:color-mix(in srgb, var(--ink) 6%, transparent); }
+  /* Identity truncates first; the status word and its measurement — the two
+     fields FR-034 protects — never do (they carry flex:none below). */
+  .rrow .rname, .rrow .rwhere { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rrow .rstatus { flex:none; white-space:nowrap; }
+  /* Selection is a word, not only a colour (Constitution VII, D17). */
+  .rrow[aria-selected="true"] { background:color-mix(in srgb, var(--info) 16%, transparent); }
+  .rrow .rsel { display:none; color:var(--info); font-weight:600; }
+  .rrow[aria-selected="true"] .rsel { display:inline; }
+  .agent.selected .hit { stroke:var(--info); stroke-width:1.4; stroke-dasharray:2; }
+  #rdivider { flex:0 0 6px; cursor:col-resize; touch-action:none; background:var(--line); }
+  #rdivider:focus-visible { outline:2px solid var(--info); outline-offset:-2px; }
+  @media (max-width:720px) {
+    #stage { flex-direction:column; }
+    #roster { flex:0 0 auto; max-height:40vh; border-right:0; border-bottom:1px solid var(--line); }
+    #rdivider { display:none; }
+  }
 </style>
 </head>
 <body>
@@ -273,7 +309,7 @@
 <div id="hostwarn"></div>
 <div id="wrap">
   <svg id="world" viewBox="0 0 408 408" tabindex="0" data-lod="mid"
-       aria-label="City map. Drag to pan. Arrow keys pan, plus and minus zoom, zero fits the whole world.">
+       aria-label="City map, a companion view of the agent list in the roster panel. Drag to pan. Arrow keys pan, plus and minus zoom, zero fits the whole world.">
     <defs><marker id="ah" viewBox="0 0 8 8" refX="6" refY="4"
         markerWidth="5" markerHeight="5" orient="auto">
         <path d="M0,0 L8,4 L0,8 z" fill="var(--info)"/></marker></defs>
@@ -302,6 +338,7 @@
 <script src="/md.js"></script>
 <script src="/plots.js"></script>
 <script src="/camera.js"></script>
+<script src="/roster.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -319,6 +356,69 @@ let CAN_KILL = false;
 // deciding independently, so there is exactly one place to extend it.
 let VOLATILE = true;
 
+// contracts/page-roster.md §1 — the panel's DOM, built with createElement/
+// textContent only (FR-042): #wrap is reparented into the new #stage, never
+// rebuilt, so its existing ids, structure and listeners survive untouched.
+// Runs before the first tick() (§8), so the panel exists for every later
+// renderRoster() call site to write into.
+const rosterEls = (function () {
+  const wrap = $("wrap");
+  const stage = document.createElement("div");
+  stage.id = "stage";
+  wrap.parentNode.insertBefore(stage, wrap);
+
+  const roster = document.createElement("aside");
+  roster.id = "roster";
+  roster.setAttribute("role", "region");
+  roster.setAttribute("aria-labelledby", "rostertitle");
+
+  const title = document.createElement("h2");
+  title.id = "rostertitle";
+  title.textContent = "agents · 0";
+
+  const note = document.createElement("p");
+  note.id = "rosternote";
+
+  const cond = document.createElement("div");
+  cond.id = "rostercond";
+  const condMain = document.createElement("span"); condMain.className = "main";
+  const condUnreadable = document.createElement("span"); condUnreadable.className = "unreadable";
+  const condEmpty = document.createElement("span"); condEmpty.className = "emptymsg";
+  cond.append(condMain, condUnreadable, condEmpty);
+
+  // The tombstone (contracts/page-roster.md §1/§6, data-model.md §6): never
+  // a role="option" — it is a statement about a selection, not a row to
+  // navigate to. A real <button> dismisses it and clears the stored record.
+  const gone = document.createElement("div");
+  gone.id = "rostergone";
+  const goneMsg = document.createElement("span");
+  const goneDismiss = document.createElement("button");
+  goneDismiss.type = "button";
+  goneDismiss.textContent = "Dismiss";
+  gone.append(goneMsg, goneDismiss);
+
+  const list = document.createElement("div");
+  list.id = "rosterlist";
+  list.setAttribute("role", "listbox");
+  list.setAttribute("aria-labelledby", "rostertitle");
+
+  roster.append(title, note, cond, gone, list);
+
+  const divider = document.createElement("div");
+  divider.id = "rdivider";
+  divider.setAttribute("role", "separator");
+  divider.setAttribute("aria-orientation", "vertical");
+  divider.setAttribute("tabindex", "0");
+  divider.setAttribute("aria-label", "Roster width");
+
+  stage.append(roster, divider, wrap);
+
+  return {
+    stage, roster, title, note, cond,
+    condMain, condUnreadable, condEmpty, gone, goneMsg, goneDismiss, list, divider,
+  };
+})();
+
 // Built once at load, never touched by a refresh (FR-020): CAN_SEND is known
 // before the first tick, so there is nothing here a snapshot could change.
 $("legend").innerHTML = [
@@ -328,6 +428,7 @@ $("legend").innerHTML = [
   `<span><b style="color:var(--info)">outline</b> alive, nothing to corroborate it</span>`,
   `<span><b style="color:var(--dim)">z</b> idle</span>`,
   `<span>fill level inside the body = context used</span>`,
+  `<span><b style="color:var(--info)">dashed ring</b> selected — pick a row in the roster to fly there</span>`,
   CAN_SEND ? `<span>click an agent to read its conversation and reply</span>`
            : `<span>click an agent to read its conversation (read-only)</span>`,
 ].join("");
@@ -676,19 +777,11 @@ function updateZone(g, {geo, meta}) {
   g.querySelector(".zlabel").textContent = meta.branch;
 }
 
+// A one-line delegation to CCWATCH_ROSTER.titleText (FR-012): the figure's
+// hover reading and the roster row are built from the same rowFields output,
+// so they can never state different things.
 function titleBits(r) {
-  const bits = [r.token];
-  if (r.questions && r.questions.length) bits.push("ASKS: " + r.questions[0].question);
-  if (r.waited != null) bits.push(`${r.note} ${dur(r.waited)}`);
-  else if (r.note) bits.push(r.note);
-  if (r.pipeline) bits.push(`${r.pipeline.phase}/${r.pipeline.crashed ? "CRASHED" : r.pipeline.status}`);
-  bits.push(`age ${dur(r.age)}`);
-  // Withheld, not annotated, while the feed is not fully trusted (FR-029):
-  // pose/colour/structure/status word/age (above) stay regardless.
-  if (VOLATILE && r.context && r.context.used_percentage != null)
-    bits.push(`ctx ${Math.floor(r.context.used_percentage)}%`);
-  if (VOLATILE && r.rss_mb != null) bits.push(`${r.rss_mb}MB`);
-  return bits.join(" · ");
+  return CCWATCH_ROSTER.titleText(r, VOLATILE);
 }
 
 // Pose/colour/emphasis exactly as agentCard() drew them; position comes
@@ -707,7 +800,11 @@ function makeFigure() {
 }
 function updateFigure(g, {geo, row}) {
   const k = kindOf(row);
-  g.setAttribute("class", `agent sev${k.sev} ${k.cls} clickable`);
+  // Figure emphasis (contracts/page-roster.md §6, FR-019): a class on this
+  // outer node, from the page-level selectedSid, never inside .figart below
+  // (which is rebuilt wholesale on every call and carries no such state).
+  const sel = row.sid === selectedSid ? " selected" : "";
+  g.setAttribute("class", `agent sev${k.sev} ${k.cls}${sel} clickable`);
   g.setAttribute("transform", `translate(${geo.x},${geo.y})`);
   g.dataset.sid = row.sid;
   g.dataset.name = row.name;
@@ -1531,9 +1628,14 @@ function drawWorld(s) {
   reconcile(camera, zoneWanted, "zone", makeZone, updateZone);
 
   const figureWanted = {};
+  centreBySid = {};
   for (const k in placed.world.figures) {
     const row = model.figuresByKey[k];
-    if (row) figureWanted[k] = {geo: placed.world.figures[k], row};
+    if (!row) continue;
+    figureWanted[k] = {geo: placed.world.figures[k], row};
+    // D19: plots.js's own cx/cy (web/plots.js:259-261) — the fly target for
+    // selectRow, rebuilt fresh every tick since a district reflow moves it.
+    centreBySid[row.sid] = {cx: placed.world.figures[k].cx, cy: placed.world.figures[k].cy};
   }
   reconcile(camera, figureWanted, "figure", makeFigure, updateFigure);
 
@@ -1673,12 +1775,290 @@ function repaintFooter(cond) {
   }
 }
 
+// The row primitive, split make/update the same way makeFigure/updateFigure
+// is (web/map.html:791-814): reconcile() creates the node once by `sid` and
+// writes to the SAME node on every later tick, so focus/selection anchored to
+// it survives a reorder.
+function makeRow(sid) {
+  const el = document.createElement("div");
+  el.className = "rrow";
+  el.dataset.sid = sid;
+  el.setAttribute("role", "option");
+  el.tabIndex = -1;
+  el.setAttribute("aria-selected", "false");
+  el.appendChild(spanChild("rname"));
+  el.appendChild(spanChild("rwhere"));
+  el.appendChild(spanChild("rstatus"));
+  el.appendChild(spanChild("rmeta"));
+  el.appendChild(spanChild("rasks"));
+  el.appendChild(spanChild("rsel"));
+  el.querySelector(".rsel").textContent = "selected";
+  return el;
+}
+function spanChild(cls) {
+  const s = document.createElement("span");
+  s.className = cls;
+  return s;
+}
+// The status word and its measurement are the pair FR-034 protects from
+// truncation at any width — joined into one `.rstatus` node so the two
+// never separate under the `flex:none` rule that keeps them whole.
+function updateRow(el, {fields}) {
+  el.querySelector(".rname").textContent = fields.name;
+  el.querySelector(".rwhere").textContent = fields.where;
+  el.querySelector(".rstatus").textContent = fields.measure != null
+    ? `${fields.word} · ${fields.measure}` : fields.word;
+  const meta = [];
+  if (fields.pipeline != null) meta.push(fields.pipeline);
+  if (fields.age != null) meta.push(`age ${fields.age}`);
+  if (fields.ctx != null) meta.push(fields.ctx);
+  if (fields.mem != null) meta.push(fields.mem);
+  el.querySelector(".rmeta").textContent = meta.join(" · ");
+  el.querySelector(".rasks").textContent = fields.asks != null ? `ASKS: ${fields.asks}` : "";
+}
+
+// contracts/page-roster.md §3. The body is filled in incrementally by this
+// entry's user stories (US1's order and wording, US4's condition sentences,
+// US3/US5's selection and width writes) — present now, guarded, only so every
+// call site below already exists at the position FR-028 depends on.
+function renderRoster(sessions, cond) {
+  if (!window.CCWATCH_ROSTER) return;
+  // data-model.md §5, C-B: while the first snapshot is still warming there is
+  // no session data to trust yet, so the panel lists nothing — the retained
+  // rows during a feed_down tick are the one case rows are kept (FR-025(b)).
+  const rows = cond && cond.trust === "warming" ? [] : sessions;
+  const st = CCWATCH_ROSTER.statements(cond);
+  rosterEls.condMain.className = "main" + (st.mainKind ? " " + st.mainKind : "");
+  rosterEls.condMain.textContent = st.main;
+  rosterEls.condUnreadable.textContent = st.unreadable;
+  rosterEls.condEmpty.textContent = st.empty;
+
+  const keys = CCWATCH_ROSTER.keysOf(rows);
+  const wanted = {};
+  for (const r of rows) {
+    if (r.sid == null) continue;
+    wanted[r.sid] = {row: r, fields: CCWATCH_ROSTER.rowFields(r, {volatile: VOLATILE})};
+  }
+  const list = rosterEls.list;
+  reconcile(list, wanted, "row", (sid) => makeRow(sid), updateRow);
+  // Post-reconcile order (research.md D4): create/remove has already run, so
+  // every wanted sid is attached — a freshly appended row sits at the end
+  // until reorderPlan's insertBefore moves put it where `keys` wants it.
+  const currentKeys = [];
+  for (const child of list.children) currentKeys.push(child.dataset.sid);
+  for (const move of CCWATCH_ROSTER.reorderPlan(currentKeys, keys)) {
+    const el = list._reconcileIndex.row[move.key];
+    const beforeEl = move.before != null ? list._reconcileIndex.row[move.before] : null;
+    list.insertBefore(el, beforeEl);
+  }
+  rosterEls.title.textContent = "agents · " + keys.length;
+
+  // Roving tabindex, restored by sid rather than position (FR-014, D4): a
+  // reorder or a removal must not silently drop focus out of the listbox.
+  // aria-selected is written here, in the same pass, from the page-level
+  // selectedSid — never from a second read of the payload.
+  const hadFocus = list.contains(document.activeElement);
+  focusedSid = CCWATCH_ROSTER.focusTarget(focusedSid, keys) ?? (keys.length ? keys[0] : null);
+  for (const child of list.children) {
+    const sid = child.dataset.sid;
+    child.tabIndex = sid === focusedSid ? 0 : -1;
+    child.setAttribute("aria-selected", sid === selectedSid ? "true" : "false");
+  }
+  if (hadFocus && focusedSid != null) {
+    const focusEl = list._reconcileIndex.row[focusedSid];
+    if (focusEl) focusEl.focus();
+  }
+
+  // The tombstone (data-model.md §6, contracts/page-roster.md §3): resolved
+  // from the same cond object the banner reads, never latched, so a good
+  // snapshot that brings the sid back clears it on that same repaint.
+  for (const r of sessions) if (r.sid != null && r.name != null) knownNames[r.sid] = r.name;
+  const resolved = window.CCWATCH_ROSTER
+    ? CCWATCH_ROSTER.resolveSelection(selectedSid, sessions, cond) : {state: "none"};
+  if (resolved.state === "gone") {
+    rosterEls.goneMsg.textContent = CCWATCH_ROSTER.goneText(resolved.sid, knownNames[resolved.sid]);
+    rosterEls.gone.classList.add("on");
+  } else {
+    rosterEls.gone.classList.remove("on");
+  }
+}
+// Names seen in any trusted tick, kept for the tombstone sentence even after
+// the sid it belongs to disappears from a later payload.
+let knownNames = {};
+
+// The two stored records (data-model.md §8), independent of PLOTS_KEY and of
+// camera.js's own key. Storage calls are injected the same way (contracts
+// roster-js.md §7): a throwing localStorage cannot take the map down.
+const SELECTION_KEY = "ccwatch.map.selection.v1";
+function getSelectionItem() { return localStorage.getItem(SELECTION_KEY); }
+function setSelectionItem(v) { localStorage.setItem(SELECTION_KEY, v); }
+const WIDTH_KEY = "ccwatch.map.width.v1";
+function getWidthItem() { return localStorage.getItem(WIDTH_KEY); }
+function setWidthItem(v) { localStorage.setItem(WIDTH_KEY, v); }
+
+// The roster's own state, read by every call site above renderRoster's own
+// definition needs — kept here rather than re-derived, since applyFeed is the
+// only place a fresh `sessions`/`cond` pair arrives.
+let lastSessions = [], lastCond = null;
+// Restored at load (contracts/page-roster.md §6/§8, D7): the initial mark
+// does not fly, because lastFlownSid starts null only after the first real
+// selectRow — see markInitialSelection below.
+let selectedSid = window.CCWATCH_ROSTER
+  ? (CCWATCH_ROSTER.loadSelection(getSelectionItem)?.sid ?? null) : null;
+// Exactly one camera move per selection (D7): a restored selection or a
+// reselect of the sid already flown to must not move the camera again.
+let lastFlownSid = null;
+// The world centre of each currently-placed figure, rebuilt every drawWorld
+// call from plots.js's own cx/cy (web/plots.js:259-261, D19). A sid with no
+// placement this tick is simply absent — selectRow's fly is a no-op for it.
+let centreBySid = {};
+// The row currently reachable by Tab (roving tabindex, FR-014). Restored by
+// sid, not position, across every renderRoster call — see the pass at the
+// end of renderRoster itself.
+let focusedSid = null;
+
+// The selection-change handler (contracts/page-roster.md §3/§6): sets the
+// page-level selectedSid, persists it, re-renders the roster (row marker),
+// emphasises the matching figure, and flies iff sid !== lastFlownSid.
+function selectRow(sid) {
+  selectedSid = sid;
+  CCWATCH_ROSTER.saveSelection(setSelectionItem, sid);
+  renderRoster(lastSessions, lastCond);
+  applySelectionEmphasis();
+  flyToSelection();
+}
+
+// The figure emphasis is a class on the outer <g class="agent"> node, never
+// inside .figart which updateFigure rebuilds wholesale every tick
+// (web/map.html:798-807, contracts/page-roster.md §6).
+function applySelectionEmphasis() {
+  for (const g of $("camera").querySelectorAll(".agent[data-sid]")) {
+    g.classList.toggle("selected", g.dataset.sid === selectedSid);
+  }
+}
+
+// contracts/page-roster.md §6: the first caller of CCWATCH_MAP_CAMERA that
+// entry 003 shipped with none. reducedMotion is read at the moment of the
+// fly, not left to the stylesheet alone (D8) — a `transition:none` fires no
+// `transitionend`, which would leave `.eased` on #camera forever.
+function flyToSelection() {
+  if (selectedSid == null || selectedSid === lastFlownSid) return;
+  const c = centreBySid[selectedSid];
+  if (!c) return;
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  CCWATCH_MAP_CAMERA.centreOn(c.cx, c.cy, {
+    animate: !reducedMotion,
+    idx: CCWATCH_ROSTER.flyIdx(CCWATCH_MAP_CAMERA.current().level),
+  });
+  lastFlownSid = selectedSid;
+}
+
+// FR-021: selecting a row never opens the inspector — the existing .agent
+// click handler (web/map.html:1339-1345 area) is untouched.
+rosterEls.list.addEventListener("click", (e) => {
+  const row = e.target.closest(".rrow");
+  if (row) selectRow(row.dataset.sid);
+});
+
+// The tombstone's dismiss button (data-model.md §6): clears the selection
+// and its stored record; the remaining rows keep rendering.
+rosterEls.goneDismiss.addEventListener("click", () => {
+  selectedSid = null;
+  CCWATCH_ROSTER.saveSelection(setSelectionItem, null);
+  renderRoster(lastSessions, lastCond);
+});
+
+// The row-focus handler (contracts/page-roster.md §3/§4): a row reached by
+// Tab (rather than by an arrow key, which sets focusedSid itself below)
+// becomes the roving-tabindex target too, so Tab and the arrows never
+// disagree about which row is "current".
+rosterEls.list.addEventListener("focusin", (e) => {
+  const row = e.target.closest(".rrow");
+  if (row) focusedSid = row.dataset.sid;
+  renderRoster(lastSessions, lastCond);
+});
+
+// contracts/page-roster.md §4: bound to #rosterlist, never document, so the
+// roster's arrows can never pan the map and the map's own keydown (bound to
+// #world) can never move roster focus (FR-017).
+rosterEls.list.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Home" || e.key === "End") {
+    e.preventDefault();
+    const keys = CCWATCH_ROSTER.keysOf(lastSessions);
+    const next = CCWATCH_ROSTER.nextFocus(keys, focusedSid, e.key);
+    if (next == null) return;
+    focusedSid = next;
+    renderRoster(lastSessions, lastCond);
+    const el = rosterEls.list._reconcileIndex && rosterEls.list._reconcileIndex.row[next];
+    if (el) el.focus();
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    if (focusedSid != null) selectRow(focusedSid);
+  }
+});
+
+// The width/viewport-change path (contracts/page-roster.md §3/§6). Never
+// calls fitView, so a width change cannot discard the camera (FR-033).
+function setWidth(w) {
+  if (!window.CCWATCH_ROSTER) return;
+  rosterEls.stage.style.setProperty("--roster-w", w + "px");
+  rosterEls.divider.setAttribute("aria-valuenow", Math.round(w));
+  rosterEls.divider.setAttribute("aria-valuemin", CCWATCH_ROSTER.WIDTH_MIN);
+  rosterEls.divider.setAttribute("aria-valuemax", Math.round(
+    Math.min(CCWATCH_ROSTER.WIDTH_MAX_PX, CCWATCH_ROSTER.WIDTH_MAX_FRAC * innerWidth)));
+  CCWATCH_ROSTER.saveWidth(setWidthItem, w);
+  reflowWorld();
+  renderRoster(lastSessions, lastCond);
+}
+
+// #rdivider — pointer drag (contracts/page-roster.md §4): setPointerCapture,
+// clamped per movement tick against the current window width. The drag base
+// is the panel's width at pointerdown, not the running value, so repeated
+// small moves cannot accumulate drift.
+const rdrag = {active: false, id: null, x: 0, w: 0};
+rosterEls.divider.addEventListener("pointerdown", e => {
+  if (e.button !== 0 || !window.CCWATCH_ROSTER) return;
+  rdrag.active = true; rdrag.id = e.pointerId; rdrag.x = e.clientX;
+  rdrag.w = rosterEls.roster.getBoundingClientRect().width;
+  rosterEls.divider.setPointerCapture(e.pointerId);
+});
+rosterEls.divider.addEventListener("pointermove", e => {
+  if (!rdrag.active || e.pointerId !== rdrag.id) return;
+  const dx = e.clientX - rdrag.x;
+  setWidth(CCWATCH_ROSTER.clampWidth(rdrag.w + dx, innerWidth));
+});
+function endRDrag(e) {
+  if (!rdrag.active || e.pointerId !== rdrag.id) return;
+  rdrag.active = false;
+}
+rosterEls.divider.addEventListener("pointerup", endRDrag);
+rosterEls.divider.addEventListener("pointercancel", endRDrag);
+rosterEls.divider.addEventListener("lostpointercapture", endRDrag);
+
+// #rdivider — keyboard control (FR-032): ArrowLeft/ArrowRight by WIDTH_STEP
+// (Shift = WIDTH_STEP_BIG), Home/End to the clamped extremes.
+rosterEls.divider.addEventListener("keydown", e => {
+  if (!window.CCWATCH_ROSTER) return;
+  const cur = rosterEls.roster.getBoundingClientRect().width;
+  let w;
+  if (e.key === "ArrowLeft") w = cur - (e.shiftKey ? CCWATCH_ROSTER.WIDTH_STEP_BIG : CCWATCH_ROSTER.WIDTH_STEP);
+  else if (e.key === "ArrowRight") w = cur + (e.shiftKey ? CCWATCH_ROSTER.WIDTH_STEP_BIG : CCWATCH_ROSTER.WIDTH_STEP);
+  else if (e.key === "Home") w = CCWATCH_ROSTER.WIDTH_MIN;
+  else if (e.key === "End") w = CCWATCH_ROSTER.WIDTH_MAX_PX;
+  else return;
+  e.preventDefault();
+  setWidth(CCWATCH_ROSTER.clampWidth(w, innerWidth));
+});
+
 // Draws (or redraws) from whatever body is currently trusted enough to show —
 // a fresh one on a successful tick, or the retained one on a failed/warming
 // tick — with `VOLATILE` set first so every primitive it calls withholds (or
 // restores) the same readings this same tick (FR-032, R4, R7).
 function applyFeed(s, cond) {
   VOLATILE = cond.trust === "ok";
+  lastSessions = s.sessions || [];
+  lastCond = cond;
+  renderRoster(lastSessions, cond);
   CAN_KILL = !!s.can_kill;
 
   // Keyed by identity (data-model.md §2), not by project/severity, so the
@@ -1747,13 +2127,13 @@ function resume() {
   // The transcript inspector, if open, follows the same visibility rule.
   if (target) every("convo", 5000, loadConvo);
 }
-document.addEventListener("visibilitychange", resume);
-resume();
 // No refit on resize (research.md D9, FR-010, FR-049): the centre world
 // point is held and the view is re-clamped against the unchanged extent, so
 // a chosen zoom and pan survive a window resize. Not while hidden — a
-// backgrounded tab does not resize.
-addEventListener("resize", () => {
+// backgrounded tab does not resize. Extracted into its own function
+// (contracts/page-roster.md §7) so a width change (US5) and the load-time
+// call just below can share it with the resize listener, unchanged here.
+function reflowWorld() {
   if (document.hidden || !worldExtent) return;
   const world = $("world");
   const k = CCWATCH_CAMERA.scaleFor(view.idx);
@@ -1764,7 +2144,22 @@ addEventListener("resize", () => {
   world.setAttribute("viewBox", `0 0 ${vw} ${vh}`);
   view = CCWATCH_CAMERA.clampPan(CCWATCH_CAMERA.centreOn(view, wx, wy, vw, vh), worldExtent, vw, vh);
   applyView();
-});
+}
+document.addEventListener("visibilitychange", resume);
+// Load-time width (contracts/page-roster.md §8, data-model.md §7 W4): below
+// STACK_BREAKPOINT the stored width is not applied at all — the stacked
+// layout is CSS's @media rule (T008), and #roster's flex-basis in that mode
+// is "auto", so writing --roster-w there would just be a value nothing reads.
+if (window.CCWATCH_ROSTER && !CCWATCH_ROSTER.stacked(innerWidth)) {
+  const storedWidth = CCWATCH_ROSTER.loadWidth(getWidthItem)?.w ?? CCWATCH_ROSTER.WIDTH_DEFAULT;
+  setWidth(CCWATCH_ROSTER.clampWidth(storedWidth, innerWidth));
+}
+// Before the first tick() (contracts/page-roster.md §8): a no-op until
+// worldExtent exists, but the position is what a later window resize needs
+// to have always been able to rely on this function existing at.
+reflowWorld();
+resume();
+addEventListener("resize", reflowWorld);
 </script>
 </body>
 </html>
