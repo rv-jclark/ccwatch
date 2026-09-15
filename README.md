@@ -419,6 +419,25 @@ session with nothing to corroborate it, and a `z` for idle. The fill level
 inside the body is how full its context window is. Motion is only ever applied
 to a state that is actually changing, so a still figure means a still session.
 
+That motion is **stepped, not tweened** — each pose is held, and the figure
+snaps between poses. That is a performance constraint, not a style choice.
+These animations move `transform` on an SVG `<g>`, and Chrome cannot promote an
+SVG group to its own composited layer, so a tweened figure re-rasterises the
+SVG subtree on the main thread every frame for as long as any session is busy.
+Measured on an idle map with three busy figures: 4.1% of a core in the renderer
+plus 3.7% in the GPU process, against a 1.5% floor with the animations off.
+Holding the poses with `step-end` changes the style twice per cycle instead of
+roughly 54 times, and the same page costs 2.8%.
+
+The cost is a **cliff, not a slope**: three animated figures and seven measured
+the same (4.3% + 3.8%), and `tilt` at 3.4s cost exactly what `bob` at 0.9s did.
+The price is 60fps frame production at all, not the number of things moving —
+so thinning the animations out or slowing them down buys nothing, and only
+losing the tween does. This is worth stating because the obvious reading of a
+map that costs 8% of a core is that the pan-and-zoom camera is expensive. It
+is not: the camera schedules nothing at rest, and its easing is one bounded
+180ms transition removed on `transitionend`.
+
 Unfinished runs lie in the territory they belong to, deploy badges sit in its
 header, and messages between sessions are drawn as arrows between the two
 figures — including across territories, which is the case worth seeing.
@@ -1181,6 +1200,7 @@ implementation broken in the specific way it describes:
 | let `askModel` report `kind: "dialog"` from the same branch as `kind: "questions"` instead of a distinct `how` | 1 |
 | let `sendModel({canSend: false, ...})` report `state: "ready"` instead of naming `--read-only` | 1 |
 | drop one of `doSend`/`doKill`'s `X-CCWatch-Token` headers, or reintroduce an `#ifoot` `style.display` write | 1 |
+| give any figure animation an interpolating timing function again (`ease-in-out`, `linear`, a `cubic-bezier`) instead of `step-end` | 2 |
 
 That last table is not decoration. Two of those mutations are bugs that were
 actually **in** the code and were found this way, and two entries started life

@@ -43,7 +43,7 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 #
 # So TALLY_FLOOR is what always runs, and TALLY_FLOOR_NODE is added only when
 # node is actually present.
-TALLY_FLOOR=295
+TALLY_FLOOR=300
 TALLY_FLOOR_NODE=250
 
 assert_contains() { case "$1" in *"$2"*) t_pass "$3";; *) t_fail "$3" "expected to contain: $2";; esac; }
@@ -1021,6 +1021,30 @@ assert_contains "$_eased_rule" 'transition: transform 180ms ease-out' \
 _reduced_motion_block=$(awk '/@media \(prefers-reduced-motion: reduce\)/{f=1} f{print; if (/^  \}/) exit}' "$ROOT/web/map.html")
 assert_contains "$_reduced_motion_block" '#camera.eased { transition: none; }' \
   "the rule reduces to none under prefers-reduced-motion: reduce"
+
+# ⚠️ The figure animations must hold discrete poses, never interpolate. They
+# animate `transform` on an SVG <g>, which Chrome cannot promote to a
+# composited layer, so a tweened figure re-rasters the SVG subtree on the main
+# thread every frame for as long as any session is busy: measured at 4.1% of a
+# core in the renderer plus 3.7% in the GPU process on an otherwise idle map,
+# against a 1.5% floor with the animations off. `step-end` costs 2.8%.
+# The timing function is what is asserted, not the presence of the animation,
+# because that is the whole of the difference — and the cost does not scale
+# with how many figures move (3 and 7 measured the same), so an assertion that
+# merely counted the animations would pass while the page burned a core.
+for _fanim in '\.busy \.body' '\.waiting \.arm' '\.waiting \.bubble' '\.hung \.body'; do
+  _frule=$(printf '%s' "$_maphtml" | grep -E "^[[:space:]]*${_fanim} \{.*animation:" | head -1)
+  assert_contains "$_frule" 'step-end' \
+    "${_fanim}'s animation holds its poses with step-end"
+done
+# The companion check, phrased so it cannot be satisfied by the comment that
+# explains it: the pattern anchors on a rule's selector and its animation
+# shorthand, so the prose above naming `ease-in-out` does not match it. (A
+# guard that failed on its own explanatory comment is in the mutation table.)
+_tweened=$(grep -cE '^[[:space:]]*\.(busy|waiting|hung) [^{]*\{[^}]*animation:[^;]*(ease|linear|cubic-bezier)' \
+  "$ROOT/web/map.html")
+assert_eq "$_tweened" "0" \
+  "no figure animation uses an interpolating timing function"
 
 # The dashboard must never derive its own version of the status: two renderings
 # that compute it separately will eventually disagree, and the one you are not
