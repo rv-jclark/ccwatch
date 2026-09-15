@@ -3427,6 +3427,22 @@ function run(doc, win) {
           " vs content " + inner.offsetWidth + "x" + inner.offsetHeight);
   }
 
+  // 13b - no branch label is a placeholder. A session with no branch must show
+  // no branch line, not a line reading "?" — and not a visible empty one
+  // either, which is what `textContent = ""` alone would leave. The count of
+  // labels examined is reported, because "none of zero labels was wrong" and
+  // "none of nine was" are different facts and this check cannot tell the
+  // fixture which it got.
+  var zlabels = [].slice.call(inner.querySelectorAll(".zlabel"));
+  var badLabels = zlabels.filter(function (l) {
+    var t = (l.textContent || "").trim();
+    var visible = win.getComputedStyle(l).display !== "none";
+    return t === "?" || (visible && t === "");
+  });
+  check("no branch label is a placeholder or a visible blank",
+        badLabels.length === 0,
+        badLabels.length + " of " + zlabels.length + " labels are \"?\" or blank");
+
   // 14 - the key is reachable, and named rather than identified by a glyph.
   var keyBtn = doc.getElementById("keyhelp");
   check("the map key is behind a named control",

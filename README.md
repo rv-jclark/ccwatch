@@ -532,6 +532,23 @@ which is the one thing this tool may not do. A scrollbar is the same bug made
 visible. `verify-ui` asserts that at its own width nothing actually overflows,
 so the fallback stays a fallback.
 
+A session with **no git branch shows no branch line**, not a placeholder one.
+The zone label printed `r.branch || "?"`, so a session the collector had
+explicitly reported as having none — `bin/ccwatch` normalises an empty branch
+to `null` on purpose — was labelled `?` on the page. That is a value invented
+for a field that said it had none, in a vocabulary where `?` already means
+"suspected", as in `HUNG?`. The CLI had the right answer all along:
+`${branch:+branch $branch}` prints the clause only when there is one. The
+sentinel behind it is the empty string, because git cannot name a branch that,
+so it can never be confused with a real one — which `?` could.
+
+A card with no remote is labelled by its directory and **names the full path on
+hover**, because a directory basename is not unique across machines: `scratch`
+could be anywhere. The hover also says *why* there is no repo rather than only
+that there is none. (Where the directory really is `/`, `/` is what it says —
+that one is not a derivation bug, it is a session running at the filesystem
+root.)
+
 Message arrows survive, drawn on an SVG overlay inside the scroll content. Its
 endpoints are measured from the figures' own boxes relative to that content, so
 the overlay scrolls with the blocks for free — there is no scroll listener and
@@ -1227,6 +1244,11 @@ implementation broken in the specific way it describes:
 | reintroduce a `[data-lod]` rule, or a reader of the retired camera's `--k` scale | 2 |
 | sort the board on `sev`/`psev`/`token` instead of on the name | 1 |
 | re-append children to sort them instead of writing `style.order` | 4 |
+| substitute a placeholder (`r.branch || "?"`) for a session with no git branch | 2 + 1 (verify-ui) |
+| make the no-branch sentinel a string git could actually name a branch | 1 |
+| print the sentinel in the zone label instead of branching on it | 3 |
+| blank the branch label with `textContent = ""` instead of hiding it, leaving a visible empty line | 1 |
+| drop the directory path from a no-repo card's hover, leaving an ambiguous basename | 2 |
 | give any figure animation an interpolating timing function again (`ease-in-out`, `linear`, a `cubic-bezier`) instead of `step-end` | 2 |
 
 That last table is not decoration. Two of those mutations are bugs that were

@@ -46,7 +46,7 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # replaced by the scrolling board: web/plots.js and web/camera.js were pure
 # arithmetic modules with 73 node checks between them, and retiring the
 # arithmetic retired the assertions on it.
-TALLY_FLOOR=303
+TALLY_FLOOR=312
 TALLY_FLOOR_NODE=185
 
 assert_contains() { case "$1" in *"$2"*) t_pass "$3";; *) t_fail "$3" "expected to contain: $2";; esac; }
@@ -1068,6 +1068,38 @@ assert_contains "$_bwm" 'sort(byName)' "and the sort it uses is the name compara
 # mistake — a guard tripped by its own documentation — is in the mutation table.
 assert_eq "$(printf '%s' "$_maphtml" | grep -c 'localeCompare(')" "0" \
   "and the comparator is locale-independent, never a localeCompare() call"
+
+# ⚠️ A missing branch must read as an absence, never as a placeholder. The zone
+# label printed `r.branch || "?"`, so a session the collector had explicitly
+# reported as having no branch (bin/ccwatch:908 normalises an empty branch to
+# null on purpose) was labelled `?` on the page — a value invented for a field
+# that said it had none, in a vocabulary where `?` already means "suspected"
+# (HUNG?). The CLI's own answer is omission: `${branch:+branch $branch}` at
+# bin/ccwatch:1328 prints the clause only when there is one to print.
+assert_not_contains "$_bwm" 'r.branch || "?"' \
+  "buildWorldModel does not substitute a placeholder for a missing branch"
+assert_contains "$_bwm" 'r.branch || NO_BRANCH' \
+  "and routes a missing branch through the NO_BRANCH sentinel"
+# The sentinel is the empty string because git cannot name a branch that, so it
+# can never collide with a real branch — which "?" could.
+assert_contains "$_maphtml" 'const NO_BRANCH = "";' \
+  "and the sentinel is the one string git cannot name a branch"
+_updatezone_js=$(printf '%s' "$_maphtml" | awk '/^function updateZone\(/{f=1} f{print; if (/^\}/) exit}')
+assert_contains "$_updatezone_js" 'z.branch === NO_BRANCH' \
+  "updateZone branches on the sentinel rather than printing it"
+assert_contains "$_updatezone_js" 'label.hidden = true' \
+  "and hides the label entirely, leaving no empty line where a branch would be"
+assert_contains "$_updatezone_js" 'div.removeAttribute("title")' \
+  "and drops the hover too, rather than offering \"branch \" with nothing after it"
+
+# A card without a remote is named by a directory basename, which is not unique
+# across machines — `scratch` could be anywhere — so the hover carries the full
+# path and says why there is no repo, not merely that there is not one.
+_updatebuilding_js=$(printf '%s' "$_maphtml" | awk '/^function updateBuilding\(/{f=1} f{print; if (/^\}/) exit}')
+assert_contains "$_updatebuilding_js" 'b.dir' \
+  "updateBuilding names the real directory of a card that has no git remote"
+assert_contains "$_updatebuilding_js" 'no git remote' \
+  "and says why it has no repo, not just that it has none"
 
 # ⚠️ The figure animations must hold discrete poses, never interpolate. They
 # animate `transform` on an SVG <g>, which Chrome cannot promote to a

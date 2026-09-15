@@ -707,6 +707,17 @@ function shortName(r) {
 
 const NO_REPO = "no repo";
 
+// ⚠️ The zone key for "this session has no git branch". The empty string,
+// because git cannot name a branch that, so it can never collide with a real
+// one — which `"?"` could, and did worse than collide: it was PRINTED as the
+// branch, so a session the payload said had no branch was labelled `?` on the
+// page. That is inventing a value the collector deliberately reported as
+// absent (bin/ccwatch:908 normalises an empty branch to null on purpose), and
+// `?` is already this tool's vocabulary for "suspected", as in HUNG?. The CLI
+// has the right answer and has had it all along: `${branch:+branch $branch}`
+// at bin/ccwatch:1328 prints the clause only when there is a branch to print.
+const NO_BRANCH = "";
+
 // ⚠️ One comparator for every level, and it is deliberately NOT localeCompare.
 // localeCompare's answer depends on the browser's locale and ICU build, so two
 // machines could order the same sessions differently and a test could pass on
@@ -729,9 +740,14 @@ function buildWorldModel(s) {
     }
     return districts[org];
   }
-  function ensureBuilding(d, slug, label, hasRemote) {
+  // `dir` is the directory a no-repo card stands for, kept so the card can
+  // name it on hover. The visible label is the short form, which for a
+  // directory is ambiguous across machines — `scratch` could be anywhere —
+  // and the path is the only thing that identifies it.
+  function ensureBuilding(d, slug, label, hasRemote, dir) {
     if (!d.buildings[slug])
-      d.buildings[slug] = {slug, label, hasRemote, zones: {}, unfinished: [], deploys: []};
+      d.buildings[slug] = {slug, label, hasRemote, dir: dir || null,
+                            zones: {}, unfinished: [], deploys: []};
     return d.buildings[slug];
   }
   function ensureZone(b, branchKey) {
@@ -742,11 +758,12 @@ function buildWorldModel(s) {
   for (const r of (s.sessions || [])) {
     const hasRemote = !!r.repo;
     const org = hasRemote ? r.repo.split("/")[0] : NO_REPO;
+    const dir = hasRemote ? null : (r.cwd || null);
     const slug = r.repo || ("dir:" + (r.cwd || "?"));
     const label = r.repo || r.project || slug;
-    const branchKey = r.branch || "?";
+    const branchKey = r.branch || NO_BRANCH;
     const d = ensureDistrict(org, !hasRemote);
-    const b = ensureBuilding(d, slug, label, hasRemote);
+    const b = ensureBuilding(d, slug, label, hasRemote, dir);
     const z = ensureZone(b, branchKey);
     z.figures.push({sid: r.sid});
     figuresByKey["f|" + slug + "|" + branchKey + "|" + r.sid] = r;
@@ -766,7 +783,9 @@ function buildWorldModel(s) {
     const slug = u.repo || ("dir:" + (u.project || "?"));
     const label = u.repo || u.project || slug;
     const d = ensureDistrict(org, !hasRemote);
-    const b = ensureBuilding(d, slug, label, hasRemote);
+    // No `dir`: an unfinished-run row carries no cwd, so there is no path to
+    // name. Passing `project` would look like one and be a directory basename.
+    const b = ensureBuilding(d, slug, label, hasRemote, null);
     b.unfinished.push(u);
     if (u.repo) buildingBySlugRepo[u.repo] = b;
     // The badge text this replaces at far (FR-022), so the aggregate carries
@@ -811,7 +830,7 @@ function buildWorldModel(s) {
         const b = d.buildings[slug];
         return {
           key: "b|" + d.org + "|" + slug,
-          slug: b.slug, label: b.label, hasRemote: b.hasRemote,
+          slug: b.slug, label: b.label, hasRemote: b.hasRemote, dir: b.dir,
           unfinishedRuns: b.unfinished, deploys: b.deploys,
           zones: Object.keys(b.zones).sort(byName).map(br => {
             const z = b.zones[br];
@@ -926,7 +945,13 @@ function makeBuilding() {
 function updateBuilding(art, b) {
   art.className = "building" + (b.unfinishedRuns.length ? " has-unfinished" : "");
   art.style.order = b.ord;
-  art.title = b.label + (b.hasRemote === false ? " (no repo)" : "");
+  // A card with a remote is named by its slug, which is globally unique. A
+  // card without one is named by a directory basename, which is not: the hover
+  // carries the full path so "which `scratch`" has an answer, and says why
+  // there is no repo rather than only that there isn't one.
+  art.title = b.hasRemote === false
+    ? (b.dir ? b.dir + " — no git remote" : b.label + " — no git remote")
+    : b.label;
   art.querySelector(".blabel").textContent = b.label;
   art.querySelector(".norepo-badge").textContent =
     b.hasRemote === false ? NO_REPO : "";
@@ -957,8 +982,22 @@ function makeZone() {
 }
 function updateZone(div, z) {
   div.style.order = z.ord;
-  div.title = "branch " + z.branch;
-  div.querySelector(".zlabel").textContent = z.branch;
+  const label = div.querySelector(".zlabel");
+  // ⚠️ No branch means no branch line, not a placeholder one. The label used to
+  // print `r.branch || "?"`, which stated a branch called `?` for a session the
+  // payload had explicitly reported as having none — and `?` is this tool's
+  // word for "suspected". The CLI omits the clause instead
+  // (bin/ccwatch:1328), and `hidden` is how a row omits itself without leaving
+  // an empty 10px line where a branch name would have been.
+  if (z.branch === NO_BRANCH) {
+    label.hidden = true;
+    label.textContent = "";
+    div.removeAttribute("title");
+  } else {
+    label.hidden = false;
+    label.textContent = z.branch;
+    div.title = "branch " + z.branch;
+  }
 }
 
 // A one-line delegation to CCWATCH_ROSTER.titleText (FR-012): the figure's
