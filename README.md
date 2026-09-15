@@ -549,6 +549,15 @@ that there is none. (Where the directory really is `/`, `/` is what it says —
 that one is not a derivation bug, it is a session running at the filesystem
 root.)
 
+The map key's `?` button lives in the **header**, beside the view switcher. It
+inherited the retired camera cluster's floating position at the bottom-left of
+the map area, and once the board scrolled underneath it, it sat on top of
+whatever was there — measured, it covered two `implement/CRASHED` badges. A
+control that floats over a scroll container needs a reason to, and a help
+button that is always in the same place does not have one. `verify-ui` now
+checks this geometrically, for any control, rather than checking one
+position value.
+
 Message arrows survive, drawn on an SVG overlay inside the scroll content. Its
 endpoints are measured from the figures' own boxes relative to that content, so
 the overlay scrolls with the blocks for free — there is no scroll listener and
@@ -1249,6 +1258,7 @@ implementation broken in the specific way it describes:
 | print the sentinel in the zone label instead of branching on it | 3 |
 | blank the branch label with `textContent = ""` instead of hiding it, leaving a visible empty line | 1 |
 | drop the directory path from a no-repo card's hover, leaving an ambiguous basename | 2 |
+| float the map-key button back over the board, where it covers whatever has scrolled under it | 1 (verify-ui) + 2 |
 | give any figure animation an interpolating timing function again (`ease-in-out`, `linear`, a `cubic-bezier`) instead of `step-end` | 2 |
 
 That last table is not decoration. Two of those mutations are bugs that were

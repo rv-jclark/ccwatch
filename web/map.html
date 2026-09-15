@@ -183,15 +183,17 @@
   .agent.sev3 .alabel { color:var(--bad); }
   .agent.sev2 .alabel { color:var(--ink); }
 
-  /* The map key's own control — all that is left of the camera's button
-     cluster. Floating over the scroll container rather than inside it, so it
-     does not scroll away from the reader who needs it. */
-  #boardctl { position:absolute; left:1.6rem; bottom:1.6rem; display:flex;
-              align-items:center; gap:.4rem; background:var(--panel);
-              border:1px solid var(--line); border-radius:6px; padding:.35rem .5rem;
-              font-size:11px; }
-  #boardctl button { background:none; border:1px solid var(--line); color:var(--ink);
-                     font:inherit; padding:.15rem .5rem; border-radius:4px; cursor:pointer; }
+  /* ⚠️ The map key's control lives in the HEADER, not floating over the board.
+     As the last survivor of the camera's button cluster it kept that cluster's
+     `position:absolute; bottom:1.6rem`, and once the board scrolled under it,
+     it sat on top of whatever happened to be at the bottom-left — measured,
+     it covered two `implement/CRASHED` badges on a card that had them. A
+     floating control needs a reason to float, and a help button that is always
+     in the same place does not have one. In the header it cannot overlap
+     anything and does not scroll away either. */
+  #keyhelp { background:none; border:1px solid var(--line); color:var(--ink);
+             font:inherit; font-size:11px; line-height:1.2; padding:.1rem .45rem;
+             border-radius:4px; cursor:pointer; margin-left:.1rem; }
 
   /* There is no level-of-detail rule any more, and that is the point. The old
      map hid buildings, zones, agents and labels below a zoom threshold, which
@@ -1688,23 +1690,21 @@ document.addEventListener("click", e => {
 });
 
 // ---- the map key -----------------------------------------------------------
-// All that remains of what was the camera's button cluster. Built with DOM
-// APIs, never innerHTML, so map.html still assigns innerHTML exactly twice
-// (FR-047). Lives in #wrap, as a sibling of the scroll container rather than
-// inside it, so it does not scroll away from the reader who needs it.
+// All that remains of what was the camera's button cluster: the zoom-out /
+// zoom-in / fit buttons and the "zoom 2x - mid" readout went with the camera,
+// because the browser's own scrollbar is the position indicator and there is
+// no zoom to be at. Built with DOM APIs, never innerHTML, so map.html still
+// assigns innerHTML exactly twice (FR-047).
 //
-// The zoom-out / zoom-in / fit buttons and the "zoom 2x - mid" readout went
-// with the camera. There is nothing left for them to do: the browser's own
-// scrollbar is the position indicator, and there is no zoom to be at.
-const boardctl = document.createElement("div");
-boardctl.id = "boardctl";
+// ⚠️ It goes in the header, beside the view switcher. It used to inherit the
+// cluster's floating position at the bottom-left of #wrap, and once the board
+// scrolled underneath it, it covered whatever was there — measured, two
+// `implement/CRASHED` badges. Nothing in the header can overlap the board.
 const keyBtn = document.createElement("button");
 keyBtn.id = "keyhelp"; keyBtn.type = "button"; keyBtn.textContent = "?";
-keyBtn.className = "ghost";
 keyBtn.setAttribute("aria-label", "map key — what the figures mean");
 keyBtn.title = "map key — what the figures mean";
-boardctl.append(keyBtn);
-$("board").insertAdjacentElement("afterend", boardctl);
+document.querySelector("header nav").appendChild(keyBtn);
 
 keyBtn.addEventListener("click", () => $("keymodal").showModal());
 $("keyclose").addEventListener("click", () => $("keymodal").close());

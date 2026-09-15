@@ -3443,6 +3443,30 @@ function run(doc, win) {
         badLabels.length === 0,
         badLabels.length + " of " + zlabels.length + " labels are \"?\" or blank");
 
+  // 13c - nothing chrome-like sits on top of the board's content. The map-key
+  // button used to float at the bottom-left of the map area, inheriting the
+  // retired camera cluster's position, and once the board scrolled under it it
+  // covered whatever was there — measured, two `implement/CRASHED` badges. The
+  // check is geometric rather than a position-value check, because "does this
+  // control cover content" is a question about boxes, and a future control
+  // could float somewhere else and be just as wrong.
+  var floaters = [].slice.call(doc.querySelectorAll("#keyhelp, #boardctl"))
+    .filter(function (c) { return boxOf(c).w > 0; });
+  var obscured = [];
+  floaters.forEach(function (c) {
+    var cb = boxOf(c);
+    [].slice.call(inner.querySelectorAll(".agent, .wreck-badge, .deploy-badge, .blabel, .zlabel, .dlabel"))
+      .forEach(function (e) {
+        var b = boxOf(e);
+        if (b.w === 0 || b.h === 0) { return; }
+        if (b.l < cb.r && b.r > cb.l && b.t < cb.b && b.b > cb.t) {
+          obscured.push("#" + c.id + " over ." + String(e.className).split(" ")[0]);
+        }
+      });
+  });
+  check("no control floats over the board's content", obscured.length === 0,
+        obscured.join(", "));
+
   // 14 - the key is reachable, and named rather than identified by a glyph.
   var keyBtn = doc.getElementById("keyhelp");
   check("the map key is behind a named control",

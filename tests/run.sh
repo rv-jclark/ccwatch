@@ -46,7 +46,7 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # replaced by the scrolling board: web/plots.js and web/camera.js were pure
 # arithmetic modules with 73 node checks between them, and retiring the
 # arithmetic retired the assertions on it.
-TALLY_FLOOR=312
+TALLY_FLOOR=315
 TALLY_FLOOR_NODE=185
 
 assert_contains() { case "$1" in *"$2"*) t_pass "$3";; *) t_fail "$3" "expected to contain: $2";; esac; }
@@ -1020,12 +1020,21 @@ assert_contains "$_inner_rule" 'position:relative' \
 # with a click handler, which a screen reader and Tab both skip. One now: the
 # zoom-out/zoom-in/fit trio went with the camera, since the browser's own
 # scrollbar is the position indicator and there is no zoom to be at.
-_boardctl_js=$(awk '/const boardctl = document.createElement/,/insertAdjacentElement/' "$ROOT/web/map.html")
-assert_eq "$(printf '%s' "$_boardctl_js" | grep -c 'createElement("button")')" "1" \
-  "#boardctl is built from one real <button> element"
+_keybtn_js=$(awk '/^const keyBtn = document.createElement/,/appendChild\(keyBtn\)/' "$ROOT/web/map.html")
+assert_eq "$(printf '%s' "$_keybtn_js" | grep -c 'createElement("button")')" "1" \
+  "the map key is built from one real <button> element"
 # A control whose only label is a glyph ("?") is a control nobody can identify.
-assert_contains "$_boardctl_js" 'setAttribute("aria-label"' \
+assert_contains "$_keybtn_js" 'setAttribute("aria-label"' \
   "and the glyph-only control is named by aria-label"
+# ⚠️ And it is in the HEADER, not floating over the board. It inherited the
+# retired camera cluster's `position:absolute; bottom:1.6rem`, and once the
+# board scrolled under it, it covered whatever sat at the bottom-left — two
+# `implement/CRASHED` badges, measured. A control that floats over a scroll
+# container has to earn it, and a help button in a fixed place does not.
+assert_contains "$_keybtn_js" 'querySelector("header nav").appendChild' \
+  "and it is docked in the header, where it cannot overlap the board"
+assert_eq "$(grep -c 'boardctl' "$ROOT/web/map.html")" "0" \
+  "and no floating control layer is left over the board"
 
 # ⚠️ No level-of-detail rule may come back. The camera hid buildings, zones,
 # agents and labels below a zoom threshold, and that is how it shipped a
