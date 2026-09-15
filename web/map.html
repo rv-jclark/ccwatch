@@ -63,89 +63,140 @@
   #trust .unreadable { display:block; color:var(--warn); }
   #trust .emptymsg { display:block; color:var(--dim); }
 
-  /* The map itself. A single inline SVG holds a `<g id="camera">` that every
-     district/building/zone/figure — and, from a later entry, the wires — is a
-     child of, all in world units authored by web/plots.js. Nothing here reads
-     getBoundingClientRect() to position anything; the camera's own transform
-     is the only place screen pixels enter the picture. A force-directed graph
-     was the other option and is worse here: with a dozen nodes it moves every
-     time you look at it, and "did that agent move or did I misremember" is not
-     a question a monitoring view should raise. */
-  #wrap { position:relative; padding:1.1rem; }
-  /* touch-action:none so a one-finger drag pans the map instead of scrolling
-     the page (FR-007).
-     ⚠️ user-select:none because the map is full of <text> — district, building
-     and zone labels, and the figure names. Without it, a drag that begins on
-     any label starts a TEXT SELECTION instead of a pan: the labels highlight,
-     and once the browser owns the gesture the pan never happens at all. That
-     is the "sometimes I can't drag" and "sometimes it highlights text"
-     behaviour, and which one you get depends only on whether the pointer
-     happened to land on a glyph. */
-  #world { width:100%; height:100%; flex:1 1 auto; display:block; touch-action:none;
-           user-select:none; -webkit-user-select:none; }
-  #world:focus-visible { outline:2px solid var(--info); outline-offset:2px; }
-  /* Page chrome, outside the camera group and outside data-lod on purpose
-     (page-camera.md §2): the controls are unaffected by the transform and
-     stay legible at every zoom. */
-  #camctl { position:absolute; left:1.6rem; bottom:1.6rem; display:flex;
-            align-items:center; gap:.4rem; background:var(--panel);
-            border:1px solid var(--line); border-radius:6px; padding:.35rem .5rem;
-            font-size:11px; }
-  #camctl button { background:none; border:1px solid var(--line); color:var(--ink);
-                    font:inherit; padding:.15rem .5rem; border-radius:4px; cursor:pointer; }
-  #camctl button:disabled { opacity:.4; cursor:default; }
-  #camstate { color:var(--dim); }
-  #camnote { color:var(--warn); }
-  .hit { fill:transparent; }
-  .district .hit { stroke:var(--line); stroke-width:1; fill:var(--ground); }
-  .building .hit { stroke:var(--line); stroke-width:.6; fill:var(--panel); }
-  .zone .hit { stroke:var(--line); stroke-width:.4; fill:none; stroke-dasharray:1.5; }
-  .dlabel { font-size:calc(7px / var(--k, 1)); fill:var(--ink); font-weight:600; }
-  .blabel { font-size:calc(5px / var(--k, 1)); fill:var(--ink); }
-  .zlabel { font-size:calc(4px / var(--k, 1)); fill:var(--dim); }
-  .norepo-badge { font-size:calc(4px / var(--k, 1)); fill:var(--warn); }
-  .wreck-badge { font-size:calc(4px / var(--k, 1)); fill:var(--bad); }
-  .deploy-badge { font-size:calc(4px / var(--k, 1)); fill:var(--ok); }
-  .building.has-unfinished .hit { stroke:var(--bad); }
-  .dsummary { font-size:calc(6px / var(--k, 1)); fill:var(--dim); }
+  /* The map itself: a scrolling column of owner sections, each holding a grid
+     of repo cards, each holding its branches and the figures standing in them.
+     Ordinary block layout, so the browser does the placement and the browser's
+     own scrollbar does the navigation.
 
-  .agent { cursor:default; }
-  .agent.clickable { cursor:pointer; }
-  .agent.clickable:hover .hit { fill:rgba(255,255,255,.06); }
+     ⚠️ This replaced a pan-and-zoom SVG camera, and the reason was not
+     performance — it was that the camera could not be relied on to show you
+     your agents. Measured on a real eight-session machine: the default view
+     had 1 of 4 territories fully visible and 2 of 8 sessions entirely
+     off-screen, one of them the session running ccwatch itself. `verify-ui`
+     was green throughout, because what it asserted was that *an* agent was
+     visible. A view whose honest reading is "some of your agents are somewhere
+     off to the bottom-right" is worth less than a list. Flow layout cannot
+     lose a territory: everything is in the scroll content, and the scrollbar
+     says how much of it there is.
+
+     A force-directed graph was considered for the original and is still worse:
+     with a dozen nodes it moves every time you look at it, and "did that agent
+     move or did I misremember" is not a question a monitoring view should
+     raise. Alphabetical order in flow answers it permanently. */
+  #wrap { position:relative; padding:0; }
+  /* The one scroll container, and the only scrollbar on the page — `body` is
+     still `overflow:hidden`. min-height:0 lets a flex child that scrolls
+     shrink below its content; the declaration that actually keeps the PAGE
+     from scrolling is #stage's, measured — removing this one alone did not
+     reproduce a page scroll, removing #stage's did. overscroll-behavior keeps
+     a wheel that reaches the end from turning into a page or history gesture.
+
+     ⚠️ `overflow:auto`, on BOTH axes, not `overflow-x:hidden`. The layout below
+     is built so nothing overflows sideways — min-width:0 and an ellipsis on
+     every long label, and a grid whose columns collapse to one at narrow
+     widths — but if something ever does, `hidden` would clip it and the
+     clipped part would be unreachable at every scroll position. That is a
+     failure presenting as an absence, which is the thing this tool is not
+     allowed to do. `auto` shows a scrollbar instead: the same bug, but
+     visible and navigable. verify-ui asserts that at its own width nothing
+     actually overflows, so the fallback stays a fallback. */
+  #board { flex:1 1 auto; min-width:0; min-height:0; overflow:auto;
+           overscroll-behavior:contain; padding:1.1rem; }
+  #board:focus-visible { outline:2px solid var(--info); outline-offset:-2px; }
+  /* position:relative is load-bearing: #wires is positioned against this box,
+     so it scrolls with the content for free and needs no scroll listener.
+     Being out of flow, it never feeds back into this box's own size. */
+  #boardinner { position:relative; display:flex; flex-direction:column; gap:1.1rem; }
+
+  /* The wire overlay. pointer-events:none so it never swallows a click meant
+     for a figure underneath it. */
+  #wires { position:absolute; left:0; top:0; pointer-events:none; overflow:visible; }
+  .wire path { stroke-width:calc(var(--wire-w, 1) * 1px); }
+  .wire text { font-size:9px; }
+
+  /* An owner: the outermost grouping, one per org, plus "no repo". */
+  .district { border:1px solid var(--line); border-radius:8px;
+              background:var(--ground); padding:.7rem .8rem; }
+  .dhead { display:flex; align-items:baseline; gap:.6rem; flex-wrap:wrap;
+           margin-bottom:.6rem; }
+  .dlabel { font-size:14px; color:var(--ink); font-weight:600; }
+  /* ⚠️ Always rendered, not only when zoomed out. This aggregate used to be
+     the far-zoom *substitute* for the detail, so at every other zoom the
+     session count, the worst status and the unfinished-run summary were simply
+     not on the page. They are facts about the territory at any scale. */
+  .dsummary { font-size:11px; color:var(--dim); }
+  /* ⚠️ auto-fit, not auto-fill. auto-fill keeps the empty columns it created,
+     so an owner with one repo rendered a ~400px card beside ~400px of nothing
+     — and since most owners here have exactly one repo, half the width of the
+     view was dead space. auto-fit collapses the empty tracks and the single
+     card takes the row. Card widths then differ between owner sections, which
+     is the trade and is fine: each section is its own visual unit, and the
+     alternative was spending half the viewport to make them line up.
+     min(280px,100%) so a narrow window gets one full-width column rather than
+     a 280px card with the rest of the row hanging off the side. */
+  .buildings { display:grid; gap:.6rem;
+               grid-template-columns:repeat(auto-fit, minmax(min(280px, 100%), 1fr)); }
+
+  /* A repo. */
+  .building { border:1px solid var(--line); border-radius:6px; background:var(--panel);
+              padding:.5rem .6rem; min-width:0; }
+  .building.has-unfinished { border-color:var(--bad); }
+  .bhead { display:flex; align-items:baseline; gap:.4rem; }
+  /* min-width:0 with the ellipsis: a repo slug is long, and must not widen the
+     grid track past the column it was given. */
+  .blabel { font-size:12px; color:var(--ink); min-width:0; overflow:hidden;
+            text-overflow:ellipsis; white-space:nowrap; }
+  .norepo-badge { font-size:10px; color:var(--warn); margin-left:auto; flex:none; }
+  .badges { display:flex; flex-direction:column; gap:.1rem; margin:.25rem 0; }
+  .wreck-badge { font-size:10px; color:var(--bad); }
+  .deploy-badge { font-size:10px; color:var(--ok); }
+
+  /* A branch, and the figures standing in it. */
+  .zones { display:flex; flex-direction:column; gap:.4rem; }
+  .zone { border-left:2px dashed var(--line); padding-left:.45rem; }
+  .zlabel { font-size:10px; color:var(--dim); overflow:hidden;
+            text-overflow:ellipsis; white-space:nowrap; }
+  .figures { display:flex; flex-wrap:wrap; gap:.15rem; }
+
+  /* ⚠️ A real <button>. As an SVG `<g role="button" tabindex="0">` this needed
+     a hand-rolled focus ring — an SVG group takes no outline — and a keydown
+     handler to make Enter and Space do what the role already promised. A
+     button needs neither, and cannot get either wrong. */
+  /* ⚠️ The width is set by the LABEL, not by the 34px of figure art. At 3.1rem
+     it fitted the drawing and clipped the name: `agents-ba` and `agents-62`
+     both rendered as `agents…`, which is worse than no label, because two
+     different sessions became indistinguishable at a glance. 4.4rem fits the
+     eleven characters these names actually run to. */
+  .agent { appearance:none; background:none; border:1px solid transparent;
+           border-radius:5px; padding:.1rem .15rem .2rem; cursor:pointer;
+           color:inherit; font:inherit; display:flex; flex-direction:column;
+           align-items:center; width:4.4rem; }
+  .agent:hover { background:rgba(255,255,255,.06); }
+  .agent:focus-visible { outline:2px solid var(--info); outline-offset:1px; }
+  /* The selection mark (contracts/page-roster.md §6): a dashed ring, so it
+     reads as "picked in the roster" rather than as a status of its own. */
+  .agent.selected { border-color:var(--info); border-style:dashed; }
   .figure { display:block; overflow:visible; }
-  .alabel { font-size:calc(3.6px / var(--k, 1)); fill:var(--dim); text-anchor:middle; }
-  .agent.sev4 .alabel { fill:var(--block); font-weight:600; }
-  .agent.sev3 .alabel { fill:var(--bad); }
-  .agent.sev2 .alabel { fill:var(--ink); }
+  .alabel { font-size:9px; color:var(--dim); max-width:100%; overflow:hidden;
+            text-overflow:ellipsis; white-space:nowrap; }
+  .agent.sev4 .alabel { color:var(--block); font-weight:600; }
+  .agent.sev3 .alabel { color:var(--bad); }
+  .agent.sev2 .alabel { color:var(--ink); }
 
-  /* Level of detail (contracts/page-camera.md §3): one attribute, four
-     rules. The far level shows the district aggregate instead of buildings,
-     zones, agents and their labels; near is the only level that also shows
-     agent labels — mid shows the figures themselves but not their names. */
-  #world[data-lod="far"] .building,
-  #world[data-lod="far"] .zone,
-  #world[data-lod="far"] .agent      { display:none; }
-  #world[data-lod="far"] .dlabel     { display:none; }
-  #world:not([data-lod="far"]) .dsummary { display:none; }
-  #world[data-lod="mid"] .alabel     { display:none; }
+  /* The map key's own control — all that is left of the camera's button
+     cluster. Floating over the scroll container rather than inside it, so it
+     does not scroll away from the reader who needs it. */
+  #boardctl { position:absolute; left:1.6rem; bottom:1.6rem; display:flex;
+              align-items:center; gap:.4rem; background:var(--panel);
+              border:1px solid var(--line); border-radius:6px; padding:.35rem .5rem;
+              font-size:11px; }
+  #boardctl button { background:none; border:1px solid var(--line); color:var(--ink);
+                     font:inherit; padding:.15rem .5rem; border-radius:4px; cursor:pointer; }
 
-  /* Constant apparent size for wires (FR-031-FR-033, contracts/page-camera.md
-     §3): the stroke width is staged as --wire-w by updateWire() and divided
-     by --k here, and the count bubble is un-scaled by nesting .bubblescale
-     one level inside .bubble, whose own transform carries only position. */
-  .wire path { stroke-width:calc(var(--wire-w, 1) * 1px / var(--k, 1)); }
-  .wire text { font-size:9px; } /* inside .bubblescale — already counter-scaled */
-  .bubblescale { transform:scale(calc(1 / var(--k, 1))); transform-origin:0 0; }
-
-  /* Bounded, class-driven easing for centreOn({animate: true}) and fit only
-     (research.md D12, FR-045, SC-012) — never left permanently on #camera, so
-     a drag or wheel step never lags the pointer. Reduced to an instant jump
-     under prefers-reduced-motion rather than skipped, so the transitionend
-     listener that removes the class still fires. */
-  #camera.eased { transition: transform 180ms ease-out; }
-  @media (prefers-reduced-motion: reduce) {
-    #camera.eased { transition: none; }
-  }
+  /* There is no level-of-detail rule any more, and that is the point. The old
+     map hid buildings, zones, agents and labels below a zoom threshold, which
+     is how it shipped a default view that set `display:none` on every figure
+     on the page. Nothing here hides a session at any window size. */
 
   /* Motion is meaning here, not decoration: it is only ever applied to a state
      that is actually changing, so a still figure is a still session.
@@ -395,11 +446,9 @@
     dialog#agentmodal { width:100vw; max-width:100vw; height:100vh; max-height:100vh;
                          border-radius:0; }
   }
-  /* The drawn keyboard-focus indicator (D7): an SVG group cannot take an
-     outline, and the ring must survive every render the way the selected
-     figure's own emphasis does. */
-  .agent .focusring { display:none; fill:none; stroke:var(--info); stroke-width:1; }
-  .agent:focus-visible .focusring { display:block; }
+  /* The drawn keyboard-focus indicator is gone with the SVG group that needed
+     it: `.agent` is a real <button>, so `:focus-visible` above is the browser's
+     own outline and there is nothing to keep in sync across a render. */
 </style>
 </head>
 <body>
@@ -411,13 +460,20 @@
 <div id="trust"></div>
 <div id="hostwarn"></div>
 <div id="wrap">
-  <svg id="world" viewBox="0 0 408 408" tabindex="0" data-lod="mid"
-       aria-label="City map, a companion view of the agent list in the roster panel. Drag to pan. Arrow keys pan, plus and minus zoom, zero fits the whole world.">
-    <defs><marker id="ah" viewBox="0 0 8 8" refX="6" refY="4"
-        markerWidth="5" markerHeight="5" orient="auto">
-        <path d="M0,0 L8,4 L0,8 z" fill="var(--info)"/></marker></defs>
-    <g id="camera"></g>
-  </svg>
+  <!-- tabindex="0" so the scroll container is focusable, which is all that is
+       needed for the arrow keys, PageUp/PageDown and Home/End to scroll it:
+       that is native browser behaviour for a focused overflow box, and it
+       replaces the hand-written pan/zoom keymap the camera carried. -->
+  <div id="board" tabindex="0" role="region"
+       aria-label="Project map, a companion view of the agent list in the roster panel. Scroll for the rest.">
+    <div id="boardinner">
+      <svg id="wires" aria-hidden="true">
+        <defs><marker id="ah" viewBox="0 0 8 8" refX="6" refY="4"
+            markerWidth="5" markerHeight="5" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="var(--info)"/></marker></defs>
+      </svg>
+    </div>
+  </div>
 </div>
 <dialog id="keymodal" aria-labelledby="keytitle">
   <div id="keyhead">
@@ -450,8 +506,6 @@
      it needs no route of its own. The path is absolute because this page
      answers on both /map and /map.html and one src should mean one file. -->
 <script src="/md.js"></script>
-<script src="/plots.js"></script>
-<script src="/camera.js"></script>
 <script src="/roster.js"></script>
 <script src="/modal.js"></script>
 <script>
@@ -553,7 +607,7 @@ $("legend").innerHTML = [
   `<span><b style="color:var(--info)">outline</b> alive, nothing to corroborate it</span>`,
   `<span><b style="color:var(--dim)">z</b> idle</span>`,
   `<span>fill level inside the body = context used</span>`,
-  `<span><b style="color:var(--info)">dashed ring</b> selected — pick a row in the roster to fly there</span>`,
+  `<span><b style="color:var(--info)">dashed ring</b> selected — pick a row in the roster to scroll to it</span>`,
   CAN_SEND ? `<span>click an agent to read its conversation and reply</span>`
            : `<span>click an agent to read its conversation (read-only)</span>`,
 ].join("");
@@ -651,16 +705,17 @@ function shortName(r) {
   return r.name;
 }
 
-// The one and only thing this file may hand plots.js: strings identifying who
-// something is (data-model.md §2). No sev/psev/token/quiet/waited/context/
-// rss_mb/cost/age/pipeline/deploys, and no row order, may reach this tree.
 const NO_REPO = "no repo";
+
+// ⚠️ One comparator for every level, and it is deliberately NOT localeCompare.
+// localeCompare's answer depends on the browser's locale and ICU build, so two
+// machines could order the same sessions differently and a test could pass on
+// one and fail on the other. A plain codepoint compare is the same everywhere.
+const byName = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
 function buildWorldModel(s) {
   const districts = {};      // org -> {org, isNoRepo, buildings: {slug -> ...}}
-  const districtsByKey = {}; // "d|<org>" -> {org, isNoRepo}
-  const buildingsByKey = {}; // "b|<org>|<slug>" -> {slug, label, hasRemote, unfinished, deploys}
-  const zonesByKey = {};     // "z|<slug>|<branch>" -> {branch}
+  const districtsByKey = {}; // "d|<org>" -> the summary accumulator
   const figuresByKey = {};   // "f|<slug>|<branch>|<sid>" -> row
   const buildingBySlugRepo = {}; // row.repo -> building, for exact deploy matching
 
@@ -675,17 +730,12 @@ function buildWorldModel(s) {
     return districts[org];
   }
   function ensureBuilding(d, slug, label, hasRemote) {
-    if (!d.buildings[slug]) {
+    if (!d.buildings[slug])
       d.buildings[slug] = {slug, label, hasRemote, zones: {}, unfinished: [], deploys: []};
-      buildingsByKey["b|" + d.org + "|" + slug] = d.buildings[slug];
-    }
     return d.buildings[slug];
   }
-  function ensureZone(b, slug, branchKey) {
-    if (!b.zones[branchKey]) {
-      b.zones[branchKey] = {branch: branchKey, figures: []};
-      zonesByKey["z|" + slug + "|" + branchKey] = b.zones[branchKey];
-    }
+  function ensureZone(b, branchKey) {
+    if (!b.zones[branchKey]) b.zones[branchKey] = {branch: branchKey, figures: []};
     return b.zones[branchKey];
   }
 
@@ -697,7 +747,7 @@ function buildWorldModel(s) {
     const branchKey = r.branch || "?";
     const d = ensureDistrict(org, !hasRemote);
     const b = ensureBuilding(d, slug, label, hasRemote);
-    const z = ensureZone(b, slug, branchKey);
+    const z = ensureZone(b, branchKey);
     z.figures.push({sid: r.sid});
     figuresByKey["f|" + slug + "|" + branchKey + "|" + r.sid] = r;
     if (r.repo) buildingBySlugRepo[r.repo] = b;
@@ -744,46 +794,71 @@ function buildWorldModel(s) {
       : null;
   }
 
-  const tree = Object.keys(districts).map(org => {
+  // The ordered tree the board renders from. Sorted at every level by the
+  // name a reader sees, so a session's position is something they can predict
+  // and re-find — and so it is decided by identity alone, never by severity.
+  // A figure that moved when its status changed would make position useless
+  // for finding a session again, which is the one thing position is for here.
+  const tree = Object.keys(districts).sort(byName).map(org => {
     const d = districts[org];
+    const meta = districtsByKey["d|" + org];
     return {
+      key: "d|" + org,
       org: d.org,
-      buildings: Object.keys(d.buildings).map(slug => {
+      isNoRepo: d.isNoRepo,
+      n: meta.n, worst: meta.worst, unfinished: meta.unfinished,
+      buildings: Object.keys(d.buildings).sort(byName).map(slug => {
         const b = d.buildings[slug];
         return {
-          slug: b.slug,
-          zones: Object.keys(b.zones).map(br => {
+          key: "b|" + d.org + "|" + slug,
+          slug: b.slug, label: b.label, hasRemote: b.hasRemote,
+          unfinishedRuns: b.unfinished, deploys: b.deploys,
+          zones: Object.keys(b.zones).sort(byName).map(br => {
             const z = b.zones[br];
-            return {branch: z.branch, figures: z.figures};
+            return {
+              key: "z|" + slug + "|" + br,
+              branch: z.branch,
+              // Figures carry the whole row: unlike the coordinate module this
+              // replaced, nothing here is fed to a placement pass that must be
+              // kept ignorant of status.
+              figures: z.figures
+                .map(f => figuresByKey["f|" + slug + "|" + br + "|" + f.sid])
+                .filter(Boolean)
+                .sort((p, q) => byName(p.name, q.name) || byName(p.sid, q.sid))
+                .map(row => ({key: "f|" + slug + "|" + br + "|" + row.sid, row})),
+            };
           }),
         };
       }),
     };
   });
 
-  return {tree, districtsByKey, buildingsByKey, zonesByKey, figuresByKey};
+  return {tree, figuresByKey};
 }
 
+// Still needed for the two things that are genuinely drawings rather than
+// layout: the figure art, and the wire overlay. Everything that used to be an
+// SVG <g> standing in for a box is now a box.
 const SVGNS = "http://www.w3.org/2000/svg";
 function svgEl(tag, attrs) {
-  const el = document.createElementNS(SVGNS, tag);
-  for (const k in attrs) el.setAttribute(k, attrs[k]);
-  return el;
-}
-function titleEl(text) {
-  const t = svgEl("title", {});
-  t.textContent = text;
-  return t;
+  const e = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
 }
 
 // The one reconciliation primitive (research.md D4): create/update/remove by
 // identity key, never a wholesale rebuild. `key` namespaces the index kept on
-// `parentEl` (`camera` holds four kinds of child — district/building/zone/
-// figure — reconciled by three separate calls sharing one parent, so each
-// gets its own slice rather than one call's absentees deleting another's
-// children). `make()` returns a freshly created element; `update(el, model)`
-// writes attributes/text onto an existing one. Anything indexed under `key`
-// whose identity is missing from `wanted` is removed.
+// `parentEl`, so one parent can hold several kinds of child without one call's
+// absentees deleting another's. `make()` returns a freshly created element;
+// `update(el, model)` writes attributes/text onto an existing one. Anything
+// indexed under `key` whose identity is missing from `wanted` is removed.
+//
+// ⚠️ Order is NOT expressed by appending in order, because this never moves an
+// existing node: a node created on tick 1 keeps its DOM position for life, and
+// the sorted order is carried by a `style.order` written in each `update`. That
+// is deliberate. Re-appending children to sort them would move whichever node
+// currently has focus, and moving a focused element drops the focus — so a
+// keyboard user tabbed onto a figure would lose it every three seconds.
 function reconcile(parentEl, wanted, key, make, update) {
   if (!parentEl._reconcileIndex) parentEl._reconcileIndex = {};
   if (!parentEl._reconcileIndex[key]) parentEl._reconcileIndex[key] = {};
@@ -806,100 +881,84 @@ function reconcile(parentEl, wanted, key, make, update) {
   }
 }
 
-// One primitive per level (research.md D4), each owning all of its own art
-// plus a `<rect class="hit">` independent of that art, so a later sprite swap
-// touches only the primitive. None of them reads anything but the geometry
-// place() computed and the identity/label fields already excluded from it.
-// Split make/update so reconcile() can create a node once and write to the
-// SAME node on every later tick — the node's identity, not its content, is
-// what a hover/focus/selection is anchored to.
-function makeDistrict() {
-  const g = svgEl("g", {class: "district"});
-  g.appendChild(svgEl("rect", {class: "hit", rx: 3}));
-  g.appendChild(svgEl("title", {}));
-  g.appendChild(svgEl("text", {class: "dlabel", x: 3, y: 8}));
-  // The far-level aggregate (data-model.md §5); shown only at data-lod="far",
-  // hidden everywhere else (contracts/page-camera.md §3).
-  g.appendChild(svgEl("text", {class: "dsummary", x: 3, y: 18}));
-  return g;
+// One primitive per level (research.md D4). Each owns all of its own markup,
+// built with createElement/textContent — never innerHTML — and each is split
+// make/update so reconcile() can create a node once and write to the SAME node
+// on every later tick: the node's identity, not its content, is what a hover,
+// a focus and a selection are anchored to.
+//
+// `ord` is the sorted position, written as `style.order` rather than acted on
+// by moving nodes — see the warning on reconcile().
+function el(tag, cls) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  return e;
 }
-function updateDistrict(g, {geo, meta}) {
-  g.setAttribute("transform", `translate(${geo.x},${geo.y})`);
-  const hit = g.querySelector(".hit");
-  hit.setAttribute("width", geo.w); hit.setAttribute("height", geo.h);
-  g.querySelector("title").textContent = meta.isNoRepo
-    ? "no repo — grouped by directory, no git remote" : meta.org;
-  const label = meta.isNoRepo ? NO_REPO : meta.org;
-  g.querySelector(".dlabel").textContent = label;
-  // "<org> · <n> sessions · <worst>" with " · <unfinished>" appended when
-  // present (data-model.md §5) — a maximum the payload supplied, printed
-  // verbatim, never a derived status (FR-027).
-  let summary = `${label} · ${meta.n} session${meta.n === 1 ? "" : "s"} · ${meta.worst}`;
-  if (meta.unfinished) summary += ` · ${meta.unfinished}`;
-  g.querySelector(".dsummary").textContent = summary;
+function makeDistrict() {
+  const sec = el("section", "district");
+  const head = el("div", "dhead");
+  head.append(el("span", "dlabel"), el("span", "dsummary"));
+  sec.append(head, el("div", "buildings"));
+  return sec;
+}
+function updateDistrict(sec, d) {
+  sec.style.order = d.ord;
+  sec.title = d.isNoRepo ? "no repo — grouped by directory, no git remote" : d.org;
+  const label = d.isNoRepo ? NO_REPO : d.org;
+  sec.querySelector(".dlabel").textContent = label;
+  // "<n> sessions · <worst>" with " · <unfinished>" appended when present
+  // (data-model.md §5) — a maximum the payload supplied, printed verbatim,
+  // never a derived status (FR-027). The owner's own name is the heading
+  // beside it, so it is not repeated here the way it was when this line had
+  // to stand in for the whole territory at far zoom.
+  let summary = `${d.n} session${d.n === 1 ? "" : "s"} · ${d.worst}`;
+  if (d.unfinished) summary += ` · ${d.unfinished}`;
+  sec.querySelector(".dsummary").textContent = summary;
 }
 
 function makeBuilding() {
-  const g = svgEl("g", {class: "building"});
-  g.appendChild(svgEl("rect", {class: "hit", rx: 2}));
-  g.appendChild(svgEl("title", {}));
-  g.appendChild(svgEl("text", {class: "blabel", x: 2, y: 6}));
-  g.appendChild(svgEl("text", {class: "norepo-badge", "text-anchor": "end"}));
-  g.appendChild(svgEl("g", {class: "badges"}));
-  return g;
+  const art = el("article", "building");
+  const head = el("div", "bhead");
+  head.append(el("span", "blabel"), el("span", "norepo-badge"));
+  art.append(head, el("div", "badges"), el("div", "zones"));
+  return art;
 }
-function updateBuilding(g, {geo, meta}) {
-  g.setAttribute("class", "building" + (meta.unfinished.length ? " has-unfinished" : ""));
-  g.setAttribute("transform", `translate(${geo.x},${geo.y})`);
-  const hit = g.querySelector(".hit");
-  hit.setAttribute("width", geo.w); hit.setAttribute("height", geo.h);
-  g.querySelector("title").textContent =
-    meta.label + (meta.hasRemote === false ? " (no repo)" : "");
-  g.querySelector(".blabel").textContent = meta.label;
-  const norepo = g.querySelector(".norepo-badge");
-  if (meta.hasRemote === false) {
-    norepo.setAttribute("x", geo.w - 2); norepo.setAttribute("y", 6);
-    norepo.textContent = NO_REPO;
-  } else {
-    norepo.textContent = "";
-  }
-  // Badges are rebuilt wholesale on each update: they carry no hover/focus/
-  // selection state of their own (plain <text>, no interaction), so there is
+function updateBuilding(art, b) {
+  art.className = "building" + (b.unfinishedRuns.length ? " has-unfinished" : "");
+  art.style.order = b.ord;
+  art.title = b.label + (b.hasRemote === false ? " (no repo)" : "");
+  art.querySelector(".blabel").textContent = b.label;
+  art.querySelector(".norepo-badge").textContent =
+    b.hasRemote === false ? NO_REPO : "";
+  // Badges are rebuilt wholesale on each update: they carry no hover, focus or
+  // selection state of their own — plain spans, no interaction — so there is
   // nothing reconciliation would preserve here that a fresh set does not.
-  const badges = g.querySelector(".badges");
+  const badges = art.querySelector(".badges");
   badges.textContent = "";
-  let by = 12;
-  for (const u of meta.unfinished) {
-    const el = svgEl("text", {class: "wreck-badge", x: 2, y: by});
-    el.textContent = `${u.phase}/${u.status}`;
-    el.appendChild(titleEl(`${u.feature} · $${(u.cost || 0).toFixed(2)}`
-      + (u.age != null ? ` · ${dur(u.age)} ago` : "")));
-    badges.appendChild(el);
-    by += 5;
+  for (const u of b.unfinishedRuns) {
+    const line = el("div", "wreck-badge");
+    line.textContent = `${u.phase}/${u.crashed ? "CRASHED" : u.status}`;
+    line.title = `${u.feature} · $${(u.cost || 0).toFixed(2)}`
+      + (u.age != null ? ` · ${dur(u.age)} ago` : "");
+    badges.appendChild(line);
   }
-  for (const d of meta.deploys) {
-    const state = d.live ? "RUNNING" : String(d.conclusion || "?").toUpperCase();
-    const el = svgEl("text", {class: "deploy-badge", x: 2, y: by});
-    el.textContent = state;
-    el.appendChild(titleEl(`${d.workflowName} · ${d.headBranch}`));
-    badges.appendChild(el);
-    by += 5;
+  for (const d of b.deploys) {
+    const line = el("div", "deploy-badge");
+    line.textContent = d.live ? "RUNNING" : String(d.conclusion || "?").toUpperCase();
+    line.title = `${d.workflowName} · ${d.headBranch}`;
+    badges.appendChild(line);
   }
 }
 
 function makeZone() {
-  const g = svgEl("g", {class: "zone"});
-  g.appendChild(svgEl("rect", {class: "hit", rx: 1}));
-  g.appendChild(svgEl("title", {}));
-  g.appendChild(svgEl("text", {class: "zlabel", x: 2, y: 5}));
-  return g;
+  const div = el("div", "zone");
+  div.append(el("div", "zlabel"), el("div", "figures"));
+  return div;
 }
-function updateZone(g, {geo, meta}) {
-  g.setAttribute("transform", `translate(${geo.x},${geo.y})`);
-  const hit = g.querySelector(".hit");
-  hit.setAttribute("width", geo.w); hit.setAttribute("height", geo.h);
-  g.querySelector("title").textContent = "branch " + meta.branch;
-  g.querySelector(".zlabel").textContent = meta.branch;
+function updateZone(div, z) {
+  div.style.order = z.ord;
+  div.title = "branch " + z.branch;
+  div.querySelector(".zlabel").textContent = z.branch;
 }
 
 // A one-line delegation to CCWATCH_ROSTER.titleText (FR-012): the figure's
@@ -909,69 +968,63 @@ function titleBits(r) {
   return CCWATCH_ROSTER.titleText(r, VOLATILE);
 }
 
-// Pose/colour/emphasis exactly as agentCard() drew them; position comes
-// entirely from `geo`, which place() derived from identity alone (FR-006).
 // The figure's own art (`.figart`) is rebuilt wholesale on every update — it
-// carries no hover/focus/selection state — but the outer `<g class="agent">`
-// node, its hit rect and its dataset are the SAME node across ticks, which is
-// what a click handler, a `:hover` and the reconcile index all key off.
+// carries no hover, focus or selection state — but the outer <button> node and
+// its dataset are the SAME node across ticks, which is what a click handler, a
+// `:hover`, a focus and the reconcile index all key off.
 function makeFigure() {
-  // ⚠️ A figure is one of the four ways into the modal, and two of those four
-  // are keyboard. An SVG <g> is not focusable and has no role by default, so
-  // without these it is reachable by pointer only — which would make the map
-  // a control that some people simply cannot operate, and would leave the
-  // roster as the sole path to an agent rather than the equivalent one.
-  const g = svgEl("g", {class: "agent clickable", tabindex: "0", role: "button"});
-  g.appendChild(svgEl("g", {class: "figart"}));
-  g.appendChild(svgEl("rect", {class: "hit"}));
-  g.appendChild(svgEl("title", {}));
-  g.appendChild(svgEl("text", {class: "alabel"}));
-  return g;
+  // ⚠️ A real <button>, not an SVG group with role="button". A figure is one of
+  // the ways into the inspector and two of those are the keyboard; as a <g> it
+  // needed an explicit tabindex, an explicit role, a hand-drawn focus ring and
+  // a keydown handler to honour Enter and Space — four things that had to be
+  // right for the map not to be a control some people simply cannot operate.
+  // A button is all four by default.
+  const b = el("button", "agent");
+  b.type = "button";
+  b.append(el("span", "figart"), el("span", "alabel"));
+  return b;
 }
-function updateFigure(g, {geo, row}) {
+function updateFigure(b, {ord, row}) {
   const k = kindOf(row);
   // Figure emphasis (contracts/page-roster.md §6, FR-019): a class on this
   // outer node, from the page-level selectedSid, never inside .figart below
   // (which is rebuilt wholesale on every call and carries no such state).
   const sel = row.sid === selectedSid ? " selected" : "";
-  g.setAttribute("class", `agent sev${k.sev} ${k.cls}${sel} clickable`);
-  g.setAttribute("transform", `translate(${geo.x},${geo.y})`);
-  g.dataset.sid = row.sid;
-  g.dataset.name = row.name;
-  const figart = g.querySelector(".figart");
+  b.className = `agent sev${k.sev} ${k.cls}${sel}`;
+  b.style.order = ord;
+  b.dataset.sid = row.sid;
+  b.dataset.name = row.name;
+  const figart = b.querySelector(".figart");
   figart.textContent = "";
-  figart.appendChild(figure(row, geo.w, geo.h));
-  const hit = g.querySelector(".hit");
-  hit.setAttribute("width", geo.w); hit.setAttribute("height", geo.h);
-  // ⚠️ Both the <title> and the aria-label are written from titleBits(row), so
-  // a hover tooltip and a screen reader cannot describe the same figure
+  figart.appendChild(figure(row, 34, 38));
+  // ⚠️ Both the tooltip and the accessible name are written from titleBits(row),
+  // so a hover reading and a screen reader cannot describe the same figure
   // differently — computing them separately is how they drift apart.
   //
   // The aria-label carries the "agent <name>:" prefix that the tooltip gets
   // for free from its visual context: a pointer user can see which figure they
   // are over, and someone tabbing through cannot.
-  g.querySelector("title").textContent = titleBits(row);
-  g.setAttribute("aria-label", "agent " + row.name + ": " + titleBits(row));
-  const label = g.querySelector(".alabel");
-  label.setAttribute("x", geo.w / 2); label.setAttribute("y", geo.h - .5);
-  label.textContent = shortName(row);
+  b.title = titleBits(row);
+  b.setAttribute("aria-label", "agent " + row.name + ": " + titleBits(row));
+  b.querySelector(".alabel").textContent = shortName(row);
 }
 
 // Message lines are drawn between the two figures involved, wherever they are —
-// including across territories, which is the case worth seeing. Positioned
-// entirely from the `cx`/`cy` world centres place() returned this tick — never
-// getBoundingClientRect() — so a wire is exactly as stable under the camera's
-// transform as the figures it connects (FR-021, V6).
+// including across territories, which is the case worth seeing.
+//
+// Positioned from each figure's own box, measured against #boardinner rather
+// than the viewport, so the coordinates are content coordinates: the overlay is
+// a child of #boardinner and therefore scrolls with it, which is why there is
+// no scroll listener here and no per-frame work. The measurement happens once
+// per tick and once per resize, never on scroll.
 function makeWire() {
   const g = svgEl("g", {class: "wire"});
   g.appendChild(svgEl("path", {fill: "none", stroke: "var(--info)",
     opacity: ".42", "marker-end": "url(#ah)"}));
   const bubble = svgEl("g", {class: "bubble"});
-  const scale = svgEl("g", {class: "bubblescale"});
-  scale.appendChild(svgEl("circle", {cx: 0, cy: 0, r: 8, fill: "var(--ground)",
+  bubble.appendChild(svgEl("circle", {cx: 0, cy: 0, r: 8, fill: "var(--ground)",
     stroke: "var(--info)", "stroke-opacity": ".5", "stroke-width": "1"}));
-  scale.appendChild(svgEl("text", {fill: "var(--info)", "text-anchor": "middle", y: 3}));
-  bubble.appendChild(scale);
+  bubble.appendChild(svgEl("text", {fill: "var(--info)", "text-anchor": "middle", y: 3}));
   g.appendChild(bubble);
   return g;
 }
@@ -1002,16 +1055,34 @@ function updateWire(g, {p, q, count}) {
     bubble.style.display = "none";
   }
 }
-function wires(peers, placed) {
-  const camera = $("camera");
+// The last peers payload, held so a resize can redraw the wires without
+// waiting for the next tick — the figures move under a resize, and a wire that
+// still points where a figure used to be is worse than no wire.
+let lastPeers = null;
+
+function wires(peers) {
+  lastPeers = peers || null;
+  const svg = $("wires");
+  const inner = $("boardinner");
   const wanted = {};
   let drawn = 0;
-  if (peers && peers.edges && placed) {
+  // Sized to the content box, and the viewBox is 1:1 with it so the wire
+  // coordinates below are plain content pixels.
+  const w = inner.offsetWidth, h = inner.offsetHeight;
+  svg.setAttribute("width", w);
+  svg.setAttribute("height", h);
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  if (peers && peers.edges) {
+    const base = inner.getBoundingClientRect();
     const centreByName = {};
-    for (const k in placed.figuresByKey) {
-      const row = placed.figuresByKey[k];
-      const geo = placed.world.figures[k];
-      if (row && geo) centreByName[row.name] = {x: geo.cx, y: geo.cy};
+    for (const fig of inner.querySelectorAll(".agent[data-name]")) {
+      const r = fig.getBoundingClientRect();
+      // Relative to #boardinner's own box, so scrolling changes nothing: both
+      // rects move together and the difference is invariant.
+      centreByName[fig.dataset.name] = {
+        x: r.left - base.left + r.width / 2,
+        y: r.top - base.top + r.height / 2,
+      };
     }
     for (const e of peers.edges) {
       const p = centreByName[e.from], q = centreByName[e.to];
@@ -1023,7 +1094,7 @@ function wires(peers, placed) {
       drawn++;
     }
   }
-  reconcile(camera, wanted, "wire", makeWire, updateWire);
+  reconcile(svg, wanted, "wire", makeWire, updateWire);
   return drawn;
 }
 
@@ -1530,7 +1601,7 @@ function closeModal() {
   if (fig) { fig.focus(); return; }
   const list = $("rosterlist");
   if (list && list.children.length) { list.focus(); return; }
-  $("world").focus();
+  $("board").focus();
 }
 async function doSend() {
   // Independent of the disabled attribute (D17): a disabled control issues
@@ -1566,413 +1637,86 @@ $("replyText").addEventListener("keydown", e => {
   if (e.key === "Enter") doSend();
 });
 let lastRows = {};
+// No drag-suppression guard here any more. The camera needed one, because a
+// pan ended in a click and a pan must not open the inspector; scrolling
+// produces no click at all, so there is nothing to suppress and no flag whose
+// staleness could swallow a real one.
 document.addEventListener("click", e => {
-  // A pan never opens the inspector (FR-005): the drag that just ended set
-  // drag.moved, and this is the one place that flag is consumed.
-  if (drag.moved) { drag.moved = false; return; }
   const a = e.target.closest(".agent[data-sid]");
   // Clicking is worth doing even in --read-only: seeing the conversation is
   // the more common reason to click an agent than messaging it.
   if (a) openModal(a.dataset.sid, a.dataset.name, "figure");
 });
 
-// ---- camera ------------------------------------------------------------
-// contracts/page-camera.md §2 — built with DOM APIs, never innerHTML, so
-// map.html still assigns innerHTML exactly twice (FR-047). Lives in #wrap,
-// after #world and outside the camera group, so it is unaffected by the
-// transform and by data-lod (FR-016, FR-019).
-const camctl = document.createElement("div");
-camctl.id = "camctl";
-const zoutBtn = document.createElement("button");
-zoutBtn.id = "zout"; zoutBtn.type = "button"; zoutBtn.textContent = "zoom out";
-const zinBtn = document.createElement("button");
-zinBtn.id = "zin"; zinBtn.type = "button"; zinBtn.textContent = "zoom in";
-const zfitBtn = document.createElement("button");
-zfitBtn.id = "zfit"; zfitBtn.type = "button"; zfitBtn.textContent = "fit";
-const camstate = document.createElement("span");
-camstate.id = "camstate"; camstate.setAttribute("aria-live", "polite");
-const camnote = document.createElement("span");
-camnote.id = "camnote";
+// ---- the map key -----------------------------------------------------------
+// All that remains of what was the camera's button cluster. Built with DOM
+// APIs, never innerHTML, so map.html still assigns innerHTML exactly twice
+// (FR-047). Lives in #wrap, as a sibling of the scroll container rather than
+// inside it, so it does not scroll away from the reader who needs it.
+//
+// The zoom-out / zoom-in / fit buttons and the "zoom 2x - mid" readout went
+// with the camera. There is nothing left for them to do: the browser's own
+// scrollbar is the position indicator, and there is no zoom to be at.
+const boardctl = document.createElement("div");
+boardctl.id = "boardctl";
 const keyBtn = document.createElement("button");
 keyBtn.id = "keyhelp"; keyBtn.type = "button"; keyBtn.textContent = "?";
 keyBtn.className = "ghost";
 keyBtn.setAttribute("aria-label", "map key — what the figures mean");
 keyBtn.title = "map key — what the figures mean";
-camctl.append(zoutBtn, zinBtn, zfitBtn, keyBtn, camstate, camnote);
-$("world").insertAdjacentElement("afterend", camctl);
+boardctl.append(keyBtn);
+$("board").insertAdjacentElement("afterend", boardctl);
 
 keyBtn.addEventListener("click", () => $("keymodal").showModal());
 $("keyclose").addEventListener("click", () => $("keymodal").close());
 
-// FR-004, FR-039 — same ladder step and fit the keyboard uses, anchored at
-// the viewport centre rather than a pointer position the button click has none of.
-zoutBtn.addEventListener("click", () => {
-  view = CCWATCH_CAMERA.clampPan(
-    CCWATCH_CAMERA.zoomTo(view, Math.ceil(view.idx) - 1, $("world").clientWidth / 2, $("world").clientHeight / 2),
-    worldExtent, $("world").clientWidth, $("world").clientHeight);
-  applyView();
-  flushPendingSave();
-});
-zinBtn.addEventListener("click", () => {
-  view = CCWATCH_CAMERA.clampPan(
-    CCWATCH_CAMERA.zoomTo(view, Math.floor(view.idx) + 1, $("world").clientWidth / 2, $("world").clientHeight / 2),
-    worldExtent, $("world").clientWidth, $("world").clientHeight);
-  applyView();
-  flushPendingSave();
-});
-zfitBtn.addEventListener("click", () => {
-  view = CCWATCH_CAMERA.fitView(worldExtent, $("world").clientWidth, $("world").clientHeight);
-  overflow = view.overflow;
-  applyView();
-  flushPendingSave();
-});
+// ---- the board -------------------------------------------------------------
+// Rebuilt from the payload each tick by reconciliation \u2014 create/update/remove
+// by identity key, nothing rebuilt wholesale \u2014 level by level, each level
+// reconciled into its own parent so a district's disappearance takes its
+// buildings with it without a second pass.
+//
+// There are no stored coordinates and no stored viewport. Both records the
+// camera needed (ccwatch.map.plots.v1 and ccwatch.map.view.v1) are gone, and
+// with them every failure mode reading and writing them had: a private-mode
+// localStorage that throws, a full origin quota, a stored rectangle that no
+// longer intersects anything placed. Flow layout needs none of it, and the
+// order is derived from names, which the payload already carries.
+function drawBoard(s) {
+  const model = buildWorldModel(s);
+  const inner = $("boardinner");
 
-// contracts/page-camera.md §1 — the single writer. Every camera path calls
-// this and nothing else; it touches no district/building/zone/figure/badge/
-// wire node (FR-044, SC-008).
-let view = {idx: 2, tx: 0, ty: 0};
-let level = null; // DetailLevel (data-model.md §3); recomputed from levelFor(idx, level)
-let worldExtent = null; // OccupiedExtent (data-model.md §4); the clamp's bound
-let overflow = false;
-let pendingSave = null; // StoredViewport | null (data-model.md §6), flushed by the callers of applyView()
+  const districtWanted = {};
+  model.tree.forEach((d, i) => { districtWanted[d.key] = {...d, ord: i}; });
+  reconcile(inner, districtWanted, "district", makeDistrict, updateDistrict);
 
-// The one new persisted record (data-model.md §6), separate from
-// ccwatch.map.plots.v1. Storage calls are injected exactly as plots.js's own
-// key already is, so a throwing localStorage cannot take the map down.
-const VIEW_KEY = "ccwatch.map.view.v1";
-function flushPendingSave() {
-  if (!pendingSave) return;
-  CCWATCH_CAMERA.saveView(function (v) {
-    try { localStorage.setItem(VIEW_KEY, v); } catch (e) { /* unavailable — camera.js records it */ }
-  }, pendingSave);
-  pendingSave = null;
-}
+  let buildingCount = 0;
+  for (const d of model.tree) {
+    const dEl = inner._reconcileIndex.district[d.key];
+    const buildingWanted = {};
+    d.buildings.forEach((b, i) => { buildingWanted[b.key] = {...b, ord: i}; });
+    buildingCount += d.buildings.length;
+    const buildingsEl = dEl.querySelector(".buildings");
+    reconcile(buildingsEl, buildingWanted, "building", makeBuilding, updateBuilding);
 
-// contracts/page-camera.md §5 — the load order. Runs exactly once, the first
-// time there is an extent to clamp against: a record that fails validation or
-// clamps to a rectangle that intersects nothing placed falls back to fitView
-// (FR-036–FR-038) rather than opening on empty ground.
-function loadStoredView(placed) {
-  const vw = $("world").clientWidth, vh = $("world").clientHeight;
-  const raw = CCWATCH_CAMERA.loadView(function () {
-    try { return localStorage.getItem(VIEW_KEY); } catch (e) { return null; }
-  });
-  let restored = raw ? CCWATCH_CAMERA.clampPan(raw, worldExtent, vw, vh) : null;
-  if (restored) {
-    const rect = CCWATCH_CAMERA.visibleWorldRect(restored, vw, vh);
-    const groups = ["districts", "buildings", "zones", "figures"];
-    const hit = groups.some(g => Object.keys(placed.world[g]).some(
-      k => CCWATCH_CAMERA.intersects(rect, placed.world[g][k])));
-    if (!hit) restored = null;
-  }
-  view = restored || CCWATCH_CAMERA.fitView(worldExtent, vw, vh);
-  // ⚠️ Fit-to-world is the wrong FIRST view, and shipping it as one produced a
-  // map that opened showing nothing at all.
-  //
-  // The world is wide and short — districts sit side by side — so with two
-  // orgs it measured 824×192 against a 705×705 viewport, and the widest rung
-  // that fits is 0.5×. `levelFor` calls anything below 2× "far", and the far
-  // level draws district aggregates only: no buildings, no zones, no figures.
-  // So the opening view was two empty boxes, by construction, and it got worse
-  // with more projects rather than better.
-  //
-  // Fit is the right answer for the `0` key, which means "show me everything".
-  // It is the wrong answer for "show me my agents", which is what opening the
-  // page means. So a cold start opens at the closest rung that still renders
-  // figures, centred on whichever session most needs attention.
-  if (!restored) {
-    const cold = CCWATCH_CAMERA.fitView(worldExtent, vw, vh);
-    if (CCWATCH_CAMERA.levelFor(cold.idx, null) === "far") {
-      const focus = firstFigurePlot(placed);
-      view = focus
-        ? CCWATCH_CAMERA.clampPan(
-            CCWATCH_CAMERA.centreOn(cold, focus.x + focus.w / 2, focus.y + focus.h / 2,
-                                    vw, vh, COLD_MIN_IDX),
-            worldExtent, vw, vh)
-        : CCWATCH_CAMERA.clampPan({...cold, idx: COLD_MIN_IDX}, worldExtent, vw, vh);
-      overflow = true; // the whole world no longer fits, and the note says so
+    for (const b of d.buildings) {
+      const bEl = buildingsEl._reconcileIndex.building[b.key];
+      const zoneWanted = {};
+      b.zones.forEach((z, i) => { zoneWanted[z.key] = {...z, ord: i}; });
+      const zonesEl = bEl.querySelector(".zones");
+      reconcile(zonesEl, zoneWanted, "zone", makeZone, updateZone);
+
+      for (const z of b.zones) {
+        const zEl = zonesEl._reconcileIndex.zone[z.key];
+        const figureWanted = {};
+        z.figures.forEach((f, i) => { figureWanted[f.key] = {ord: i, row: f.row}; });
+        reconcile(zEl.querySelector(".figures"), figureWanted,
+                  "figure", makeFigure, updateFigure);
+      }
     }
   }
-  overflow = view.overflow || overflow || false;
-  level = CCWATCH_CAMERA.levelFor(view.idx, null); // the cold mapping (FR-041)
+  return {buildingCount};
 }
-
-// The rung a cold start will not open below, because below it no figure is
-// drawn. Kept next to levelFor's thresholds deliberately: if those move, this
-// has to move with them or the opening view goes blank again.
-const COLD_MIN_IDX = 3; // 2× — the lowest rung levelFor calls "mid"
-
-// Whichever placed figure most deserves the opening view: the loudest session
-// by severity, falling back to any figure at all. A map that opens centred on
-// an idle agent while another is blocked has spent its one free action badly.
-function firstFigurePlot(placed) {
-  const figs = (placed && placed.world && placed.world.figures) || {};
-  const keys = Object.keys(figs);
-  if (!keys.length) return null;
-  let best = null, bestSev = -1;
-  for (const k of keys) {
-    const row = lastRows[k];
-    const sev = row ? Math.max(row.sev || 0, row.psev || 0) : 0;
-    if (sev > bestSev) { bestSev = sev; best = figs[k]; }
-  }
-  return best || figs[keys[0]];
-}
-
-function applyView() {
-  // scaleAt: view.idx is continuous between rungs while a gesture is in
-  // flight, and scaleFor floors — rendering through it would snap the picture
-  // to the rung below while the pan clamp used the real scale.
-  const k = CCWATCH_CAMERA.scaleAt(view.idx);
-  $("camera").setAttribute("transform", `translate(${view.tx} ${view.ty}) scale(${k})`);
-  const world = $("world");
-  world.style.setProperty("--k", k);
-  level = CCWATCH_CAMERA.levelFor(view.idx, level);
-  world.setAttribute("data-lod", level);
-  const atMin = view.idx <= 0, atMax = view.idx >= CCWATCH_CAMERA.LADDER.length - 1;
-  zoutBtn.disabled = atMin;
-  zoutBtn.title = atMin ? "already at the widest zoom" : "";
-  zinBtn.disabled = atMax;
-  zinBtn.title = atMax ? "already at the closest zoom" : "";
-  camstate.textContent = `zoom ${k >= 10 ? Math.round(k) : (Math.round(k * 10) / 10)}× · ${level}`;
-  camnote.textContent = overflow ? "the whole world does not fit at this zoom"
-    : CCWATCH_CAMERA.persistence === "unavailable" ? "the viewport will not be remembered"
-    : "";
-  pendingSave = {v: CCWATCH_CAMERA.STORAGE_VERSION, idx: view.idx, tx: view.tx, ty: view.ty};
-  // Bookkeeping only, not a DOM write: the size a resize needs to diff
-  // against is whatever it was as of the last camera action, which — since
-  // only a resize itself changes it — is the size just before this one.
-  vpSize = {w: $("world").clientWidth, h: $("world").clientHeight};
-}
-let vpSize = {w: 0, h: 0};
-
-// ---- camera: pointer drag + wheel zoom (contracts/page-camera.md §4) -------
-// panBy/clampPan/applyView on move; drag.moved gates the document click
-// handler below so a pan never opens the inspector (FR-005). The drag base
-// is the {tx,ty} recorded at pointerdown, not the running view, so repeated
-// small moves cannot accumulate drift from clampPan re-entering each step.
-const drag = {active: false, moved: false, id: null, x: 0, y: 0, tx: 0, ty: 0};
-$("world").addEventListener("pointerdown", e => {
-  if (e.button !== 0) return;
-  // ⚠️ Suppress the browser's own drag behaviour — text selection, and the
-  // native image/element drag — so the gesture belongs to the camera. Safe
-  // here because #world contains no interactive controls (the zoom buttons are
-  // siblings of the svg, not children), `focus()` below is explicit, and
-  // preventDefault on pointerdown does not cancel the later click that opens a
-  // figure.
-  e.preventDefault();
-  drag.active = true; drag.moved = false; drag.id = e.pointerId;
-  drag.x = e.clientX; drag.y = e.clientY;
-  drag.tx = view.tx; drag.ty = view.ty;
-  $("world").setPointerCapture(e.pointerId);
-  $("world").focus();
-});
-$("world").addEventListener("pointermove", e => {
-  if (!drag.active || e.pointerId !== drag.id) return;
-  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-  if (!drag.moved && Math.hypot(dx, dy) > CCWATCH_CAMERA.DRAG_SLOP) drag.moved = true;
-  if (!drag.moved) return;
-  view = CCWATCH_CAMERA.clampPan(
-    CCWATCH_CAMERA.panBy({idx: view.idx, tx: drag.tx, ty: drag.ty}, dx, dy),
-    worldExtent, $("world").clientWidth, $("world").clientHeight);
-  applyView();
-});
-function endDrag(e) {
-  if (!drag.active || e.pointerId !== drag.id) return;
-  drag.active = false;
-  flushPendingSave();
-}
-$("world").addEventListener("pointerup", endDrag);
-$("world").addEventListener("pointercancel", endDrag);
-$("world").addEventListener("lostpointercapture", endDrag);
-
-// ---- camera: keyboard (contracts/page-camera.md §4, FR-013–FR-015) --------
-// The guard returns before doing anything else so a shortcut key typed into
-// the reply box or any other editable control never moves the camera.
-const EDITABLE_SEL = "input, textarea, select, [contenteditable]";
-$("world").addEventListener("keydown", e => {
-  const t = e.target;
-  if ((t && (t.matches(EDITABLE_SEL) || t.isContentEditable)) ||
-      (document.activeElement && document.activeElement !== t &&
-       (document.activeElement.matches(EDITABLE_SEL) || document.activeElement.isContentEditable)))
-    return;
-  // ⚠️ A focused figure opens on Enter or Space, which is what its
-  // role="button" promises. Without this the figures are tabbable and inert —
-  // reachable by keyboard and not operable by it, which is worse than not
-  // being reachable at all. Handled before the camera keys so a focused figure
-  // consumes the key rather than panning the map underneath it.
-  const fig = e.target && e.target.closest && e.target.closest(".agent[data-sid]");
-  if (fig && (e.key === "Enter" || e.key === " " || e.key === "Spacebar")) {
-    e.preventDefault();
-    openModal(fig.dataset.sid, fig.dataset.name, "figure");
-    return;
-  }
-  const step = e.shiftKey ? CCWATCH_CAMERA.PAN_STEP_BIG : CCWATCH_CAMERA.PAN_STEP;
-  let handled = true;
-  switch (e.key) {
-    case "ArrowLeft":  view = CCWATCH_CAMERA.panBy(view, step, 0); break;
-    case "ArrowRight": view = CCWATCH_CAMERA.panBy(view, -step, 0); break;
-    case "ArrowUp":    view = CCWATCH_CAMERA.panBy(view, 0, step); break;
-    case "ArrowDown":  view = CCWATCH_CAMERA.panBy(view, 0, -step); break;
-    case "+": case "=":
-      view = CCWATCH_CAMERA.zoomTo(view, Math.floor(view.idx) + 1,
-        $("world").clientWidth / 2, $("world").clientHeight / 2);
-      break;
-    case "-": case "_":
-      view = CCWATCH_CAMERA.zoomTo(view, Math.ceil(view.idx) - 1,
-        $("world").clientWidth / 2, $("world").clientHeight / 2);
-      break;
-    case "0":
-      view = CCWATCH_CAMERA.fitView(worldExtent, $("world").clientWidth, $("world").clientHeight);
-      overflow = view.overflow;
-      break;
-    default: handled = false;
-  }
-  if (!handled) return;
-  view = CCWATCH_CAMERA.clampPan(view, worldExtent, $("world").clientWidth, $("world").clientHeight);
-  applyView();
-});
-// The `setItem` happens on key *release*, not on every keydown a held arrow
-// repeats (data-model.md §6) — the same coalescing the drag path uses.
-$("world").addEventListener("keyup", flushPendingSave);
-
-// FR-003, FR-006, FR-007 — always preventDefault so the page itself never
-// scrolls; wheelStep accumulates and reports whether a rung was crossed; a
-// step is one anchored zoom at the pointer.
-let wheelAcc = 0;
-$("world").addEventListener("wheel", e => {
-  e.preventDefault();
-  const rect = $("world").getBoundingClientRect();
-  const ax = e.clientX - rect.left, ay = e.clientY - rect.top;
-  // ⚠️ Fractional rungs, not an accumulate-then-jump step. The old path banked
-  // 100px of delta and then moved a whole rung, and rungs are 1.5×–2× apart —
-  // so a pinch, which fires many small events, leapt through several doublings
-  // in one gesture. Reported as "it jumps in massive leaps".
-  //
-  // Zoom now tracks the gesture continuously and the ladder survives where it
-  // is actually wanted: the buttons below still move exactly one rung, and the
-  // detail level still snaps at rung boundaries, so nothing that depended on
-  // discrete zoom levels changed.
-  const rungs = CCWATCH_CAMERA.zoomRungs(e, $("world").clientHeight);
-  if (rungs !== 0) {
-    view = CCWATCH_CAMERA.clampPan(
-      CCWATCH_CAMERA.zoomTo(view, view.idx + rungs, ax, ay),
-      worldExtent, $("world").clientWidth, $("world").clientHeight);
-    applyView();
-  }
-}, {passive: false});
-
-// contracts/page-camera.md §6, FR-042 — the API a later roster panel calls.
-// No caller ships with this feature; `current()` exists so a roster can read
-// the level without duplicating the thresholds.
-window.CCWATCH_MAP_CAMERA = {
-  centreOn(wx, wy, opts) {
-    opts = opts || {};
-    const world = $("world");
-    view = CCWATCH_CAMERA.clampPan(
-      CCWATCH_CAMERA.centreOn(view, wx, wy, world.clientWidth, world.clientHeight, opts.idx),
-      worldExtent, world.clientWidth, world.clientHeight);
-    if (opts.animate) $("camera").classList.add("eased");
-    applyView();
-    flushPendingSave();
-  },
-  fit() {
-    view = CCWATCH_CAMERA.fitView(worldExtent, $("world").clientWidth, $("world").clientHeight);
-    overflow = view.overflow;
-    applyView();
-    flushPendingSave();
-  },
-  current() {
-    return {idx: view.idx, scale: CCWATCH_CAMERA.scaleAt(view.idx), level, tx: view.tx, ty: view.ty};
-  },
-};
-
-// The eased class is only ever meant to bound one transition (research.md
-// D12); removing it on transitionend means the next un-animated move (a drag,
-// a wheel step) is instant again rather than inheriting the easing.
-$("camera").addEventListener("transitionend", () => {
-  $("camera").classList.remove("eased");
-});
-
-// ---- world coordinates ------------------------------------------------------
-// The one persisted record (data-model.md §4). Storage calls are injected so a
-// throwing localStorage — private mode, a full origin quota — cannot take the
-// map down; plots.js itself flips `persistence` to "unavailable" once rather
-// than retrying every frame.
-const PLOTS_KEY = "ccwatch.map.plots.v1";
-if (window.CCWATCH_PLOTS) {
-  CCWATCH_PLOTS.load(function () {
-    try { return localStorage.getItem(PLOTS_KEY); } catch (e) { return null; }
-  });
-}
-
-// Full rebuild of the world each tick: reconciliation (create/update/remove by
-// identity key, nothing rebuilt wholesale) is a later phase's work. What this
-// phase guarantees is that the *coordinates* handed to whatever draws them
-// never move except on first placement — that guarantee lives entirely in
-// plots.js and is unaffected by how the DOM is currently populated.
-function drawWorld(s) {
-  if (!window.CCWATCH_PLOTS) return null;
-  const model = buildWorldModel(s);
-  const placed = CCWATCH_PLOTS.place({districts: model.tree, now: Math.floor(Date.now() / 1000)});
-  CCWATCH_PLOTS.save(function (v) {
-    try { localStorage.setItem(PLOTS_KEY, v); } catch (e) { /* unavailable — plots.js records it */ }
-  }, placed.liveKeys);
-
-  const camera = $("camera");
-  const districtWanted = {};
-  for (const k in placed.world.districts)
-    districtWanted[k] = {geo: placed.world.districts[k], meta: model.districtsByKey[k]};
-  reconcile(camera, districtWanted, "district", makeDistrict, updateDistrict);
-
-  const buildingWanted = {};
-  for (const k in placed.world.buildings)
-    buildingWanted[k] = {geo: placed.world.buildings[k], meta: model.buildingsByKey[k]};
-  reconcile(camera, buildingWanted, "building", makeBuilding, updateBuilding);
-
-  const zoneWanted = {};
-  for (const k in placed.world.zones)
-    zoneWanted[k] = {geo: placed.world.zones[k], meta: model.zonesByKey[k]};
-  reconcile(camera, zoneWanted, "zone", makeZone, updateZone);
-
-  const figureWanted = {};
-  centreBySid = {};
-  for (const k in placed.world.figures) {
-    const row = model.figuresByKey[k];
-    if (!row) continue;
-    figureWanted[k] = {geo: placed.world.figures[k], row};
-    // D19: plots.js's own cx/cy (web/plots.js:259-261) — the fly target for
-    // selectRow, rebuilt fresh every tick since a district reflow moves it.
-    centreBySid[row.sid] = {cx: placed.world.figures[k].cx, cy: placed.world.figures[k].cy};
-  }
-  reconcile(camera, figureWanted, "figure", makeFigure, updateFigure);
-
-  // Recomputed only when the occupied set changes (placed.sig) — never on
-  // every tick, since the extent is pure geometry that mostly doesn't move
-  // (FR-019, FR-038). The first time there is an extent to clamp against, the
-  // stored viewport (or the fit) is loaded (contracts/page-camera.md §5);
-  // every later change to the extent only re-clamps the view the viewer
-  // already chose, so a shrinking extent pulls it back in without a refit
-  // (FR-011, T046).
-  if (placed.sig !== lastFit.sig) {
-    const firstLoad = lastFit.sig === null;
-    lastFit = {sig: placed.sig, extent: placed.extent};
-    worldExtent = placed.extent;
-    if (firstLoad) loadStoredView(placed);
-    else view = CCWATCH_CAMERA.clampPan(view, worldExtent, $("world").clientWidth, $("world").clientHeight);
-    applyView();
-  }
-  // Carried alongside `placed` so wires() can resolve a session name to its
-  // figure's world centre without re-walking the payload (T052).
-  placed.figuresByKey = model.figuresByKey;
-  return placed;
-}
-
-// ---- fit ---------------------------------------------------------------
-// The world's viewBox is fixed to the SVG element's own pixel size, so 1
-// world unit == 1 screen px at idx 2 — `applyView()` and the resize handler
-// are the only writers of `#camera`'s transform now (contracts/page-camera.md
-// §1); `sig` is what tells drawWorld the occupied set actually changed.
-let lastFit = {sig: null, extent: null};
 
 // ---- draw ------------------------------------------------------------------
 // data-model.md §5 — the page's trust model. Computed fresh every tick from
@@ -2197,9 +1941,10 @@ function renderRoster(sessions, cond) {
 // the sid it belongs to disappears from a later payload.
 let knownNames = {};
 
-// The two stored records (data-model.md §8), independent of PLOTS_KEY and of
-// camera.js's own key. Storage calls are injected the same way (contracts
-// roster-js.md §7): a throwing localStorage cannot take the map down.
+// The two stored records (data-model.md §8), and now the only two: the plot
+// record and the viewport record retired with the camera. Storage calls are
+// injected (contracts roster-js.md §7) so a throwing localStorage cannot take
+// the map down.
 const SELECTION_KEY = "ccwatch.map.selection.v1";
 function getSelectionItem() { return localStorage.getItem(SELECTION_KEY); }
 function setSelectionItem(v) { localStorage.setItem(SELECTION_KEY, v); }
@@ -2211,18 +1956,14 @@ function setWidthItem(v) { localStorage.setItem(WIDTH_KEY, v); }
 // definition needs — kept here rather than re-derived, since applyFeed is the
 // only place a fresh `sessions`/`cond` pair arrives.
 let lastSessions = [], lastCond = null;
-// Restored at load (contracts/page-roster.md §6/§8, D7): the initial mark
-// does not fly, because lastFlownSid starts null only after the first real
-// selectRow — see markInitialSelection below.
+// Restored at load (contracts/page-roster.md §6/§8, D7): the initial mark does
+// not scroll the board, because lastRevealedSid starts null only after the
+// first real selectRow — see markInitialSelection below.
 let selectedSid = window.CCWATCH_ROSTER
   ? (CCWATCH_ROSTER.loadSelection(getSelectionItem)?.sid ?? null) : null;
-// Exactly one camera move per selection (D7): a restored selection or a
-// reselect of the sid already flown to must not move the camera again.
-let lastFlownSid = null;
-// The world centre of each currently-placed figure, rebuilt every drawWorld
-// call from plots.js's own cx/cy (web/plots.js:259-261, D19). A sid with no
-// placement this tick is simply absent — selectRow's fly is a no-op for it.
-let centreBySid = {};
+// Exactly one scroll per selection (D7): a restored selection, or a reselect
+// of the sid already revealed, must not move the board again under the reader.
+let lastRevealedSid = null;
 // The row currently reachable by Tab (roving tabindex, FR-014). Restored by
 // sid, not position, across every renderRoster call — see the pass at the
 // end of renderRoster itself.
@@ -2230,38 +1971,42 @@ let focusedSid = null;
 
 // The selection-change handler (contracts/page-roster.md §3/§6): sets the
 // page-level selectedSid, persists it, re-renders the roster (row marker),
-// emphasises the matching figure, and flies iff sid !== lastFlownSid.
+// emphasises the matching figure, and scrolls to it iff sid !== the last one
+// revealed.
 function selectRow(sid) {
   selectedSid = sid;
   CCWATCH_ROSTER.saveSelection(setSelectionItem, sid);
   renderRoster(lastSessions, lastCond);
   applySelectionEmphasis();
-  flyToSelection();
+  revealSelection();
 }
 
-// The figure emphasis is a class on the outer <g class="agent"> node, never
-// inside .figart which updateFigure rebuilds wholesale every tick
-// (web/map.html:798-807, contracts/page-roster.md §6).
+// The figure emphasis is a class on the outer <button class="agent"> node,
+// never inside .figart which updateFigure rebuilds wholesale every tick
+// (contracts/page-roster.md §6).
 function applySelectionEmphasis() {
-  for (const g of $("camera").querySelectorAll(".agent[data-sid]")) {
-    g.classList.toggle("selected", g.dataset.sid === selectedSid);
+  for (const b of $("boardinner").querySelectorAll(".agent[data-sid]")) {
+    b.classList.toggle("selected", b.dataset.sid === selectedSid);
   }
 }
 
-// contracts/page-roster.md §6: the first caller of CCWATCH_MAP_CAMERA that
-// entry 003 shipped with none. reducedMotion is read at the moment of the
-// fly, not left to the stylesheet alone (D8) — a `transition:none` fires no
-// `transitionend`, which would leave `.eased` on #camera forever.
-function flyToSelection() {
-  if (selectedSid == null || selectedSid === lastFlownSid) return;
-  const c = centreBySid[selectedSid];
-  if (!c) return;
+// What "fly to the selection" becomes without a camera: bring the figure into
+// the scroll container. scrollIntoView does the arithmetic, including the case
+// where the figure is already visible and nothing should move.
+//
+// ⚠️ reducedMotion is read here, at the moment of the scroll, rather than left
+// to the stylesheet: `scroll-behavior` in CSS would animate this one, and the
+// setting has to be able to turn a specific movement off, not a rule.
+function revealSelection() {
+  if (selectedSid == null || selectedSid === lastRevealedSid) return;
+  const fig = $("boardinner").querySelector(`.agent[data-sid="${selectedSid}"]`);
+  if (!fig) return;
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  CCWATCH_MAP_CAMERA.centreOn(c.cx, c.cy, {
-    animate: !reducedMotion,
-    idx: CCWATCH_ROSTER.flyIdx(CCWATCH_MAP_CAMERA.current().level),
+  fig.scrollIntoView({
+    behavior: reducedMotion ? "auto" : "smooth",
+    block: "center", inline: "nearest",
   });
-  lastFlownSid = selectedSid;
+  lastRevealedSid = selectedSid;
 }
 
 // FR-021: selecting a row never opens the inspector — the existing .agent
@@ -2334,8 +2079,9 @@ rosterEls.list.addEventListener("keydown", (e) => {
   }
 });
 
-// The width/viewport-change path (contracts/page-roster.md §3/§6). Never
-// calls fitView, so a width change cannot discard the camera (FR-033).
+// The width/viewport-change path (contracts/page-roster.md §3/§6). The board
+// reflows itself — that is what flow layout is — so all this owes the map is a
+// wire redraw, since the figures the wires connect have just moved.
 function setWidth(w) {
   if (!window.CCWATCH_ROSTER) return;
   rosterEls.stage.style.setProperty("--roster-w", w + "px");
@@ -2344,7 +2090,7 @@ function setWidth(w) {
   rosterEls.divider.setAttribute("aria-valuemax", Math.round(
     Math.min(CCWATCH_ROSTER.WIDTH_MAX_PX, CCWATCH_ROSTER.WIDTH_MAX_FRAC * innerWidth)));
   CCWATCH_ROSTER.saveWidth(setWidthItem, w);
-  reflowWorld();
+  relayoutWires();
   renderRoster(lastSessions, lastCond);
 }
 
@@ -2411,11 +2157,12 @@ function applyFeed(s, cond) {
   // R2/R8: districts/buildings/zones stay drawn through (a)/(b)/(c) — a
   // failure never presents as an empty city. In (b) there is nothing yet to
   // have drawn, which `buildWorldModel`'s `s.sessions || []` already covers.
-  const placed = drawWorld(s);
-  const buildingCount = placed ? Object.keys(placed.world.buildings).length : 0;
+  const {buildingCount} = drawBoard(s);
   updateGauges(s.usage);
   hostwarn(s.host);
-  const drawn = wires(s.peers, placed) || 0;
+  // After drawBoard, never before: the wires are measured from the figures'
+  // boxes, so they have to be laid out before anything reads them.
+  const drawn = wires(s.peers) || 0;
 
   updateCounts(s, buildingCount);
 
@@ -2450,7 +2197,6 @@ async function tick() {
 // whatever was left of the old interval. A hidden (backgrounded) tab does no
 // periodic work of any kind — including the open conversation's own cadence.
 function resume() {
-  flushPendingSave();
   if (document.hidden) {
     clearEvery("tick");
     clearEvery("convo");
@@ -2461,23 +2207,16 @@ function resume() {
   // The transcript inspector, if open, follows the same visibility rule.
   if (subject) every("convo", 5000, loadConvo);
 }
-// No refit on resize (research.md D9, FR-010, FR-049): the centre world
-// point is held and the view is re-clamped against the unchanged extent, so
-// a chosen zoom and pan survive a window resize. Not while hidden — a
-// backgrounded tab does not resize. Extracted into its own function
-// (contracts/page-roster.md §7) so a width change (US5) and the load-time
-// call just below can share it with the resize listener, unchanged here.
-function reflowWorld() {
-  if (document.hidden || !worldExtent) return;
-  const world = $("world");
-  const k = CCWATCH_CAMERA.scaleAt(view.idx);
-  // The world point that was at the centre of the *old* size — vpSize, held
-  // since the last camera action — stays at the centre of the new one.
-  const wx = (vpSize.w / 2 - view.tx) / k, wy = (vpSize.h / 2 - view.ty) / k;
-  const vw = world.clientWidth, vh = world.clientHeight;
-  world.setAttribute("viewBox", `0 0 ${vw} ${vh}`);
-  view = CCWATCH_CAMERA.clampPan(CCWATCH_CAMERA.centreOn(view, wx, wy, vw, vh), worldExtent, vw, vh);
-  applyView();
+// What a resize owes the map, now that the layout reflows itself: the wires,
+// and only the wires. Their endpoints are measured from the figures' boxes,
+// and a resize moves every one of those — a wire still pointing where a figure
+// used to be is worse than no wire. Not while hidden: a backgrounded tab does
+// not resize, and measuring a display:none subtree returns zeroes.
+// Shared by the resize listener, the roster's width change (US5) and the
+// load-time call below (contracts/page-roster.md §7).
+function relayoutWires() {
+  if (document.hidden) return;
+  wires(lastPeers);
 }
 document.addEventListener("visibilitychange", resume);
 // Load-time width (contracts/page-roster.md §8, data-model.md §7 W4): below
@@ -2488,12 +2227,12 @@ if (window.CCWATCH_ROSTER && !CCWATCH_ROSTER.stacked(innerWidth)) {
   const storedWidth = CCWATCH_ROSTER.loadWidth(getWidthItem)?.w ?? CCWATCH_ROSTER.WIDTH_DEFAULT;
   setWidth(CCWATCH_ROSTER.clampWidth(storedWidth, innerWidth));
 }
-// Before the first tick() (contracts/page-roster.md §8): a no-op until
-// worldExtent exists, but the position is what a later window resize needs
-// to have always been able to rely on this function existing at.
-reflowWorld();
+// Before the first tick() (contracts/page-roster.md §8): a no-op while there
+// are no wires to draw, but the position a later window resize needs to have
+// always been able to rely on this function existing at.
+relayoutWires();
 resume();
-addEventListener("resize", reflowWorld);
+addEventListener("resize", relayoutWires);
 </script>
 </body>
 </html>

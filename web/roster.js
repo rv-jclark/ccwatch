@@ -1,11 +1,10 @@
 // ccwatch — the roster: pure data shaping for the docked agent-list panel on
 // the map (contracts/roster-js.md).
 //
-// A fourth static module beside web/md.js, web/plots.js and web/camera.js,
-// for the documented reason those exist: so tests/run.sh can require() it
-// under node and assert on it without a browser. Pure — no DOM, no fetch, no
-// timers, no localStorage reference. Storage is reached only through
-// injected getItem/setItem.
+// A static module beside web/md.js and web/modal.js, for the documented reason
+// those exist: so tests/run.sh can require() it under node and assert on it
+// without a browser. Pure — no DOM, no fetch, no timers, no localStorage
+// reference. Storage is reached only through injected getItem/setItem.
 (function (root) {
   "use strict";
 
@@ -19,7 +18,6 @@
   var WIDTH_STEP = 16;
   var WIDTH_STEP_BIG = 64;
   var STACK_BREAKPOINT = 720;
-  var NEAR_IDX = 5;
   var ASK_CHARS = 100;
 
   // §2 — the page's existing duration formatter (web/map.html:308-310),
@@ -169,14 +167,7 @@
     return {state: "unknown", sid: storedSid};
   }
 
-  // §5 flyIdx(level) — the camera rung a "far" selection flies to (D18); the
-  // camera decides for itself when already mid/near (S-H).
-  function flyIdx(level) {
-    return level === "far" ? NEAR_IDX : null;
-  }
-
-  // §7 — the rejection table for the two stored records (data-model.md §8),
-  // mirroring web/camera.js's validateView (web/camera.js:131-148).
+  // §7 — the rejection table for the two stored records (data-model.md §8).
   var SID_RE = /^[0-9a-fA-F-]{1,64}$/;
 
   function validateSelection(raw) {
@@ -293,7 +284,6 @@
     WIDTH_STEP: WIDTH_STEP,
     WIDTH_STEP_BIG: WIDTH_STEP_BIG,
     STACK_BREAKPOINT: STACK_BREAKPOINT,
-    NEAR_IDX: NEAR_IDX,
     ASK_CHARS: ASK_CHARS,
     dur: dur,
     rowFields: rowFields,
@@ -303,7 +293,6 @@
     focusTarget: focusTarget,
     nextFocus: nextFocus,
     resolveSelection: resolveSelection,
-    flyIdx: flyIdx,
     clampWidth: clampWidth,
     stacked: stacked,
     validateSelection: validateSelection,

@@ -32,19 +32,22 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # a full run.
 #
 # ⚠️ There are TWO floors, because a skipped assertion is not a counted one —
-# the check below compares `pass + fail` and ignores `skipped`. Five sections
-# (markdown, plots, camera, roster-module, modal-module) need `node`, and
-# measured 2026-09-09 they are 260 of the 562 assertions. A single floor set
-# from a machine that has node therefore fails on a machine that does not:
-# at 455 against the 302 that run without it, the suite reported "assertions
-# are running but not registering" on a host whose only fault was missing an
+# the check below compares `pass + fail` and ignores `skipped`. Three sections
+# (markdown, roster-module, modal-module) need `node`, and measured
+# 2026-09-15 they are 187 of the 491 assertions. A single floor set from a
+# machine that has node therefore fails on a machine that does not: at 455
+# against the 302 that ran without it, the suite once reported "assertions are
+# running but not registering" on a host whose only fault was missing an
 # optional tool. That is one machine's configuration written into the suite,
 # which is the thing a floor must not do.
 #
 # So TALLY_FLOOR is what always runs, and TALLY_FLOOR_NODE is added only when
-# node is actually present.
-TALLY_FLOOR=300
-TALLY_FLOOR_NODE=250
+# node is actually present. Both dropped when the pan-and-zoom camera was
+# replaced by the scrolling board: web/plots.js and web/camera.js were pure
+# arithmetic modules with 73 node checks between them, and retiring the
+# arithmetic retired the assertions on it.
+TALLY_FLOOR=303
+TALLY_FLOOR_NODE=185
 
 assert_contains() { case "$1" in *"$2"*) t_pass "$3";; *) t_fail "$3" "expected to contain: $2";; esac; }
 assert_not_contains() { case "$1" in *"$2"*) t_fail "$3" "should NOT contain: $2";; *) t_pass "$3";; esac; }
@@ -965,62 +968,106 @@ for _pf in "$ROOT/web/index.html" "$ROOT/web/map.html"; do
     "$_pf listens for visibilitychange"
 done
 
-# FR-018: #world must be reachable by keyboard and its aria-label must name the
-# keys, not just say "map" — a screen-reader user gets no other hint the arrow
-# keys, +/-, and 0 do anything here.
-_world_tag=$(awk '/<svg id="world"/{f=1} f{print; if(/>/){exit}}' "$ROOT/web/map.html")
-assert_contains "$_world_tag" 'tabindex="0"' "#world carries tabindex=\"0\""
-assert_contains "$_world_tag" 'aria-label="' "#world carries a non-empty aria-label"
-_world_label=$(printf '%s' "$_world_tag" | sed -n 's/.*aria-label="\([^"]*\)".*/\1/p')
-assert_contains "$_world_label" "Arrow keys" "and the aria-label names the keys"
-
-# FR-016, FR-047: #camctl is built with real, focusable, named buttons — not
-# divs with click handlers, which a screen reader and Tab both skip. Four now:
-# zoom out, zoom in, fit, and the `?` that opens the map key. The key used to
-# be a permanent 73px strip under the map, which spent viewport on something a
-# reader needs once; behind a button it costs nothing until asked for.
-_camctl_js=$(awk '/const camctl = document.createElement/,/insertAdjacentElement/' "$ROOT/web/map.html")
-assert_eq "$(printf '%s' "$_camctl_js" | grep -c 'createElement("button")')" "4" \
-  "#camctl is built from four real <button> elements"
-# Every one of them is named for a screen reader, by text content or aria-label:
-# a control whose only label is a glyph ("?") is a control nobody can identify.
-assert_eq "$(printf '%s' "$_camctl_js" | grep -cE 'textContent = "|setAttribute\("aria-label"')" "5" \
-  "and each is named, the glyph-only one by aria-label"
-assert_contains "$_camctl_js" 'zoom out' "and #zout has an accessible name"
-assert_contains "$_camctl_js" 'zoom in' "and #zin has an accessible name"
-assert_contains "$_camctl_js" '"fit"' "and #zfit has an accessible name"
-
-# FR-031-FR-033: every label and badge, plus the wire's stroke, counter-scale
-# against --k so they hold their apparent size at every rung of the ladder —
-# a coordinate-space stroke-width would thicken into a smear at the closest
-# zoom and vanish at the widest.
 _maphtml=$(cat "$ROOT/web/map.html")
-for _sel in '\.dlabel' '\.blabel' '\.zlabel' '\.dsummary' '\.alabel' \
-            '\.norepo-badge' '\.wreck-badge' '\.deploy-badge'; do
-  _rule=$(printf '%s' "$_maphtml" | grep -E "^\s*${_sel}(,|\s*\{)" | head -1)
-  assert_contains "$_rule" 'calc(' "$_sel's font-size counter-scales with calc(Npx / var(--k, 1))"
-  assert_contains "$_rule" 'var(--k' "$_sel's font-size reads --k"
+
+# FR-018: the board must be reachable by keyboard, and it is reachable the way
+# every other scroll container in the browser is — a focusable overflow box
+# scrolls on the arrow keys, PageUp/PageDown and Home/End with no script at
+# all. So what is asserted is the tabindex that makes it focusable, and a
+# non-empty aria-label. The old label had to recite a hand-written keymap
+# ("Arrow keys pan, plus and minus zoom, zero fits"); there is no keymap to
+# recite now, and a label that explains scrolling to a screen-reader user is
+# explaining their own scroll container to them.
+_board_tag=$(awk '/<div id="board"/{f=1} f{print; if(/>/){exit}}' "$ROOT/web/map.html")
+assert_contains "$_board_tag" 'tabindex="0"' "#board carries tabindex=\"0\""
+assert_contains "$_board_tag" 'aria-label="' "#board carries a non-empty aria-label"
+
+# ⚠️ The scroll container must be the BOARD, not the page. `body` is
+# overflow:hidden and the page is a flex column, so a #board that forgets
+# `overflow-y:auto` does not grow a scrollbar of its own — it clips, and every
+# territory below the fold becomes unreachable with no indication that it is
+# there. That is the failure this whole view was built to end, so the rule is
+# pinned rather than left to be noticed.
+_board_rule=$(printf '%s' "$_maphtml" | awk '/^  #board \{/{f=1} f{print; if (/\}/) exit}')
+assert_contains "$_board_rule" 'overflow:auto' "#board scrolls"
+# min-height:0 on the scroll container itself is belt-and-braces, and is
+# recorded as such rather than credited with more than it does: removing it
+# alone did NOT reproduce a page scroll in verify-ui. The one that is
+# load-bearing is #stage's, asserted below — removing THAT reddens
+# "the page itself does not scroll". Stating which of two similar declarations
+# was actually measured is the difference between a comment and a guess.
+assert_contains "$_board_rule" 'min-height:0' \
+  "and #board carries min-height:0 so a flex child that scrolls can shrink"
+# ⚠️ Not overflow-x:hidden. Clipped content is unreachable at every scroll
+# position, which is a failure presenting as an absence; a scrollbar is the
+# same bug made visible. And the hidden form cannot even be tested for: an
+# overflow:hidden box still reports scrollHeight past clientHeight and still
+# moves under scrollTop, so a "does it overflow / does it scroll" check passes
+# against it either way. Both of those checks were written, were green, and
+# could not fail — see the mutation table.
+assert_not_contains "$_board_rule" 'overflow-x:hidden' \
+  "and does not clip sideways, which would hide content at every scroll position"
+
+# The overlay is positioned against #boardinner, so #boardinner must establish
+# the containing block. Without position:relative the wires are positioned
+# against the nearest positioned ancestor instead and every one of them is
+# offset by however far the board has been scrolled.
+_inner_rule=$(printf '%s' "$_maphtml" | grep -E '^\s*#boardinner \{' | head -1)
+assert_contains "$_inner_rule" 'position:relative' \
+  "#boardinner is the positioned ancestor the wire overlay is measured against"
+
+# FR-016, FR-047: the map key is a real, focusable, named button — not a div
+# with a click handler, which a screen reader and Tab both skip. One now: the
+# zoom-out/zoom-in/fit trio went with the camera, since the browser's own
+# scrollbar is the position indicator and there is no zoom to be at.
+_boardctl_js=$(awk '/const boardctl = document.createElement/,/insertAdjacentElement/' "$ROOT/web/map.html")
+assert_eq "$(printf '%s' "$_boardctl_js" | grep -c 'createElement("button")')" "1" \
+  "#boardctl is built from one real <button> element"
+# A control whose only label is a glyph ("?") is a control nobody can identify.
+assert_contains "$_boardctl_js" 'setAttribute("aria-label"' \
+  "and the glyph-only control is named by aria-label"
+
+# ⚠️ No level-of-detail rule may come back. The camera hid buildings, zones,
+# agents and labels below a zoom threshold, and that is how it shipped a
+# default view with display:none on every figure on the page. Nothing in this
+# stylesheet may hide a session at any window size.
+assert_eq "$(printf '%s' "$_maphtml" | grep -cE '^\s*#[a-z]+\[data-lod')" "0" \
+  "no level-of-detail rule hides anything on the board"
+# And no counter-scaling: --k was the camera's scale, and a calc() reading it
+# now resolves against a variable nothing sets, which is a silently wrong size
+# rather than an error.
+assert_eq "$(printf '%s' "$_maphtml" | grep -c 'var(--k')" "0" \
+  "nothing reads --k, the retired camera's scale factor"
+
+# Order is carried by style.order, never by moving nodes: re-appending children
+# to sort them moves whichever one has focus, and moving a focused element
+# drops the focus — so a keyboard user tabbed onto a figure would lose it every
+# three seconds.
+for _upd in updateDistrict updateBuilding updateZone updateFigure; do
+  _fn=$(printf '%s' "$_maphtml" | awk "/^function ${_upd}\(/{f=1} f{print; if (/^\}/) exit}")
+  assert_contains "$_fn" '.style.order = ' \
+    "$_upd writes its sorted position as style.order rather than re-appending"
 done
-_wire_rule=$(printf '%s' "$_maphtml" | grep '\.wire path' | head -1)
-assert_contains "$_wire_rule" 'calc(var(--wire-w, 1) * 1px / var(--k, 1))' \
-  ".wire path's stroke-width counter-scales with --wire-w and --k"
 
-# FR-032: the count bubble stays a constant size on screen while its position
-# — written by updateWire() onto the outer .bubble group — moves in world
-# units, which is why the un-scaling has to live one level in.
-_bubblescale_rule=$(printf '%s' "$_maphtml" | grep -E '^\s*\.bubblescale\s*\{' | head -1)
-assert_contains "$_bubblescale_rule" 'transform:scale(calc(1 / var(--k, 1)))' \
-  ".bubblescale carries transform: scale(calc(1 / var(--k, 1)))"
-
-# FR-045, SC-012: easing is a single bounded transition applied by a class —
-# never permanently on #camera, which would make a drag or wheel step lag the
-# pointer — and reduced to an instant jump under prefers-reduced-motion.
-_eased_rule=$(printf '%s' "$_maphtml" | grep -E '^\s*#camera\.eased\s*\{' | head -1)
-assert_contains "$_eased_rule" 'transition: transform 180ms ease-out' \
-  "#camera.eased sets a bounded transition on transform"
-_reduced_motion_block=$(awk '/@media \(prefers-reduced-motion: reduce\)/{f=1} f{print; if (/^  \}/) exit}' "$ROOT/web/map.html")
-assert_contains "$_reduced_motion_block" '#camera.eased { transition: none; }' \
-  "the rule reduces to none under prefers-reduced-motion: reduce"
+# ⚠️ Ordering must not read status. A figure that moved when its status changed
+# would make position useless for finding a session again, which is the only
+# thing position is for here — and it is why the sort is on the name.
+_bwm=$(printf '%s' "$_maphtml" | awk '/^function buildWorldModel\(/{f=1} f{print; if (/^\}/) exit}')
+# ⚠️ `.*`, not `[^)]*`. The first version of this pattern stopped at the first
+# `)`, so in a comparator written `sort((p, q) => (q.sev || 0) - (p.sev || 0))`
+# it never reached `sev` at all — it reported 0 against a board sorted entirely
+# by severity. Green and unable to fail; it is in the mutation table.
+assert_eq "$(printf '%s' "$_bwm" | grep -cE 'sort\(.*(sev|token|worst)')" "0" \
+  "buildWorldModel sorts on identity, never on severity or status"
+assert_contains "$_bwm" 'sort(byName)' "and the sort it uses is the name comparator"
+# ⚠️ Not localeCompare: its answer depends on the browser's locale and ICU
+# build, so two machines could order the same sessions differently and this
+# suite could pass on one and fail on the other.
+# ⚠️ Matches the CALL, not the word: the comment in map.html that explains why
+# localeCompare is not used would satisfy a grep for the bare name. That exact
+# mistake — a guard tripped by its own documentation — is in the mutation table.
+assert_eq "$(printf '%s' "$_maphtml" | grep -c 'localeCompare(')" "0" \
+  "and the comparator is locale-independent, never a localeCompare() call"
 
 # ⚠️ The figure animations must hold discrete poses, never interpolate. They
 # animate `transform` on an SVG <g>, which Chrome cannot promote to a
@@ -1627,21 +1674,20 @@ assert_contains "$_maphtml" 'rosterEls.list.addEventListener("keydown"' \
   "the roster's keydown listener is bound to #rosterlist"
 assert_not_contains "$_maphtml" 'document.addEventListener("keydown"' \
   "and never to document, so it cannot also catch the map's own arrow keys"
-assert_contains "$_world_label" "companion" \
-  "FR-013: #world's aria-label still names itself a companion view of the agent list"
-assert_contains "$_world_label" "Arrow keys" \
-  "and still names the keys (unchanged by this story)"
+_board_label=$(printf '%s' "$_board_tag" | sed -n 's/.*aria-label="\([^"]*\)".*/\1/p')
+assert_contains "$_board_label" "companion" \
+  "FR-013: #board's aria-label still names itself a companion view of the agent list"
 
-# contracts/page-roster.md §6: the selection ring is its own rule, applied to
-# the outer .agent group (which applySelectionEmphasis toggles), never inside
-# .figart which updateFigure rebuilds wholesale every tick.
-assert_contains "$_maphtml" '.agent.selected .hit' \
-  "the selection ring is a distinct .agent.selected .hit rule"
-assert_not_contains "$(grep '\.agent\.sev' "$ROOT/web/map.html")" '.hit' \
-  "and no status-appearance .agent.sevN rule also targets .hit"
+# contracts/page-roster.md §6: the selection ring is its own rule on the outer
+# .agent node (which applySelectionEmphasis toggles), never inside .figart
+# which updateFigure rebuilds wholesale every tick.
+assert_contains "$_maphtml" '.agent.selected {' \
+  "the selection ring is a distinct .agent.selected rule"
+assert_not_contains "$(grep '\.agent\.sev' "$ROOT/web/map.html")" 'border' \
+  "and no status-appearance .agent.sevN rule also sets a border, which would collide with it"
 _applyselemph_js=$(awk '/^function applySelectionEmphasis\(\)/,/^\}/' "$ROOT/web/map.html")
-assert_contains "$_applyselemph_js" 'g.classList.toggle("selected"' \
-  "applySelectionEmphasis toggles .selected directly on g (the outer .agent node), not on a child it queries"
+assert_contains "$_applyselemph_js" 'b.classList.toggle("selected"' \
+  "applySelectionEmphasis toggles .selected directly on the outer .agent button, not on a child it queries"
 assert_not_contains "$_applyselemph_js" 'figart' \
   "and never reaches into .figart, which updateFigure rebuilds wholesale every tick"
 
@@ -1676,13 +1722,14 @@ assert_contains "$_maphtml" 'rosterEls.divider.setAttribute("aria-valuemin"' \
 assert_contains "$_maphtml" 'rosterEls.divider.setAttribute("aria-valuemax"' \
   "and aria-valuemax"
 
-# T008: the roster's stylesheet rules were required to land after the
-# existing #camera.eased prefers-reduced-motion block so that block stays the
-# first one in the file — the one the FR-045/SC-012 assertion above reads.
+# The figure animations' reduced-motion block is the only one left in the file
+# now that #camera.eased has gone with the camera, and it must stay paired with
+# the rules it turns off: a reduced-motion block that drifts away from them
+# silently stops covering one.
 _first_reduced_motion_line=$(grep -n '@media (prefers-reduced-motion: reduce)' "$ROOT/web/map.html" | head -1 | cut -d: -f1)
-_camera_eased_line=$(grep -n '#camera\.eased { transition: transform' "$ROOT/web/map.html" | head -1 | cut -d: -f1)
-assert_eq "$(awk -v a="$_first_reduced_motion_line" -v b="$_camera_eased_line" 'BEGIN{print (a>0 && b>0 && a>b) ? "yes" : "no"}')" "yes" \
-  "the first @media (prefers-reduced-motion: reduce) block in map.html still follows #camera.eased's rule, unchanged by the roster's own stylesheet additions"
+_figure_anim_line=$(grep -n '^  \.hung \.body { animation:' "$ROOT/web/map.html" | head -1 | cut -d: -f1)
+assert_eq "$(awk -v a="$_first_reduced_motion_line" -v b="$_figure_anim_line" 'BEGIN{print (a>0 && b>0 && a>b) ? "yes" : "no"}')" "yes" \
+  "the reduced-motion block follows the figure animation rules it disables"
 
 # FR-041: the roster is rendered event-driven, on a data change, a selection,
 # a focus move, or a width change — never on its own timer or animation
@@ -1707,10 +1754,10 @@ assert_contains "$_maphtml" 'if (!window.CCWATCH_ROSTER) return;' \
 # disagree. Mutation-checked: with the aria-label line removed, or written
 # from a different call, this assertion fails.
 _updatefigure_js=$(awk '/^function updateFigure\(/,/^\}/' "$ROOT/web/map.html")
-assert_contains "$_updatefigure_js" 'g.setAttribute("aria-label", "agent " + row.name + ": " + titleBits(row));' \
-  "updateFigure writes aria-label from the same titleBits(row) call the <title> uses"
-assert_contains "$_updatefigure_js" 'g.querySelector("title").textContent = titleBits(row);' \
-  "and the <title> is still the same titleBits(row) call"
+assert_contains "$_updatefigure_js" 'b.setAttribute("aria-label", "agent " + row.name + ": " + titleBits(row));' \
+  "updateFigure writes aria-label from the same titleBits(row) call the tooltip uses"
+assert_contains "$_updatefigure_js" 'b.title = titleBits(row);' \
+  "and the tooltip is still the same titleBits(row) call"
 
 # T029/FR-028/D17: #killbar is present whether or not killing is permitted —
 # no display:none rule left on it — and the disabled attribute and doKill()'s
@@ -1774,9 +1821,9 @@ assert_eq "$_showmodal_count" "2" "showModal() opens both dialogs, and nothing e
 assert_eq "$(grep -c 'dialog#[a-z]*\[open\]' "$ROOT/web/map.html")" "2" \
   "each dialog's display is scoped to [open], so a closed one cannot render"
 
-# ⚠️ The page fills the viewport and does not scroll. `#world` was
-# `calc(100vh - 8rem)`, and 8rem was a guess at the chrome that missed three of
-# its four parts — the host-pressure banner (present only sometimes, so the
+# ⚠️ The page fills the viewport and does not scroll — #board does, inside it.
+# The map box was once `calc(100vh - 8rem)`, and 8rem was a guess at the chrome
+# that missed three of its four parts — the host-pressure banner (present only sometimes, so the
 # guess was wrong only sometimes), the legend and the footer. Measured 223px of
 # chrome against a 128px allowance: the page scrolled by 258px and the map was
 # shorter than the room it had. A flex column cannot be wrong about a height it
@@ -1790,11 +1837,23 @@ assert_contains "$_maphtml" 'html, body { height:100%; }' \
   "the page is a full-height column"
 assert_contains "$_maphtml" '#stage { flex:1 1 auto; min-height:0; }' \
   "and the map stage takes the space the chrome leaves, shrinking below content"
+# ⚠️ A figure is a real <button>, not an SVG group wearing role="button". As a
+# <g> it needed an explicit tabindex, an explicit role, a drawn focus ring and
+# a keydown handler to honour Enter and Space — four separate things that each
+# had to be right for the map not to be a control some people cannot operate.
+# What is asserted is the element, because the element is what supplies all
+# four: a `<div role="button" tabindex="0">` would satisfy a grep for the role
+# and still be the thing this replaced.
 _makefigure_js=$(awk '/^function makeFigure\(/,/^\}/' "$ROOT/web/map.html")
-assert_contains "$_makefigure_js" 'tabindex: "0"' \
-  "makeFigure gives each .agent group tabindex"
-assert_contains "$_makefigure_js" 'role: "button"' \
-  "and role=\"button\""
+assert_contains "$_makefigure_js" 'el("button", "agent")' \
+  "makeFigure builds each figure as a real <button>"
+assert_contains "$_makefigure_js" 'b.type = "button"' \
+  "and types it, so it cannot submit anything"
+# And the hand-rolled keyboard support is gone with the reason for it: a
+# keydown handler that re-implements Enter/Space on a real button is a second
+# path to the same action, and the two drift.
+assert_not_contains "$_maphtml" 'e.key === " " || e.key === "Spacebar"' \
+  "and no hand-written Enter/Space handler shadows the button's own activation"
 
 # T057/research.md D6: #rosteropen is built outside #rosterlist (role="option"
 # rows have presentational children and cannot themselves host a button), and
@@ -2220,461 +2279,12 @@ assert_contains "$_rm" "claude --resume $MSID" \
   "a transcript ending in metadata records is still offered for resume"
 
 
-# =================================================================== plots ===
-printf '\nplots\n'
-#
-# web/plots.js is the pure identity->coordinate module (contracts/plots-js.md).
-# It lives in its own file for the same reason web/md.js does: so these
-# assertions can require() it under node without a browser.
-if command -v node >/dev/null 2>&1; then
-  cat > "$WORK/plots-check.js" <<'PLOTSJS'
-var P = require(process.argv[2]);
-var out = [];
-function check(name, cond, detail) {
-  out.push((cond ? "PASS|" : "FAIL|") + name + "|" + (detail || ""));
-}
-function fresh() {
-  delete require.cache[require.resolve(process.argv[2])];
-  return require(process.argv[2]);
-}
-
-// A1: same key, same slot, every call.
-(function () {
-  var p = fresh();
-  var s1 = p.assign("district", "d|acme", { seen: 1 });
-  var s2 = p.assign("district", "d|acme", { seen: 2 });
-  check("A1 same key returns same slot on repeat calls", s1 === s2, s1 + " vs " + s2);
-})();
-
-// A2: a key present in storage returns its stored slot without hashing.
-(function () {
-  var p = fresh();
-  var store = JSON.stringify({ v: 1, entries: { "d|acme": { slot: 6, seen: 1 } } });
-  p.load(function () { return store; });
-  var slot = p.assign("district", "d|acme", { seen: 2 });
-  check("A2 a stored key returns its stored slot without recomputing", slot === 6, "got " + slot);
-})();
-
-// A3: assigning a new key never changes an existing key's slot.
-(function () {
-  var p = fresh();
-  var before = p.assign("district", "d|acme", { seen: 1 });
-  p.assign("district", "d|newone", { seen: 1 });
-  var after = p.assign("district", "d|acme", { seen: 1 });
-  check("A3 a new key never changes an existing key's slot", before === after, before + " vs " + after);
-})();
-
-// A4: a collision's probe step derives from the key, not call order.
-(function () {
-  var p = fresh();
-  // Two full independent module instances, assigning the same two colliding
-  // keys in opposite order, must resolve to the same pair of slots each —
-  // which would not hold if the probe step came from a call counter.
-  var a = fresh(), b = fresh();
-  var k1 = "f|s|br|one", k2 = "f|s|br|two";
-  var a1 = a.assign("figure", k1, { seen: 1 });
-  var a2 = a.assign("figure", k2, { seen: 1 });
-  var b2 = b.assign("figure", k2, { seen: 1 });
-  var b1 = b.assign("figure", k1, { seen: 1 });
-  check("A4 probe outcome for a key does not depend on assignment order",
-        a1 === b1 && a2 === b2, [a1, a2, b1, b2].join(","));
-})();
-
-// A5: only level/key/opts.seen influence the result.
-(function () {
-  var p1 = fresh(), p2 = fresh();
-  var s1 = p1.assign("building", "b|acme|repo", { seen: 1 });
-  var s2 = p2.assign("building", "b|acme|repo", { seen: 999, bogus: "ignored" });
-  check("A5 no argument besides level/key/opts.seen influences the slot", s1 === s2, s1 + " vs " + s2);
-})();
-
-// A6: an annex key (<key>#2) is itself persisted.
-(function () {
-  var p = fresh();
-  for (var i = 0; i < 10; i++) p.assign("zone", "z|repo|branch" + i, { seen: 1 });
-  // zone cap is 2, so branch2..branch9 must overflow into annex zone keys.
-  var raw = null;
-  p.save(function (v) { raw = v; }, []);
-  var saved = JSON.parse(raw);
-  var hasAnnex = Object.keys(saved.entries).some(function (k) { return k.indexOf("#") !== -1; });
-  check("A6 an annex key is itself persisted", hasAnnex, Object.keys(saved.entries).join(","));
-})();
-
-// P1: every returned coordinate is an integer.
-(function () {
-  var p = fresh();
-  var tree = { districts: [{ org: "acme", buildings: [{ slug: "acme/repo", zones: [{ branch: "main", figures: [{ sid: "s1" }] }] }] }] };
-  var r = p.place(tree);
-  var f = r.world.figures["f|acme/repo|main|s1"];
-  check("P1 figure coordinates are integers",
-        Number.isInteger(f.x) && Number.isInteger(f.y) && Number.isInteger(f.cx) && Number.isInteger(f.cy),
-        JSON.stringify(f));
-})();
-
-// P2: fields excluded from layout do not affect coordinates.
-(function () {
-  function treeWith(extra) {
-    return { districts: [{ org: "acme", buildings: [{ slug: "acme/repo", zones: [{ branch: "main",
-      figures: [Object.assign({ sid: "s1" }, extra)] }] }] }] };
-  }
-  var p1 = fresh(), p2 = fresh();
-  var r1 = p1.place(treeWith({ sev: 4, cost: 9.9, age: 100 }));
-  var r2 = p2.place(treeWith({ sev: 1, cost: 0, age: 0 }));
-  check("P2 volatile fields never influence a coordinate",
-        JSON.stringify(r1.world) === JSON.stringify(r2.world), "trees differed");
-})();
-
-// P3/P4: extent is the occupied bbox + gutter, floored at 408x408; a
-// remembered-but-unoccupied plot contributes nothing.
-(function () {
-  var p = fresh();
-  var empty = p.place({ districts: [] });
-  check("P3 extent floors at 408x408 when nothing is occupied",
-        empty.extent.w === 408 && empty.extent.h === 408, JSON.stringify(empty.extent));
-
-  var tree = { districts: [{ org: "acme", buildings: [{ slug: "acme/repo", zones: [{ branch: "main", figures: [{ sid: "s1" }] }] }] }] };
-  var full = p.place(tree);
-  var againEmpty = p.place({ districts: [] });
-  check("P4 a remembered-but-unoccupied plot contributes nothing to a later extent",
-        againEmpty.extent.w === 408 && againEmpty.extent.h === 408, JSON.stringify(againEmpty.extent));
-})();
-
-// P5: sig changes only when the occupied set changes.
-(function () {
-  var p = fresh();
-  var tree1 = { districts: [{ org: "acme", buildings: [{ slug: "acme/repo", zones: [{ branch: "main", figures: [{ sid: "s1" }] }] }] }] };
-  var r1a = p.place(tree1);
-  var r1b = p.place(tree1);
-  check("P5 sig is stable across identical calls", r1a.sig === r1b.sig, r1a.sig);
-  var tree2 = { districts: [{ org: "acme", buildings: [{ slug: "acme/repo", zones: [{ branch: "main", figures: [{ sid: "s1" }, { sid: "s2" }] }] }] }] };
-  var r2 = p.place(tree2);
-  check("P5 sig changes when the occupied set changes", r2.sig !== r1a.sig, r2.sig + " vs " + r1a.sig);
-})();
-
-// P6: cx/cy are usable centres — inside the figure's own box.
-(function () {
-  var p = fresh();
-  var tree = { districts: [{ org: "acme", buildings: [{ slug: "acme/repo", zones: [{ branch: "main", figures: [{ sid: "s1" }] }] }] }] };
-  var r = p.place(tree);
-  var f = r.world.figures["f|acme/repo|main|s1"];
-  check("P6 cx/cy fall within the figure's own box",
-        f.cx >= f.x && f.cx <= f.x + f.w && f.cy >= f.y && f.cy <= f.y + f.h, JSON.stringify(f));
-})();
-
-// P7: a "no repo" building lands in the reserved district.
-(function () {
-  var p = fresh();
-  var tree = { districts: [{ org: "no repo", isNoRepo: true, buildings: [{ slug: "dir:/tmp/x", zones: [] }] }] };
-  var r = p.place(tree);
-  check("P7 a no-repo building's district key is the reserved no-repo district",
-        Object.keys(r.world.districts)[0] === "d|no repo", Object.keys(r.world.districts).join(","));
-})();
-
-// F1-F4: fit.
-(function () {
-  var p = fresh();
-  var f1 = p.fit({ x: 0, y: 0, w: 400, h: 200 }, 800, 800);
-  check("F1 scale is uniform and aspect-preserving", f1.k === 2, JSON.stringify(f1));
-  var f2 = p.fit({ x: 0, y: 0, w: 10, h: 10 }, 8000, 8000);
-  check("F2 scale is clamped to a maximum of 3.0", f2.k === 3, JSON.stringify(f2));
-  var f3 = p.fit({ x: 0, y: 0, w: 400, h: 200 }, 800, 800);
-  var scaledW = 400 * f3.k, scaledH = 200 * f3.k;
-  var centeredX = Math.abs((f3.tx) - ((800 - scaledW) / 2)) < 0.001;
-  var centeredY = Math.abs((f3.ty) - ((800 - scaledH) / 2)) < 0.001;
-  check("F3 the extent is centred in the available area", centeredX && centeredY, JSON.stringify(f3));
-  check("F4 fit holds no state across calls", p.fit({ x: 0, y: 0, w: 400, h: 200 }, 800, 800).k === f1.k, "");
-})();
-
-// S1: load of a payload whose v !== 1 discards it wholly. The stored slot (7)
-// is deliberately NOT the slot d|zzz would hash to (4): if the version check
-// were dropped, assign() would return the discarded 7 instead of recomputing.
-(function () {
-  var p2 = fresh();
-  var store = JSON.stringify({ v: 2, entries: { "d|zzz": { slot: 7, seen: 1 } } });
-  p2.load(function () { return store; });
-  var slot = p2.assign("district", "d|zzz", { seen: 1 });
-  check("S1 load discards a payload whose v is not 1", slot === 4, "slot=" + slot + " (expected freshly-hashed 4, not the discarded 7)");
-})();
-
-// S2: throwing storage sets persistence unavailable, without retrying.
-(function () {
-  var p = fresh();
-  var calls = 0;
-  p.load(function () { calls++; throw new Error("boom"); });
-  check("S2 a throwing load sets persistence to unavailable", p.persistence === "unavailable", p.persistence);
-  var savecalls = 0;
-  p.save(function () { savecalls++; throw new Error("boom"); }, []);
-  check("S2 save after a failed load is not retried (no throw propagates)", true, "");
-})();
-
-// S3/S4: save caps at 512, evicting longest-unseen first, never a live key.
-(function () {
-  var p = fresh();
-  for (var i = 0; i < 520; i++) {
-    p.assign("figure", "f|s|b|id" + i, { seen: i });
-  }
-  var raw = null;
-  var liveKeys = ["f|s|b|id0"]; // the longest-unseen key, kept alive on purpose
-  p.save(function (v) { raw = v; }, liveKeys);
-  var saved = JSON.parse(raw);
-  var count = Object.keys(saved.entries).length;
-  check("S3 save caps entries at 512", count <= 512, "count=" + count);
-  check("S4 save never evicts a key in liveKeys, even the longest-unseen",
-        saved.entries.hasOwnProperty("f|s|b|id0"), Object.keys(saved.entries).length);
-})();
-
-// S5: save writes slot unchanged for every key already stored.
-(function () {
-  var p = fresh();
-  var slot1 = p.assign("district", "d|acme", { seen: 1 });
-  var raw = null;
-  p.save(function (v) { raw = v; }, ["d|acme"]);
-  var saved = JSON.parse(raw);
-  check("S5 save writes slot unchanged for an already-stored key",
-        saved.entries["d|acme"].slot === slot1, saved.entries["d|acme"].slot + " vs " + slot1);
-})();
-
-process.stdout.write(out.join("\n") + "\n");
-PLOTSJS
-
-  while IFS='|' read -r status name detail; do
-    [ -z "$status" ] && continue
-    if [ "$status" = "PASS" ]; then
-      t_pass "$name"
-    else
-      t_fail "$name" "$detail"
-    fi
-  done < <(node "$WORK/plots-check.js" "$ROOT/web/plots.js" 2>&1)
-else
-  t_skip "plots geometry" "node not installed"
-fi
-
-
-# ================================================================== camera ===
-printf '\ncamera\n'
-#
-# web/camera.js is the pure camera arithmetic module (contracts/camera-js.md).
-# It lives in its own file for the same reason web/md.js and web/plots.js do:
-# so these assertions can require() it under node without a browser.
-if command -v node >/dev/null 2>&1; then
-  cat > "$WORK/camera-check.js" <<'CAMERAJS'
-var C = require(process.argv[2]);
-var out = [];
-function check(name, cond, detail) {
-  out.push((cond ? "PASS|" : "FAIL|") + name + "|" + (detail || ""));
-}
-
-// K1: scaleFor/clampIdx clamp to the ladder's ends and floor a fractional index.
-(function () {
-  check("K1 clampIdx clamps below the ladder to 0", C.clampIdx(-3) === 0, C.clampIdx(-3));
-  check("K1 clampIdx clamps above the ladder to its last index", C.clampIdx(99) === C.LADDER.length - 1, C.clampIdx(99));
-  check("K1 clampIdx floors a fractional index", C.clampIdx(2.7) === 2, C.clampIdx(2.7));
-  check("K1 scaleFor never returns a value outside LADDER", C.LADDER.indexOf(C.scaleFor(5)) !== -1, C.scaleFor(5));
-})();
-
-// K2: panBy adds screen-pixel deltas to tx/ty and leaves idx untouched.
-(function () {
-  var v = C.panBy({idx: 3, tx: 10, ty: -5}, 4, 6);
-  check("K2 panBy adds the delta to tx and ty", v.tx === 14 && v.ty === 1, JSON.stringify(v));
-  check("K2 panBy leaves idx unchanged", v.idx === 3, v.idx);
-})();
-
-// K3: clampPan holds the visible rectangle inside a larger-than-viewport extent.
-(function () {
-  var extent = {x: 0, y: 0, w: 2000, h: 2000};
-  var v = C.clampPan({idx: 2, tx: 500, ty: 500}, extent, 400, 400); // k=1
-  var visX0 = -v.tx, visX1 = -v.tx + 400;
-  check("K3 clampPan keeps the visible rect inside a larger extent",
-        visX0 >= extent.x && visX1 <= extent.x + extent.w, JSON.stringify(v));
-})();
-
-// K4: clampPan holds a smaller-than-viewport extent inside the viewport.
-(function () {
-  var extent = {x: 0, y: 0, w: 100, h: 100};
-  var v = C.clampPan({idx: 2, tx: -9999, ty: -9999}, extent, 400, 400); // k=1
-  var left = extent.x * 1 + v.tx, right = (extent.x + extent.w) * 1 + v.tx;
-  check("K4 clampPan keeps a smaller extent inside the viewport",
-        left >= 0 && right <= 400, JSON.stringify(v));
-})();
-
-// K5: clampPan is idempotent and resolves a non-finite tx/ty to the centred value.
-(function () {
-  var extent = {x: 0, y: 0, w: 2000, h: 2000};
-  var once = C.clampPan({idx: 2, tx: 500, ty: 500}, extent, 400, 400);
-  var twice = C.clampPan(once, extent, 400, 400);
-  check("K5 clampPan is idempotent", once.tx === twice.tx && once.ty === twice.ty, JSON.stringify([once, twice]));
-  var nonfinite = C.clampPan({idx: 2, tx: NaN, ty: Infinity}, extent, 400, 400);
-  check("K5 clampPan resolves a non-finite tx/ty to a finite value",
-        isFinite(nonfinite.tx) && isFinite(nonfinite.ty), JSON.stringify(nonfinite));
-})();
-
-// K6: centreOn puts the world point at the centre of the viewport, optionally at a new rung.
-(function () {
-  var v = C.centreOn({idx: 2, tx: 0, ty: 0}, 50, 60, 400, 300);
-  check("K6 centreOn centres the world point at k=1",
-        Math.abs(v.tx - (200 - 50)) < 1e-9 && Math.abs(v.ty - (150 - 60)) < 1e-9, JSON.stringify(v));
-  var v2 = C.centreOn({idx: 2, tx: 0, ty: 0}, 50, 60, 400, 300, 3); // idx 3 -> k=2
-  check("K6 centreOn honours an explicit idx argument",
-        v2.idx === 3 && Math.abs(v2.tx - (200 - 100)) < 1e-9, JSON.stringify(v2));
-})();
-
-// K7: fitIndex picks the largest rung that fits both dimensions, and reports overflow when none do.
-(function () {
-  var extent = {x: 0, y: 0, w: 400, h: 400};
-  var fi = C.fitIndex(extent, 850, 850); // fits at k<=2.125 -> idx 3 (k=2)
-  check("K7 fitIndex picks the largest fitting rung", fi.idx === 3 && fi.overflow === false, JSON.stringify(fi));
-  var huge = {x: 0, y: 0, w: 100000, h: 100000};
-  var fiOverflow = C.fitIndex(huge, 400, 400);
-  check("K7 fitIndex reports overflow when no rung fits", fiOverflow.idx === 0 && fiOverflow.overflow === true, JSON.stringify(fiOverflow));
-})();
-
-// K8: fitView centres the fit index and passes through clampPan.
-(function () {
-  var extent = {x: 100, y: 100, w: 400, h: 400};
-  var fv = C.fitView(extent, 850, 850);
-  var k = C.scaleFor(fv.idx);
-  var visX0 = -fv.tx / k, visX1 = visX0 + 850 / k;
-  check("K8 fitView's visible rect covers the extent on x",
-        visX0 <= extent.x + 1 && visX1 >= extent.x + extent.w - 1, JSON.stringify(fv));
-  check("K8 fitView surfaces the same overflow flag as fitIndex", fv.overflow === false, fv.overflow);
-})();
-
-// K9: levelFor's hysteresis bands and cold mapping.
-(function () {
-  check("K9 levelFor rises into mid at idx 3", C.levelFor(3, "far") === "mid", C.levelFor(3, "far"));
-  check("K9 levelFor stepping in and back out does not flip mid twice",
-        C.levelFor(2, "mid") === "mid", C.levelFor(2, "mid"));
-  check("K9 levelFor falls out of mid below idx 2", C.levelFor(1, "mid") === "far", C.levelFor(1, "mid"));
-  check("K9 levelFor rises into near at idx 5", C.levelFor(5, "mid") === "near", C.levelFor(5, "mid"));
-  check("K9 levelFor falls out of near below idx 4", C.levelFor(3, "near") === "mid", C.levelFor(3, "near"));
-  check("K9 levelFor's cold mapping resolves both bands downward at idx 2",
-        C.levelFor(2, null) === "far", C.levelFor(2, null));
-  check("K9 levelFor's cold mapping resolves both bands downward at idx 4",
-        C.levelFor(4, null) === "mid", C.levelFor(4, null));
-  check("K9 levelFor never returns anything but the three names",
-        ["far", "mid", "near"].indexOf(C.levelFor(7, "far")) !== -1, C.levelFor(7, "far"));
-})();
-
-// K10: wheelStep accumulates sub-threshold deltas, steps on crossing the
-// threshold, and resets immediately on a sign change rather than unwinding.
-(function () {
-  var r1 = C.wheelStep(0, {deltaY: 40, deltaMode: 0});
-  check("K10 wheelStep accumulates without stepping below threshold",
-        r1.step === 0 && r1.acc === 40, JSON.stringify(r1));
-  var r2 = C.wheelStep(90, {deltaY: 20, deltaMode: 0});
-  check("K10 wheelStep steps and resets acc once the threshold is crossed",
-        r2.step === 1 && r2.acc === 0, JSON.stringify(r2));
-  var r3 = C.wheelStep(50, {deltaY: -10, deltaMode: 0});
-  check("K10 wheelStep resets the accumulator immediately on a sign change",
-        r3.acc === -10 && r3.step === 0, JSON.stringify(r3));
-})();
-
-// K11: zoomTo's anchored world point stays within a pixel of the anchor
-// after the step (SC-004), and a no-op request returns the view unchanged.
-(function () {
-  var v = {idx: 2, tx: -50, ty: 30}; // k=1
-  var ax = 120, ay = 80;
-  var k1 = C.scaleFor(v.idx);
-  var wx = (ax - v.tx) / k1, wy = (ay - v.ty) / k1;
-  var stepped = C.zoomTo(v, 5, ax, ay); // idx 5 -> k=4
-  var k2 = C.scaleFor(stepped.idx);
-  check("K11 zoomTo keeps the anchor's world point within a pixel after the step",
-        Math.abs(wx * k2 + stepped.tx - ax) < 1 && Math.abs(wy * k2 + stepped.ty - ay) < 1,
-        JSON.stringify(stepped));
-  var same = C.zoomTo(v, v.idx, ax, ay);
-  check("K11 zoomTo at the same idx returns the view unchanged",
-        same.tx === v.tx && same.ty === v.ty && same.idx === v.idx, JSON.stringify(same));
-})();
-
-// K12: validateView's rejection table (data-model.md §6) — every bad shape
-// returns null, never throws, and a valid record round-trips its fields.
-(function () {
-  var L = C.LADDER.length;
-  check("K12 validateView rejects an absent record", C.validateView(null, L) === null, "null");
-  check("K12 validateView rejects undefined", C.validateView(undefined, L) === null, "undefined");
-  check("K12 validateView rejects unparseable JSON", C.validateView("{not json", L) === null, "{not json");
-  check("K12 validateView rejects a bare number", C.validateView('"7"', L) === null, '"7"');
-  check("K12 validateView rejects an array", C.validateView("[]", L) === null, "[]");
-  check("K12 validateView rejects the wrong storage version",
-        C.validateView(JSON.stringify({v: 2, idx: 1, tx: 0, ty: 0}), L) === null, "v:2");
-  check("K12 validateView rejects a non-integer idx",
-        C.validateView(JSON.stringify({v: 1, idx: 2.5, tx: 0, ty: 0}), L) === null, "idx:2.5");
-  check("K12 validateView rejects an out-of-range idx",
-        C.validateView(JSON.stringify({v: 1, idx: 99, tx: 0, ty: 0}), L) === null, "idx:99");
-  check("K12 validateView rejects a non-finite tx",
-        C.validateView({v: 1, idx: 1, tx: NaN, ty: 0}, L) === null, "tx:NaN");
-  check("K12 validateView rejects a non-finite ty",
-        C.validateView({v: 1, idx: 1, tx: 0, ty: Infinity}, L) === null, "ty:Infinity");
-  var ok = C.validateView(JSON.stringify({v: 1, idx: 3, tx: -12, ty: 5}), L);
-  check("K12 validateView accepts and round-trips a valid record",
-        ok && ok.idx === 3 && ok.tx === -12 && ok.ty === 5, JSON.stringify(ok));
-})();
-
-// K13: loadView/saveView round-trip through injected storage functions, and a
-// throwing storage flips persistence to "unavailable" exactly once.
-(function () {
-  var store = null;
-  var loaded = C.loadView(function () { return store; });
-  check("K13 loadView returns null when nothing is stored", loaded === null, String(loaded));
-  C.saveView(function (v) { store = v; }, {idx: 4, tx: -1, ty: 2});
-  var restored = C.loadView(function () { return store; });
-  check("K13 saveView/loadView round-trips idx/tx/ty",
-        restored && restored.idx === 4 && restored.tx === -1 && restored.ty === 2,
-        JSON.stringify(restored));
-})();
-(function () {
-  var throwingGet = function () { throw new Error("quota"); };
-  var before = C.persistence;
-  var r1 = C.loadView(throwingGet);
-  check("K13 loadView swallows a throwing getItem and returns null", r1 === null, String(r1));
-  check("K13 a throwing storage flips persistence to unavailable",
-        before === "ok" && C.persistence === "unavailable", before + " -> " + C.persistence);
-  // Never retried: a second throwing call does not un-flip or re-flip anything
-  // observable — persistence stays exactly "unavailable".
-  C.loadView(throwingGet);
-  check("K13 persistence stays unavailable and is never reset",
-        C.persistence === "unavailable", C.persistence);
-})();
-
-// K14: visibleWorldRect/intersects — the FR-038 test, including a stored
-// viewport whose rectangle lies entirely outside the world.
-(function () {
-  var view = {idx: 2, tx: -100, ty: -50}; // k=1
-  var rect = C.visibleWorldRect(view, 400, 300);
-  check("K14 visibleWorldRect derives the visible rectangle from tx/ty/k",
-        rect.x === 100 && rect.y === 50 && rect.w === 400 && rect.h === 300, JSON.stringify(rect));
-  var world = {x: 0, y: 0, w: 1000, h: 1000};
-  check("K14 intersects is true when the visible rect overlaps the world",
-        C.intersects(rect, world) === true, JSON.stringify([rect, world]));
-  var farAway = C.visibleWorldRect({idx: 2, tx: -100000, ty: -100000}, 400, 300);
-  check("K14 intersects is false for a viewport far outside the world",
-        C.intersects(farAway, world) === false, JSON.stringify([farAway, world]));
-  check("K14 intersects is false on a non-finite input rather than throwing",
-        C.intersects({x: NaN, y: 0, w: 10, h: 10}, world) === false, "NaN");
-})();
-
-process.stdout.write(out.join("\n") + "\n");
-CAMERAJS
-
-  while IFS='|' read -r status name detail; do
-    [ -z "$status" ] && continue
-    if [ "$status" = "PASS" ]; then
-      t_pass "$name"
-    else
-      t_fail "$name" "$detail"
-    fi
-  done < <(node "$WORK/camera-check.js" "$ROOT/web/camera.js" 2>&1)
-else
-  t_skip "camera arithmetic" "node not installed"
-fi
-
-
 # ============================================================ roster-module ===
 printf '\nroster-module\n'
 #
 # web/roster.js is the pure roster-row-shaping module for the docked agent
 # panel (contracts/roster-js.md). It lives in its own file for the same
-# reason web/md.js, web/plots.js and web/camera.js do: so these assertions
+# reason web/md.js does: so these assertions
 # can require() it under node without a browser.
 if command -v node >/dev/null 2>&1; then
   cat > "$WORK/roster-check.js" <<'ROSTERJS'
@@ -2884,16 +2494,12 @@ function check(name, cond, detail) {
   check("S-G a malformed cond with no trust field is treated as untrusted, never ok",
         R.resolveSelection("z", sessions, {}).state === "unknown");
 
-  check("S-H flyIdx(\"far\") is NEAR_IDX; flyIdx(\"mid\")/flyIdx(\"near\") are null",
-        R.flyIdx("far") === R.NEAR_IDX && R.NEAR_IDX === 5
-          && R.flyIdx("mid") === null && R.flyIdx("near") === null);
-
-  var camera = require(process.argv[3]);
-  check("S-I NEAR_IDX resolves to \"near\" in camera.js's levelFor from every prior level",
-        camera.levelFor(R.NEAR_IDX, null) === "near"
-          && camera.levelFor(R.NEAR_IDX, "far") === "near"
-          && camera.levelFor(R.NEAR_IDX, "mid") === "near"
-          && camera.levelFor(R.NEAR_IDX, "near") === "near");
+  // S-H/S-I retired with the camera: flyIdx answered "which zoom rung does a
+  // far selection fly to", and there are no rungs. Revealing a selection is
+  // now the figure's own scrollIntoView, which the browser owns and
+  // verify-ui checks in a real one.
+  check("S-H the module exports no camera-rung helper any more",
+        R.flyIdx === undefined && R.NEAR_IDX === undefined);
 })();
 
 // Selection/width storage (contracts/roster-js.md §7, P-A..P-I)
@@ -3086,7 +2692,7 @@ ROSTERJS
     else
       t_fail "$name" "$detail"
     fi
-  done < <(node "$WORK/roster-check.js" "$ROOT/web/roster.js" "$ROOT/web/camera.js" 2>&1)
+  done < <(node "$WORK/roster-check.js" "$ROOT/web/roster.js" 2>&1)
 else
   t_skip "roster module" "node not installed"
 fi
@@ -3096,8 +2702,8 @@ fi
 printf '\nmodal-module\n'
 #
 # web/modal.js is the pure per-agent-modal module (contracts/modal-js.md). It
-# lives in its own file for the same reason web/md.js, web/plots.js,
-# web/camera.js and web/roster.js do: so these assertions can require() it
+# lives in its own file for the same reason web/md.js and web/roster.js do:
+# so these assertions can require() it
 # under node without a browser.
 if command -v node >/dev/null 2>&1; then
   cat > "$WORK/modal-check.js" <<'MODALJS'

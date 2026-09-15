@@ -8,12 +8,21 @@ way it is, and most of the rules below are only sensible in light of that.
 ## Layout
 
 ```
-bin/ccwatch      the whole tool (~2900 lines of bash + embedded python3/jq)
+bin/ccwatch      the whole tool (~3900 lines of bash + embedded python3/jq)
 web/index.html   the table view, served by `ccwatch serve`
-web/map.html     the map view — projects as territories, sessions as figures
+web/map.html     the map view — a scrolling column of owner blocks, sessions
+                 as figures inside them
 web/md.js        markdown for the transcript inspector; escapes, never links
+web/roster.js    row shaping for the docked agent list beside the map
+web/modal.js     the per-agent inspector's own pure shaping
 tests/run.sh     shellcheck + the assertion suite; the only test entry point
 ```
+
+`web/camera.js` and `web/plots.js` are **gone** — the pan-and-zoom camera and
+its identity→coordinate placement. Do not reintroduce a camera here without
+reading the "scrolling list of blocks" section of `README.md` first: the
+camera's default view was measured showing 1 of 4 territories and hiding 2 of
+8 sessions off-screen, and the whole suite was green while it did.
 
 `web/md.js` is a separate file rather than inline script so that `tests/run.sh`
 can run it under node and assert on the HTML — including the escaping. It is
@@ -37,12 +46,28 @@ CCWATCH_PROFILE=1 ./bin/ccwatch --json >/dev/null   # per-stage timings
 
 `verify-ui` boots its own `serve`, drives headless Chrome against a harness
 that iframes the real pages, and asserts on rendered boxes, computed styles and
-synthetic pointer/wheel gestures. It skips with the reason when there is no
-Chrome. **It exists because 567 assertions were green while the map showed
-nothing**: the suite is entirely browserless, so a roster whose rows collapsed
-to a four-character ribbon, a default view whose zoom level sets `display:none`
-on every figure, a drag that selected text instead of panning, and 258px of
-page scroll with an unreachable dialog below the fold all passed at once.
+synthetic interaction. It skips with the reason when there is no Chrome. **It
+exists because 567 assertions were green while the map showed nothing**: the
+suite is entirely browserless, so a roster whose rows collapsed to a
+four-character ribbon, a default view whose zoom level sets `display:none` on
+every figure, a drag that selected text instead of panning, and 258px of page
+scroll with an unreachable dialog below the fold all passed at once.
+
+It is also where the **whole-view** checks live, and they were added late for a
+reason worth remembering: `verify-ui` itself was green on a default map that
+had 1 of 4 territories fully visible and 2 of 8 sessions entirely off-screen,
+because the check it had asserted that *an* agent was visible. It now asserts
+that the board draws a figure for **every** session the roster lists, that none
+is hidden or zero-sized, and that every one is inside the scrollable content.
+A whole-view property needs a whole-view assertion; "something rendered" is not
+one.
+
+⚠️ `verify-ui` runs Chrome with `--force-prefers-reduced-motion`, and that flag
+is load-bearing. `--virtual-time-budget` fast-forwards timers but not the
+compositor, so `scrollIntoView({behavior: "smooth"})` never progresses —
+measured, smooth moved `scrollTop` 0→0 over a 900ms wait where `auto` moved
+0→346. The harness asserts the flag took effect, so removing it fails loudly
+instead of turning the reveal check into a no-op.
 
 The `markdown` section runs `web/md.js` under `node`. That is the only optional
 tool the suite uses: with no `node` the section skips with the reason and

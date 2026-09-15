@@ -434,43 +434,73 @@ the same (4.3% + 3.8%), and `tilt` at 3.4s cost exactly what `bob` at 0.9s did.
 The price is 60fps frame production at all, not the number of things moving —
 so thinning the animations out or slowing them down buys nothing, and only
 losing the tween does. This is worth stating because the obvious reading of a
-map that costs 8% of a core is that the pan-and-zoom camera is expensive. It
-is not: the camera schedules nothing at rest, and its easing is one bounded
-180ms transition removed on `transitionend`.
+map that costs 8% of a core was that its pan-and-zoom camera was expensive. It
+was not: the camera scheduled nothing at rest. It was replaced for an entirely
+separate reason — see below — and the animation cost would have followed it
+into the new view untouched if it had not been measured first.
 
 Unfinished runs lie in the territory they belong to, deploy badges sit in its
 header, and messages between sessions are drawn as arrows between the two
 figures — including across territories, which is the case worth seeing.
 
-### The city's geography comes from identity, not from a layout pass
+### The map is a scrolling list of blocks, not a camera over a world
 
-Districts, buildings, zones and figures each get their world coordinate from
-what they *are* — an org, a repository, a branch, a session id — never from
-their position in the payload or from a force-directed graph. A dozen nodes
-under a spring layout is harder to read than the list it is drawn from, and it
-rearranges itself every time you look at it: "did that agent move, or do I
-misremember" is not a question a monitoring view should raise. This entry
-replaced an earlier CSS grid that answered that question with "sometimes,
-whenever the severity sort changes" — a district reordered on a status change
-alone, a refresh rebuilt the whole tree and dropped whatever you had open, and
-a stopped feed rendered no differently from a machine with nothing running on
-it.
+`/map` is a column of owner sections. Each owner holds a responsive grid of
+repository cards; each card holds its branches; each branch holds the figures
+standing in it. It is ordinary block layout in one scroll container, so the
+browser does the placement and the browser's scrollbar does the navigation.
 
-`web/plots.js` is the pure identity→coordinate module (loaded by both
-`map.html` and, under `node`, `tests/run.sh`, the same way `web/md.js` is).
-Each level — district, building, zone, figure — is a fixed-column raster keyed
-by hash: `i = h1(key) mod C`, then `i = (i + h2(key)) mod C` on a collision,
-with `h2` odd and coprime to the column count, for up to `C` probes. A
-**persisted assignment always wins and is never recomputed**, which is what
-makes a coordinate survive every future refresh once it exists. When a
-parent's capacity is exhausted, the identity claims an annex plot — `<key>#2`,
-`<key>#3`, … — in the grandparent's space by the same rule, under the same
-label, rather than displacing anything already placed. A district's capacity
-doubles, never shrinks, when a new district cannot be placed; doubling is safe
-because existing districts are read back from storage, not re-derived, so the
-modulus changing cannot move them.
+The grid is `auto-fit`, not `auto-fill`, and a figure is as wide as its name
+rather than as wide as its drawing. Both were changed after looking at the
+rendered page: `auto-fill` keeps the empty columns it creates, so an owner with
+one repo — which most of them are — put a 400px card beside 400px of nothing,
+and a 3.1rem figure clipped `agents-ba` and `agents-62` both to `agents…`,
+which is worse than no label at all.
 
-Every draw is now **reconciled by key**, one `<g>` per identity, rather than
+**This replaced a pan-and-zoom SVG camera, and not because the camera was
+slow.** It was replaced because it could not be relied on to show you your
+agents. Measured on a real eight-session machine, the default view had **1 of
+4 territories fully visible and 2 of 8 sessions entirely off-screen** — one of
+them the session running ccwatch itself. The suite was green and `verify-ui`
+was green throughout, because what `verify-ui` asserted was that *an* agent
+was visible, which was true the whole time. A monitoring view whose honest
+reading is "some of your agents are somewhere off to the bottom-right" is
+worth less than a list.
+
+What went with it:
+
+- `web/plots.js`, the identity→coordinate module, and its persisted plot
+  record. Flow layout needs no coordinates, so there is nothing to store and
+  none of the failure modes storing it had — a private-mode `localStorage`
+  that throws, a full origin quota, an annex plot when a parent's raster
+  filled up.
+- `web/camera.js`, the zoom ladder, the three detail levels, and the stored
+  viewport. 701 lines of arithmetic, and the 73 assertions that covered it.
+- The level-of-detail rules. Those are worth naming separately, because the
+  camera's worst bug was one of them: fit-to-world on a wide, short world
+  picked a scale below `2×`, and every rung below `2×` set `display:none` on
+  every figure. The opening view was empty **by construction**, and it got
+  worse as you added projects rather than better. **Nothing in the stylesheet
+  now hides a session at any window size**, and the suite asserts that no
+  `[data-lod]` rule and no reader of the camera's `--k` scale comes back.
+
+What a force-directed graph would have done is still worse, and that reasoning
+is unchanged: with a dozen nodes it rearranges itself every time you look at
+it, and "did that agent move, or do I misremember" is not a question a
+monitoring view should raise. Flow layout answers it permanently — **order is
+alphabetical at every level**, so a session's position is something you can
+predict and re-find.
+
+Ordering deliberately **does not read status**. Sorting the loudest session to
+the front is tempting and wrong: a figure that moves when its status changes
+makes position useless for finding a session again, which is the only thing
+position is for here. The roster panel beside the map is where severity
+ordering belongs, and it has it. The comparator is also not `localeCompare` —
+its answer depends on the browser's locale and ICU build, so two machines
+could order the same sessions differently and the suite could pass on one and
+fail on the other.
+
+Every draw is **reconciled by key**, one element per identity, rather than
 rebuilt wholesale: an element whose key is still wanted gets its attributes
 updated in place, one absent from this tick's wanted set is removed, and
 nothing already onscreen that is still wanted is ever destroyed and recreated.
@@ -479,48 +509,38 @@ selection all survive a refresh — the only remaining wholesale `innerHTML`
 write is a turn's rendered markdown body inside an already-reconciled
 container.
 
-The whole occupied city fits to the viewport on load — `k = min(vw/W, vh/H)`
-clamped to the ladder's rungs, the extent centred in the available space — and
-from there the camera is yours: drag or the arrow keys pan, the wheel or
-`+`/`-` zoom in discrete steps, `0` refits, and the viewport survives a
-reload.
+Sorted order is carried by `style.order`, **never by moving nodes**.
+Re-appending children to sort them moves whichever one currently has focus,
+and moving a focused element drops the focus — so a keyboard user tabbed onto
+a figure would lose it every three seconds.
 
-### Zoom is a ladder, and each rung is a fixed scale, not a smooth number
+A figure is a real `<button>`. As an SVG `<g role="button" tabindex="0">` it
+needed an explicit tabindex, an explicit role, a hand-drawn focus ring (an SVG
+group takes no outline) and a keydown handler to honour Enter and Space — four
+separate things that each had to be right for the map not to be a control some
+people simply cannot operate. A button is all four by default, and the scroll
+container is keyboard-operable for the same reason: a focusable overflow box
+scrolls on the arrow keys, PageUp/PageDown and Home/End with no script at all,
+which is what the camera's hand-written keymap was standing in for.
 
-`web/camera.js`'s `LADDER` is `[0.25, 0.5, 1, 2, 3, 4, 6, 8]` — eight fixed
-scales, never a continuously dragged number. A discrete ladder is what gives
-"which level am I at" an unambiguous answer: a scale of 2.999 and a scale of 3
-would otherwise be the same rung read two different ways, and a boundary that
-can only be crossed by a whole step is a boundary a hysteresis band can be
-drawn around cleanly (`levelFor`, contracts/camera-js.md §8).
+The board scrolls on **both** axes (`overflow:auto`), even though the layout is
+built so nothing overflows sideways — `min-width:0` and an ellipsis on every
+long label, and a grid whose columns collapse to one at narrow widths. If
+something ever does overflow, `hidden` would clip it and the clipped part would
+be unreachable at every scroll position: a failure presenting as an absence,
+which is the one thing this tool may not do. A scrollbar is the same bug made
+visible. `verify-ui` asserts that at its own width nothing actually overflows,
+so the fallback stays a fallback.
 
-Three named detail levels — `far`, `mid`, `near` — sit on that ladder and
-control **what is drawn, never a coordinate**. Nothing moves or resizes in
-world space when the level changes; the level only toggles which elements are
-in the DOM at all:
-
-- **`far`** (ladder rungs 0–2, scale ≤ 1): each district collapses to its
-  aggregate — a session count and its worst status word (`DistrictSummary`,
-  data-model.md §5). Buildings, branch zones, figures and district labels are
-  hidden; only the aggregate is legible at a scale where a building's own
-  label would not be.
-- **`mid`** (rungs 3–4, scale 2–3): buildings and their branch zones appear,
-  each carrying its own label; the district aggregate is hidden in favour of
-  the district label. Figures are drawn but unlabelled — legible as shapes,
-  too small yet for a name.
-- **`near`** (rungs 5–7, scale ≥ 4): figures gain their name labels
-  (`.alabel`) on top of everything `mid` already shows.
-
-Level of detail is semantic rather than a scale factor because the three
-things it is standing in for — a count, a shape, a name — are legible at
-different sizes and become clutter before they become readable at any smaller
-one; fading them in continuously would just mean redrawing the same decision
-every frame for no benefit over toggling it once at a threshold crossing.
+Message arrows survive, drawn on an SVG overlay inside the scroll content. Its
+endpoints are measured from the figures' own boxes relative to that content, so
+the overlay scrolls with the blocks for free — there is no scroll listener and
+no per-frame work, and it is remeasured once per tick and once per resize.
 
 A snapshot that is not `ok` — the feed down, a snapshot never taken, or a
 registry file that would not parse — is a different sentence in each of those
-three cases, not a variation in wording on the same one. Districts, buildings
-and zones stay drawn with their age marked stale; only the readings that
+three cases, not a variation in wording on the same one. Owners, repositories
+and branches stay drawn with their age marked stale; only the readings that
 change every tick (context fill, gauge percentages, host-pressure numbers) are
 withheld, because a stale percentage read as current is a false claim, and
 "no sessions" and "can't tell" are different facts that must read differently.
@@ -543,13 +563,14 @@ a whole project's district to the front of the page and dragging every other
 project's district along with it on the very same repaint. A monitoring view
 that rearranges itself on every refresh answers "did that agent move, or do I
 misremember" with "sometimes, whenever the severity sort changes," which is
-the one question this view exists to never raise (see "The city's geography
-comes from identity, not from a layout pass" above). Splitting the roster's
+the one question this view exists to never raise (see "The map is a scrolling
+list of blocks, not a camera over a world" above). Splitting the roster's
 ordering into its own reconciled list — keyed by `sid`, moved by
 `reorderPlan`'s minimal `insertBefore` plan, never a wholesale rebuild — means
 a status change can reorder *rows in a list* without ever being in a position
-to move a *figure*, because nothing in `web/plots.js`'s placement ever reads
-a severity, a status word or an ordering value at all.
+to move a *figure*, because the board's own ordering never reads a severity, a
+status word or an ordering value at all. The suite asserts that: no `sort()` in
+`buildWorldModel` may mention `sev`, `psev`, `token` or `worst`.
 
 ### The roster is operable without a mouse or without sight
 
@@ -561,36 +582,46 @@ past the first or last row) and restored **by `sid`**, not by position, after
 a tick reorders the list (`focusTarget`), so a status change mid-navigation
 never drops focus onto the wrong agent or out of the list altogether. `Enter`
 selects the focused row. The listener is bound to `#rosterlist` itself, never
-`document`, so the roster's arrow keys can never pan the map and the map's own
-arrow-key panning (bound to `#world`) can never move roster focus — two
-independent keyboard surfaces on the same page, each scoped to the element it
-operates.
+`document`, so the roster's arrow keys can never scroll the board and the
+board's own arrow-key scrolling (which is the browser's, on a focusable
+overflow box) can never move roster focus — two independent keyboard surfaces
+on the same page, each scoped to the element it operates.
 
-`#world`'s own `aria-label` now names itself a companion view of the agent
+`#board`'s own `aria-label` names itself a companion view of the agent
 list, rather than the sole carrier of the page's meaning: a screen reader
 lands on the roster and hears every claim the figures draw — the status word,
 the measurement, the repo/branch — as text, before it ever reaches the map.
 
-### Selecting a row flies the camera there, and remembers the choice
+### Selecting a row scrolls to the figure, and remembers the choice
 
 Clicking a roster row — or activating it with `Enter` — marks that row
-selected, outlines the matching figure with its own rule (`.agent.selected
-.hit`, applied to the outer `<g class="agent">` node `applySelectionEmphasis`
-toggles, never to the `.figart` group `updateFigure` rebuilds wholesale every
-tick, so a status change can never clobber the ring mid-flight), and flies
-`CCWATCH_MAP_CAMERA` to that figure's own `cx`/`cy` — the same coordinates
-`web/plots.js` already computed, read once out of `drawWorld`'s figure loop
-rather than recomputed. This is the camera module's first caller: entry 003
-shipped it with none. The fly only fires when the selection actually changes
-(`sid !== lastFlownSid`), so a tick that merely re-renders the same selection
-never re-triggers a flight, and it reads
-`matchMedia("(prefers-reduced-motion: reduce)")` at the moment of the fly
-rather than trusting the stylesheet alone — a `transition: none` fires no
-`transitionend`, which would leave the camera's `.eased` class on forever.
+selected, rings the matching figure with its own rule (`.agent.selected`,
+applied to the outer `<button class="agent">` node `applySelectionEmphasis`
+toggles, never to the `.figart` span `updateFigure` rebuilds wholesale every
+tick, so a status change can never clobber the ring), and brings that figure
+into the board with its own `scrollIntoView`. That is what "fly the camera
+there" became without a camera, and it is strictly less code: the browser owns
+the arithmetic, including the case where the figure is already visible and
+nothing should move. The scroll only fires when the selection actually changes
+(`sid !== lastRevealedSid`), so a tick that merely re-renders the same
+selection never yanks the board, and it reads
+`matchMedia("(prefers-reduced-motion: reduce)")` at the moment of the scroll
+rather than leaving it to a CSS `scroll-behavior` — the setting has to be able
+to turn a specific movement off, not a rule.
 
-The selection persists across a reload the same way the camera's own viewport
-does — one JSON record, one storage version, validated on the way back in —
-and is *not* the same file `ccwatch resume` reads: this feature reads and
+That reveal is also the check that taught this project the most about its own
+tests. Three versions of the `verify-ui` assertion for it **could not fail**:
+the first called `scrollIntoView` itself and then asserted the figure was on
+screen; the second reported a pass worded "already on screen; nothing to
+reveal" whenever the target happened to be visible, which against the real
+`~/.claude` varied run to run; the third scrolled to the bottom assuming that
+put the first figure off screen, which on a fixture overflowing by 346px it
+does not. The version that ships searches both ends of the scroll range for a
+figure that is genuinely off screen, and **skips with the reason** when the
+fixture cannot pose the question at all. See the mutation table.
+
+The selection persists across a reload — one JSON record, one storage version,
+validated on the way back in — and is *not* the same file `ccwatch resume` reads: this feature reads and
 writes neither `~/.claude/ccwatch/roster.json` (the `write_roster` record) nor
 anything else under `~/.claude/ccwatch/`, only the browser's own storage. If
 the stored session has since left the machine's session list, the roster says
@@ -648,9 +679,11 @@ re-clamped against *this* load's `innerWidth`, not the one it was saved
 under. Below `STACK_BREAKPOINT` the stored width is not applied and the
 divider is hidden at all — `stacked(windowWidth)` reads the same constant the
 `@media` rule does, so the two can never disagree about where the panel
-stacks above the map instead of beside it. Changing the width calls
-`reflowWorld()`, never `fitView`, because a drag is the visitor choosing how
-much city to see, not a request to re-frame it.
+stacks above the map instead of beside it. Changing the width only calls
+`relayoutWires()`: the blocks reflow themselves, which is what flow layout is,
+and all the map is owed is a wire redraw, because the figures the wires connect
+have just moved and a wire still pointing where a figure used to be is worse
+than no wire.
 
 The width persists across a reload through the same one-way `persistence`
 flag and JSON-record shape the selection uses (`validateWidth`/`loadWidth`/
@@ -1113,18 +1146,9 @@ implementation broken in the specific way it describes:
 | remove `web/md.js` from the web directory | 1 |
 | revert the idle gate so collection never stops when nobody reads `/api/state` | 4 |
 | latch the idle gate, so collection stops but a read never resumes it | 2 |
-| disable the cold-start guard, so the map opens on fit-to-world where every figure is `display:none` | 1 (verify-ui) |
-| drop `user-select:none` from `#world`, so a drag beginning on a label can select text | 1 (verify-ui) |
 | add a second `setInterval` to a page instead of routing through the shared scheduler | 1 |
 | include `ages` in the ETag hash, so no two reads ever share a validator | 1 |
 | restore the old `snapshot_ok()` fabrication of an empty result on failure | 3 |
-| let `assign` re-hash a key already in storage instead of returning its stored slot | 1 |
-| make the probe step a call counter instead of deriving it from the key | 1 |
-| let `place` read `sev`/`cost`/`age` when computing a coordinate | 1 |
-| include a remembered-but-unoccupied plot in the extent | 1 |
-| drop the `liveKeys` guard from `save`'s eviction | 1 |
-| remove the version check from `load` | 1 |
-| drop the max-scale clamp from `fit` | 1 |
 | stop propagating `parse_failed` from `collect_sessions` through the snapshot and the footer | 2 |
 | let `/api/state` disagree with `--json` about `parse_failed` for the same registry | 1 |
 | reintroduce a wholesale `innerHTML =` on a refresh-reachable container in `map.html` | 1 |
@@ -1132,19 +1156,7 @@ implementation broken in the specific way it describes:
 | restore the silent fall-through in `resolve_target`, so a failed snapshot is described as an ambiguous match with a blank count | 2 |
 | check a collector's output with `jq -e .` instead of `jq empty`, so a legitimate `null` reads as a failed collector | 1 |
 | drop or alter the `SEND_TOKEN` placeholder in the served `map.html` | 1 |
-| let `clampIdx`/`scaleFor` fall through the ladder's ends instead of clamping | 2 |
-| drop the delta from `panBy` | 1 |
-| unclamp `clampPan`'s axis interval | 2 |
-| iterate `fitIndex`'s ladder ascending instead of from the largest rung down | 1 |
-| drop the centring translation from `centreOn` | 1 |
-| resolve `levelFor`'s cold mapping upward instead of downward | 2 |
-| let `wheelStep` unwind a reversed gesture instead of resetting on a sign change | 1 |
-| let `zoomTo` drift the anchor point instead of solving for the pixel it must land on | 2 |
-| accept a stored viewport with the wrong storage version | 1 |
-| accept a stored viewport with a non-integer or out-of-range `idx` | 2 |
-| accept a stored viewport with a non-finite `tx`/`ty` | 2 |
 | skip the once-only latch and re-flip `persistence` on a second throwing storage call | 2 |
-| let `intersects` report an overlap for a viewport far outside the world | 1 |
 | drop the `volatile` gate from `rowFields`'s `ctx`/`mem` withholding | 1 |
 | make `reorderPlan` always return no moves | 1 |
 | sort sessions by `sev` alone instead of `max(sev, psev)` | 1 |
@@ -1153,7 +1165,7 @@ implementation broken in the specific way it describes:
 | drop `role="listbox"` from `#rosterlist` | 1 |
 | drop `role="option"` or the roving `tabindex` from the `.rrow` template | 2 |
 | bind the roster's keydown handling to `document` instead of `#rosterlist` | 2 |
-| drop the "companion view" clause from `#world`'s `aria-label` | 1 |
+| drop the "companion view" clause from `#board`'s `aria-label` | 1 |
 | resolve a session absent from a `feed_down`/`warming` payload to `gone` instead of `unknown` | 2 |
 | let `flyIdx` return a rung for `"mid"`/`"near"` instead of only `"far"` | 1 |
 | let `validateSelection` accept a `sid` that is not session-id-shaped | 1 |
@@ -1200,6 +1212,21 @@ implementation broken in the specific way it describes:
 | let `askModel` report `kind: "dialog"` from the same branch as `kind: "questions"` instead of a distinct `how` | 1 |
 | let `sendModel({canSend: false, ...})` report `state: "ready"` instead of naming `--read-only` | 1 |
 | drop one of `doSend`/`doKill`'s `X-CCWatch-Token` headers, or reintroduce an `#ifoot` `style.display` write | 1 |
+| drop a session from the board's figure loop, so the map shows fewer figures than the roster lists | 1 (verify-ui) |
+| hide a figure with `display:none`, or collapse it to zero size | 2 (verify-ui) |
+| position a figure outside the scrollable content, where no scroll position can reach it | 1 (verify-ui) |
+| give a repo card a `min-width` wider than the board, so the layout overflows sideways | 1 (verify-ui) |
+| change `#board` to `overflow:hidden`, so nobody can scroll it with a wheel, a scrollbar or a key | 2 (verify-ui) + 2 |
+| build a figure as a `<div>` instead of a `<button>` | 2 (verify-ui) + 2 |
+| remove `scrollIntoView` from `revealSelection`, so selecting a roster row never brings the figure into view | 1 (verify-ui) |
+| stop toggling `.selected`, so the selected row's figure carries no mark | 1 (verify-ui) |
+| leave the wire overlay unsized, so every wire is clipped to the SVG's default 300x150 | 1 (verify-ui) |
+| drop `--force-prefers-reduced-motion` from verify-ui's Chrome, so the reveal check races a compositor that virtual time never advances | 1 (verify-ui) |
+| drop `min-height:0` from `#stage`, so it refuses to shrink below its content and the page scrolls | 1 (verify-ui) |
+| drop the `aria-label` from the map-key button, leaving a control named only by a glyph | 1 (verify-ui) |
+| reintroduce a `[data-lod]` rule, or a reader of the retired camera's `--k` scale | 2 |
+| sort the board on `sev`/`psev`/`token` instead of on the name | 1 |
+| re-append children to sort them instead of writing `style.order` | 4 |
 | give any figure animation an interpolating timing function again (`ease-in-out`, `linear`, a `cubic-bezier`) instead of `step-end` | 2 |
 
 That last table is not decoration. Two of those mutations are bugs that were
@@ -1218,6 +1245,32 @@ written with a comment claiming an uncapped renderer would overflow the stack;
 the mutation was caught by **nothing**, because 600 levels render fine. The
 guard is worth keeping for bounded output, but the assertion and the comment now
 say what it actually does.
+
+The block-layout rewrite added a fourth kind, and six entries' worth of it: a
+check that is **green and cannot go red**. Every one of these was written, run,
+and believed before a mutation showed it up.
+
+| The check | Why it could not fail |
+|---|---|
+| `board.scrollWidth <= board.clientWidth` for horizontal overflow | `overflow-x:hidden` clamps `scrollWidth` to `clientWidth`, so it was true however wide the content was — it passed against a card given `min-width:3000px` |
+| `scrollHeight > clientHeight` plus a `scrollTop` poke, for "the board scrolls" | an `overflow:hidden` box reports its full content height *and* moves under a programmatic `scrollTop`, so it passed against a board nobody can scroll with a wheel, a scrollbar or a key |
+| "selecting a roster row reveals its figure", v1 | the check called `scrollIntoView` **itself** and then asserted the figure was visible |
+| "selecting a roster row reveals its figure", v2 | reported a PASS worded "already on screen; nothing to reveal" whenever the target happened to be visible — and against the real `~/.claude` that varied run to run |
+| "selecting a roster row reveals its figure", v3 | scrolled to the bottom assuming that put the first figure off screen; on a fixture that overflows by 346px it does not, so the premise silently never held |
+| `grep -cE 'sort\([^)]*(sev\|psev\|token\|worst)'`, guarding against ordering by status | `[^)]*` stops at the first `)`, so in `sort((p, q) => (q.sev \|\| 0) - (p.sev \|\| 0))` it never reached `sev` — it reported a clean 0 against a board sorted entirely by severity |
+
+The first two were fixed by asserting the thing the user actually depends on —
+the computed `overflow` value, and geometry — rather than a number the browser
+derives from it. The third, fourth and fifth were fixed by **searching** for a
+figure that is genuinely off screen and skipping with the reason when the
+fixture cannot produce one. The sixth was a character class.
+
+Two of the six were only found because the *mutation* was wrong too: prepending
+`min-width:3000px` to a rule that ends in `min-width:0` changes nothing, and a
+mutation that does not mutate looks exactly like a check that does not check.
+That is the argument for the rule above in its strongest form — the only way to
+know a check works is to watch it go red on purpose, and the only way to know
+the mutation works is to watch something go red because of it.
 
 Two flakes were found and fixed the same way: a backup-file count that depended
 on whether two writes landed in the same second, and a `serve` warm-up that
@@ -1290,8 +1343,8 @@ It writes nothing except its own event log, its CPU-sample cache in `$TMPDIR`,
 and — only when you run `install-hooks` and confirm — your `settings.json`.
 The docked agent roster panel (`web/roster.js`) is unrelated despite the
 name-collision: it writes only the browser's own storage, never
-`~/.claude/ccwatch/roster.json` — see [Selecting a row flies the camera
-there](#selecting-a-row-flies-the-camera-there-and-remembers-the-choice).
+`~/.claude/ccwatch/roster.json` — see [Selecting a row scrolls to the figure
+there](#selecting-a-row-scrolls-to-the-figure-and-remembers-the-choice).
 
 ## Releases
 

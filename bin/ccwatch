@@ -3201,6 +3201,7 @@ var out = [];
 function ok(name)          { out.push("PASS|" + name + "|"); }
 function bad(name, detail) { out.push("FAIL|" + name + "|" + String(detail)); }
 function check(name, cond, detail) { if (cond) { ok(name); } else { bad(name, detail); } }
+function skip(name, why)   { out.push("SKIP|" + name + "|" + String(why)); }
 function done() { document.getElementById("verify-out").textContent = out.join("\n"); }
 
 function boxOf(el) {
@@ -3214,27 +3215,100 @@ function onScreen(b, vw, vh) {
 function run(doc, win) {
   var de = doc.documentElement;
   var vw = de.clientWidth, vh = de.clientHeight;
-  var world = doc.getElementById("world");
-  var cam = doc.getElementById("camera");
+  var board = doc.getElementById("board");
+  var inner = doc.getElementById("boardinner");
+
+  var agents = [].slice.call(inner.querySelectorAll(".agent[data-sid]"));
+  var rows = [].slice.call(doc.querySelectorAll("#rosterlist [role=option]"));
 
   // 1 - "just two empty squares". A default view that draws no agent answers
   // no question, and it was empty by construction: fit-to-world always landed
-  // on a zoom level whose level-of-detail sets display:none on the figures.
-  var agents = [].slice.call(doc.querySelectorAll("#camera .agent[data-sid]"));
+  // on a zoom level whose level-of-detail set display:none on the figures.
   var shown = agents.filter(function (a) { return onScreen(boxOf(a), vw, vh); });
   check("an agent is visible in the default view", shown.length > 0,
         agents.length + " in the DOM, " + shown.length + " rendered on screen");
 
-  // 2 - "I can still scroll down on the map page".
-  check("the page does not scroll", de.scrollHeight - de.clientHeight === 0,
+  // 2 - the map draws EVERY session, not just one. This is the check that the
+  // camera version did not have and needed: measured on a real eight-session
+  // machine, its default view had 2 of 8 sessions entirely off-screen and 1 of
+  // 4 territories fully visible, and check 1 above passed the whole time
+  // because *an* agent was visible. The roster is driven by the same payload
+  // on the same page, so a count it disagrees with is a session the map lost.
+  check("the map draws a figure for every session the roster lists",
+        agents.length === rows.length,
+        agents.length + " figures vs " + rows.length + " roster rows");
+
+  // 3 - and every one of them is actually rendered. A figure hidden by its own
+  // stylesheet, or collapsed to nothing, is in the DOM and not on the page.
+  var unrendered = agents.filter(function (a) {
+    var b = boxOf(a);
+    return b.w === 0 || b.h === 0 || win.getComputedStyle(a).display === "none";
+  });
+  check("no figure is hidden or collapsed to zero size", unrendered.length === 0,
+        unrendered.map(function (a) { return a.dataset.name; }).join(", "));
+
+  // 4 - reachable means "in the scroll content", which in flow layout is the
+  // whole of it. Anything outside the scrollable range cannot be scrolled to,
+  // and that is the failure mode the camera had no way to rule out.
+  var ib = boxOf(inner);
+  var unreachable = agents.filter(function (a) {
+    var b = boxOf(a);
+    return (b.t - ib.t) < -1 || (b.b - ib.t) > board.scrollHeight + 1 ||
+           (b.l - ib.l) < -1 || (b.r - ib.l) > inner.offsetWidth + 1;
+  });
+  check("every figure is inside the scrollable content", unreachable.length === 0,
+        unreachable.map(function (a) { return a.dataset.name; }).join(", "));
+
+  // 5 - "I can still scroll down on the map page": the PAGE must not scroll.
+  // The board scrolls; the document around it does not.
+  check("the page itself does not scroll", de.scrollHeight - de.clientHeight === 0,
         "overflows by " + (de.scrollHeight - de.clientHeight) + "px");
 
-  // 3 - the map, not the chrome, gets the leftover height.
-  var wh = world ? boxOf(world).h : 0;
-  check("the map takes most of the viewport height", wh > vh * 0.55,
-        Math.round(wh) + "px of " + vh + "px");
+  // 6 - the map, not the chrome, gets the leftover height.
+  var bh = boxOf(board).h;
+  check("the map takes most of the viewport height", bh > vh * 0.55,
+        Math.round(bh) + "px of " + vh + "px");
 
-  // 4 - "an agent chat window below the map that I can't interact with": an
+  // 7 - the board must be scrollable BY THE USER, not merely by script.
+  // ⚠️ This is a computed-style check on purpose. The first version asserted
+  // `scrollHeight > clientHeight` and then moved `scrollTop` — and an
+  // `overflow:hidden` box satisfies both: it still reports its full content
+  // height, and it still moves under a programmatic scrollTop. So that check
+  // passed against `#board { overflow-y:hidden }`, a board nobody can scroll
+  // with a wheel, a scrollbar or a key. It could not fail; it is in the
+  // mutation table. What the user actually depends on is the overflow value.
+  var ov = win.getComputedStyle(board);
+  check("the board is scrollable by the user, not just by script",
+        (ov.overflowY === "auto" || ov.overflowY === "scroll") &&
+        (ov.overflowX === "auto" || ov.overflowX === "scroll"),
+        "overflow is " + ov.overflowX + " / " + ov.overflowY);
+
+  // 8 - and there is really more than fits, so check 7 is guarding something.
+  // Stated as a skip rather than a pass when the content happens to fit: a
+  // check that reports success for "there was nothing to test" is the shape
+  // that hid the bug above.
+  if (board.scrollHeight > board.clientHeight + 1) {
+    var top0 = board.scrollTop;
+    board.scrollTop = 120;
+    var moved = board.scrollTop !== top0;
+    board.scrollTop = top0;
+    check("and its content really does overflow the viewport", moved,
+          "scrollTop stayed at " + top0);
+  } else {
+    skip("and its content really does overflow the viewport",
+         "the fixture fits in " + board.clientHeight + "px; nothing to scroll");
+  }
+
+  // 8b - nothing overflows SIDEWAYS at this width. The layout is built so it
+  // cannot (min-width:0 plus an ellipsis on every long label, and a grid that
+  // collapses to one column), and #board is overflow:auto so a mistake here
+  // shows a scrollbar rather than clipping — but a horizontal scrollbar on a
+  // vertical list is still a bug, so it is asserted rather than tolerated.
+  check("and nothing overflows it sideways",
+        board.scrollWidth <= board.clientWidth + 1,
+        board.scrollWidth + "px of content in " + board.clientWidth + "px");
+
+  // 9 - "an agent chat window below the map that I can't interact with": an
   // unconditional display:flex overrode the UA's dialog:not([open]) rule.
   var ghosts = [].slice.call(doc.querySelectorAll("dialog")).filter(function (d) {
     return !d.open && boxOf(d).h > 0;
@@ -3242,7 +3316,7 @@ function run(doc, win) {
   check("no closed dialog is rendered", ghosts.length === 0,
         ghosts.map(function (d) { return "#" + d.id; }).join(", "));
 
-  // 5 - the roster ribbon: six fields in a flex ROW gave .rname width 0, and
+  // 10 - the roster ribbon: six fields in a flex ROW gave .rname width 0, and
   // every field then wrapped into a four-character column.
   // ⚠️ Skip anything deliberately hidden. `.rsel` carries the word "selected"
   // and is display:none until its row is selected, so a naive "has text but
@@ -3257,93 +3331,103 @@ function run(doc, win) {
   check("no roster field with text collapses to zero width", collapsed.length === 0,
         collapsed.map(function (e) { return "." + e.className; }).join(", "));
 
-  // 6 - a drag beginning on a label selected text instead of panning.
-  check("the map suppresses text selection",
-        win.getComputedStyle(world).userSelect === "none",
-        win.getComputedStyle(world).userSelect);
-
-  // 7 - the world is mostly content, not void. Districts were 192x192 around
-  // one 54x78 building, and hash placement left 612 units between two orgs.
-  var camBB = cam.getBBox();
-  var area = 0;
-  [].slice.call(doc.querySelectorAll("#camera .building")).forEach(function (b) {
-    var r = b.getBBox();
-    area += r.width * r.height;
-  });
-  var span = camBB.width * camBB.height;
-  var fill = span > 0 ? area / span : 0;
-  check("buildings fill a real share of the world", fill > 0.06,
-        (fill * 100).toFixed(1) + "% of " + Math.round(camBB.width) + "x" + Math.round(camBB.height));
-
-  // 8 - a zone label sat exactly where its own figures were drawn.
-  // ⚠️ getBoundingClientRect, not getBBox. getBBox returns a box in the
-  // element's OWN user space, ignoring the transforms of its ancestors — so
-  // every zone label and every figure measured from near (0,0) and the naive
-  // version reported 14 overlaps on a map that had none. Screen space is the
-  // only space in which "do these two things visually collide" is a question
-  // with an answer.
-  var overlaps = 0;
-  var figRects = [].slice.call(doc.querySelectorAll("#camera .agent"))
-    .map(function (a) { return a.getBoundingClientRect(); })
-    .filter(function (r) { return r.width > 0 && r.height > 0; });
-  [].slice.call(doc.querySelectorAll("#camera .zone")).forEach(function (z) {
-    var lbl = z.querySelector("text");
-    if (!lbl) { return; }
-    var lb = lbl.getBoundingClientRect();
-    if (lb.width === 0 || lb.height === 0) { return; }
-    figRects.forEach(function (ab) {
-      if (lb.left < ab.right && lb.right > ab.left &&
-          lb.top < ab.bottom && lb.bottom > ab.top) { overlaps++; }
-    });
-  });
-  check("no zone label overlaps a figure", overlaps === 0, overlaps + " overlapping pairs");
-
-  // 9 - pinch zoom leapt through 1.5x-2x rungs, because 100px of delta banked
-  // up and then moved a whole rung. Smooth means monotonic, with no single
-  // event moving the scale by more than a fifth.
-  var scales = [];
-  var rect = world.getBoundingClientRect();
-  var i;
-  for (i = 0; i < 10; i++) {
-    world.dispatchEvent(new win.WheelEvent("wheel", {
-      deltaY: -12, deltaMode: 0, ctrlKey: true, bubbles: true, cancelable: true,
-      clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2
-    }));
-    var m = /scale\(([\d.]+)\)/.exec(cam.getAttribute("transform") || "");
-    scales.push(m ? parseFloat(m[1]) : 0);
-  }
-  var worst = 1, monotonic = true;
-  for (i = 1; i < scales.length; i++) {
-    if (scales[i] < scales[i - 1]) { monotonic = false; }
-    if (scales[i - 1] > 0) { worst = Math.max(worst, scales[i] / scales[i - 1]); }
-  }
-  check("a pinch zooms smoothly rather than in leaps", monotonic && worst < 1.2,
-        "largest single step " + worst.toFixed(3) + "x, monotonic=" + monotonic);
-
-  // 10 - and the drag it lost to text selection actually pans.
-  var lbl2 = doc.querySelector("#camera text");
-  if (lbl2) {
-    var before = cam.getAttribute("transform");
-    var lr = lbl2.getBoundingClientRect();
-    var sx = lr.left + lr.width / 2, sy = lr.top + lr.height / 2;
-    world.dispatchEvent(new win.PointerEvent("pointerdown", {
-      pointerId: 77, button: 0, buttons: 1, clientX: sx, clientY: sy,
-      bubbles: true, cancelable: true, isPrimary: true}));
-    [30, 90, 150].forEach(function (d) {
-      world.dispatchEvent(new win.PointerEvent("pointermove", {
-        pointerId: 77, buttons: 1, clientX: sx - d, clientY: sy,
-        bubbles: true, cancelable: true, isPrimary: true}));
-    });
-    world.dispatchEvent(new win.PointerEvent("pointerup", {
-      pointerId: 77, buttons: 0, clientX: sx - 150, clientY: sy,
-      bubbles: true, cancelable: true, isPrimary: true}));
-    check("a drag starting on a label pans the map",
-          cam.getAttribute("transform") !== before, "transform unchanged");
-    check("and selects no text", String(win.getSelection()) === "",
-          "selected: " + String(win.getSelection()).slice(0, 40));
+  // 11 - a figure is a real button, so it is focusable and operable by the
+  // keyboard without a hand-written keymap. As an SVG <g> this needed an
+  // explicit tabindex, an explicit role and a keydown handler.
+  var fig0 = agents[0];
+  if (fig0) {
+    check("a figure is a real button", fig0.tagName.toLowerCase() === "button",
+          "it is a <" + fig0.tagName.toLowerCase() + ">");
+    fig0.focus();
+    check("and it takes keyboard focus", doc.activeElement === fig0,
+          "focus went to " + (doc.activeElement && doc.activeElement.tagName));
+    fig0.blur();
   }
 
-  // 11 - the key is reachable, and named rather than identified by a glyph.
+  // 12 - selecting a roster row brings its figure into the board, which is
+  // what "fly to the selection" became without a camera.
+  //
+  // ⚠️ An earlier version of this check called scrollIntoView ITSELF and then
+  // asserted the figure was on screen. It passed whatever the page did, which
+  // makes it worse than no check: it was counted as coverage for the one
+  // behaviour it could not see. Nothing here may move the board — the click
+  // is the only thing allowed to, and what is asserted is that it did.
+  //
+  // The selection mark is synchronous and checked here; the scroll is not
+  // (revealSelection uses behavior:"smooth" unless reduced motion is set), so
+  // it is read after a delay in finish() below.
+  // Asserted before it is relied on: the reveal check below reads the scroll
+  // synchronously, which is only correct because the page takes its instant
+  // path. If the --force-prefers-reduced-motion flag ever stops being passed,
+  // this names the cause instead of leaving the next check looking like a bug
+  // in the page.
+  var reducedMotion = win.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  check("the harness runs with reduced motion forced", reducedMotion,
+        "smooth scrolling cannot complete under --virtual-time-budget, so the "
+        + "reveal check below would race the compositor");
+
+  // 12 - selecting a roster row brings its figure into the board, which is what
+  // "fly to the selection" became without a camera.
+  //
+  // ⚠️ Three earlier versions of this check could not fail. The first called
+  // scrollIntoView ITSELF and then asserted the figure was on screen, so it
+  // passed whatever the page did. The second picked the last row and reported a
+  // PASS worded "already on screen; nothing to reveal" whenever the target was
+  // visible — and since verify-ui runs against the real ~/.claude, whether it
+  // was varied run to run. The third scrolled to the bottom assuming that put
+  // the first figure off screen, and on a fixture that overflows by only 346px
+  // it does not. All three are in the mutation table.
+  //
+  // So the target is now SEARCHED FOR rather than assumed: at each end of the
+  // scroll range, the first row whose figure is genuinely off screen. Nothing
+  // but the click may move the board afterwards. If no such row exists the
+  // check is skipped with the reason — a fixture that cannot pose the question
+  // is not an answer to it.
+  var revealTarget = null, revealRow = null;
+  if (rows.length > 1 && reducedMotion) {
+    var ends = [0, board.scrollHeight];
+    for (var ei = 0; ei < ends.length && !revealTarget; ei++) {
+      board.scrollTop = ends[ei];
+      for (var ri = 0; ri < rows.length; ri++) {
+        var cand = inner.querySelector('.agent[data-sid="' + rows[ri].dataset.sid + '"]');
+        if (cand && !onScreen(boxOf(cand), vw, vh)) {
+          revealTarget = cand; revealRow = rows[ri];
+          break;
+        }
+      }
+    }
+  }
+  if (revealTarget) {
+    var revealTop0 = board.scrollTop;
+    revealRow.click();
+    check("selecting a roster row marks its figure",
+          revealTarget.classList.contains("selected"),
+          "classes: " + revealTarget.className);
+    check("selecting a roster row reveals its figure",
+          onScreen(boxOf(revealTarget), vw, vh) && board.scrollTop !== revealTop0,
+          "scrollTop " + revealTop0 + " -> " + board.scrollTop +
+          ", on screen: " + onScreen(boxOf(revealTarget), vw, vh));
+    board.scrollTop = 0;
+  } else {
+    skip("selecting a roster row reveals its figure",
+         rows.length <= 1 ? "only " + rows.length + " session(s) in the fixture"
+           : !reducedMotion ? "reduced motion is not in effect"
+           : "every figure is on screen at both ends of the scroll range, so "
+             + "none can be used as an off-screen target");
+  }
+
+  // 13 - the wire overlay covers the content it draws over. Sized wrong, every
+  // wire is clipped at whatever the SVG's default 300x150 happens to cover.
+  var wires = doc.getElementById("wires");
+  if (wires) {
+    check("the wire overlay is sized to the board content",
+          Math.abs(wires.getAttribute("width") - inner.offsetWidth) <= 1 &&
+          Math.abs(wires.getAttribute("height") - inner.offsetHeight) <= 1,
+          wires.getAttribute("width") + "x" + wires.getAttribute("height") +
+          " vs content " + inner.offsetWidth + "x" + inner.offsetHeight);
+  }
+
+  // 14 - the key is reachable, and named rather than identified by a glyph.
   var keyBtn = doc.getElementById("keyhelp");
   check("the map key is behind a named control",
         !!keyBtn && !!keyBtn.getAttribute("aria-label"),
@@ -3362,14 +3446,14 @@ function run(doc, win) {
 document.getElementById("frame").addEventListener("load", function () {
   var f = document.getElementById("frame");
   var doc = f.contentDocument, win = f.contentWindow;
-  // The server has already published a snapshot, but the roster and the camera
+  // The server has already published a snapshot, but the roster and the board
   // settle over a frame or two. A figure existing is the signal; the timeout is
   // the honest failure if it never arrives, rather than a set of checks that
   // quietly measure an empty page and pass.
   var waited = 0;
   (function settle() {
     var list = doc.getElementById("rosterlist");
-    var ready = doc.querySelector("#camera .agent[data-sid]") && list && list.children.length > 0;
+    var ready = doc.querySelector("#boardinner .agent[data-sid]") && list && list.children.length > 0;
     if (ready || waited > 8000) {
       if (!ready) { bad("the map rendered at all", "no figures after 8s - see the server log"); }
       try { run(doc, win); } catch (e) { bad("the harness ran without throwing", e && e.message); done(); }
@@ -3454,8 +3538,20 @@ cmd_verify_ui() {
   # so the wait is explicit: run it in the background, wait for the harness's
   # closing tag to appear, then reap it. A bounded wait that fails loudly beats
   # an unbounded one that looks like work.
+  # ⚠️ --force-prefers-reduced-motion is load-bearing, not cosmetic.
+  # `--virtual-time-budget` fast-forwards timers, but a smooth scroll is driven
+  # by the compositor's real animation frames, which virtual time does not
+  # advance — so `scrollIntoView({behavior: "smooth"})` never progresses and
+  # `scrollTop` stays exactly where it was. Measured: smooth moved 0 -> 0 after
+  # a 900ms wait while `behavior: "auto"` moved 0 -> 346 on the same page.
+  # Forcing reduced motion makes the page take its own instant path, which is
+  # a configuration real users have, and makes the reveal check deterministic
+  # instead of a timing race the environment cannot win. The harness asserts
+  # the flag took effect, so dropping it fails loudly rather than silently
+  # turning that check into a no-op.
   "$chrome" --headless=new --disable-gpu --no-first-run --no-default-browser-check \
     --user-data-dir="$work/profile" --window-size="$vw,$vh" \
+    --force-prefers-reduced-motion \
     --virtual-time-budget=20000 --dump-dom \
     "http://127.0.0.1:$VERIFY_PORT/verify.html" >"$work/dom.html" 2>/dev/null &
   local chrome_pid=$! waited=0
@@ -3479,13 +3575,19 @@ sys.stdout.write(html.unescape(m.group(1)) if m else "")' "$work/dom.html")
     return 1
   fi
 
-  local pass=0 fail=0 line name detail
+  # A skipped check is reported as skipped, never counted as a pass: "there was
+  # nothing to test" and "the thing under test worked" are different facts, and
+  # a check that says the second when it means the first is how two checks here
+  # stayed green against implementations that had the bug.
+  local pass=0 fail=0 skipped=0 line name detail
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     name=${line#*|}; name=${name%%|*}
     detail=${line##*|}
     case "$line" in
       PASS\|*) pass=$((pass + 1)); say "  ${_c_green}✓${_c_reset} $name";;
+      SKIP\|*) skipped=$((skipped + 1))
+               say "  ${_c_yellow}-${_c_reset} $name ${_c_dim}(skipped: $detail)${_c_reset}";;
       FAIL\|*) fail=$((fail + 1))
                say "  ${_c_red}✗${_c_reset} $name"
                [ -n "$detail" ] && printf '      %s\n' "$detail" >&2;;
@@ -3519,7 +3621,9 @@ EOF
     say "${_c_dim}screenshots: $shots${_c_reset}"
   fi
 
-  printf '\n%s checked, %s failed\n' "$((pass + fail))" "$fail"
+  printf '\n%s checked, %s failed' "$((pass + fail))" "$fail"
+  [ "$skipped" -gt 0 ] && printf ', %s skipped' "$skipped"
+  printf '\n'
   [ "$fail" -eq 0 ] || return 1
   return 0
 }
