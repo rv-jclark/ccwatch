@@ -27,41 +27,202 @@
      only sometimes), the legend and the footer. Measured: 223px of chrome
      against a 128px allowance, so the page scrolled by 258px and the map was
      shorter than the space available to it. A flex column cannot be wrong
-     about a height it never has to predict. */
+     about a height it never has to predict.
+
+     ⚠️ The chrome is now the same height whatever the machine is doing, which
+     is a separate property and is asserted separately (verify-ui). The
+     sometimes-appearing banners are gone: the conditions they carried live in
+     the header's alert control and its popover, neither of which is in this
+     column's flow. See the top of web/alerts.js for what each banner cost the
+     board, measured. */
   html, body { height:100%; }
   body { margin:0; background:var(--bg); color:var(--ink); overflow:hidden;
          display:flex; flex-direction:column;
          font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
-  header, #trust, #hostwarn, #foot { flex:none; }
+  header, #idlemsg, #foot { flex:none; }
   /* min-height:0 so the map can be SHORTER than its content wants; without it
      a flex item refuses to shrink below its intrinsic height and the overflow
      comes straight back. */
   #stage { flex:1 1 auto; min-height:0; }
   #wrap { flex:1 1 auto; min-width:0; display:flex; }
-  header { display:flex; align-items:baseline; gap:1rem; flex-wrap:wrap;
+  /* ⚠️ Two columns, not one wrapping flex row. The meter has to sit level
+     with the title, and it also must not move the board when a reading is
+     withheld; a shared flex row gives you either but not both, because
+     whether the meter fits beside the title depends on what is in it. A grid
+     decides the columns up front: the title, the view switcher and the alert
+     control on the left, the meter on the right, both starting at the top so
+     their first lines are level. The header is then as tall as the taller
+     column, the meter's column has a reserved minimum, and nothing wraps
+     between the two. */
+  header { display:grid; grid-template-columns:minmax(0, 1fr) auto;
+           align-items:start; gap:1rem;
            padding:.9rem 1.1rem; border-bottom:1px solid var(--line); }
+  .hleft { display:flex; align-items:baseline; gap:1rem; flex-wrap:wrap;
+           min-width:0; }
+  /* ⚠️ Below 1000px the two columns stack into rows, and that number is not
+     the roster's 720px breakpoint on purpose: the meter's column reserves
+     45em (see .gauges), so between 720px and 1000px the title's column would
+     be squeezed to a couple of hundred pixels and wrap into five or six
+     lines. Stacked, each row's height is still independent of the reading,
+     which is the property being protected. */
+  @media (max-width:1000px) {
+    header { grid-template-columns:minmax(0, 1fr); }
+    /* ⚠️ And the width reservation goes with the columns. 45em is 585px, so
+       keeping it at 420px would make the header wider than the window — and
+       `body` is overflow:hidden here, so the far end would be clipped and
+       unreachable rather than scrollable. A reservation that hides a reading
+       is worse than the shift it prevents. */
+    /* ⚠️ `header .gauges`, not `.gauges`. The plain selector lost to the
+       `.gauges` rule further down the stylesheet — same specificity, later
+       wins — so the reservation stayed in force at 420px and the header
+       measured 603px of content in a 420px window. Specificity rather than
+       source order, so moving either rule cannot bring the bug back. */
+    header .gauges { min-width:0; }
+  }
+  /* ⚠️ The alert slot's size must not depend on what is in it. A slot that
+     collapsed when the machine was quiet would let the trigger's arrival
+     re-wrap the header — the same reflow the banners were removed to stop,
+     moved up one element.
+     ⚠️ But it must not demand a fixed width either, which is what it did
+     first: `width:min(30ch, 34vw)` is 234px at this font, and the header's
+     free space between the view switcher and the right-aligned gauges was
+     measured at 75px on a six-session fixture at 1180px. So the reservation
+     itself wrapped the header — 52px to 86px, permanently, taking 35px off the
+     board. That trades an intermittent shove for a constant one, which is not
+     a fix.
+     `flex:1 1 0` asks for nothing and grows into whatever the line has left,
+     so the slot is the same width whether it holds a trigger or not, at any
+     viewport — and when the line is too crowded even for `min-width`, it wraps
+     in BOTH states, so the header's height still does not depend on the
+     machine. The button inside ellipsises; the whole sentence is in the
+     popover, the title and the accessible name. */
+  #alertslot { flex:1 1 0; min-width:12ch; display:flex;
+               align-items:baseline; }
+  /* Hidden, not removed (see above). visibility:hidden also takes it out of
+     the tab order and out of the accessibility tree, so there is no empty
+     control to land on — a quiet machine has no alert control at all as far
+     as a reader or a keyboard is concerned (principle XII). */
+  #alertslot.quiet #alertbtn { visibility:hidden; }
+  #alertbtn { max-width:100%; overflow:hidden; text-overflow:ellipsis;
+              white-space:nowrap; background:none; font:inherit; font-size:11px;
+              line-height:1.2; padding:.1rem .45rem; border-radius:4px;
+              cursor:pointer; border:1px solid currentColor; }
+  /* Severity is a word in the trigger's own text; these only tint it. */
+  #alertbtn.bad { color:var(--bad); }
+  #alertbtn.warn { color:var(--warn); }
+  #alertbtn.info { color:var(--dim); }
+  /* The popover. A <dialog> in the top layer, anchored under its trigger at
+     open time rather than at a guessed offset from the top of the page, for
+     the reason the map key is one: the browser supplies the focus move, the
+     focus restore, Escape, and a stacking context above everything — and
+     `dialog:not([open])` means the closed panel occupies nothing. It is
+     position:fixed and margin:0 so it cannot contribute to the flex column's
+     height either open or closed. */
+  /* ⚠️ `left:auto`. The UA stylesheet gives a dialog `left:0; right:0`, so
+     setting only `right` leaves the box stretched from the left edge and
+     `max-width` then resolves it at x=0 — the panel rendered hard against the
+     left of the window instead of under its trigger, 288px away from it.
+     Found by looking at a screenshot; the geometric check now asserts the
+     panel's right edge tracks the trigger's. */
+  dialog#alertmodal { position:fixed; left:auto; margin:0; max-width:min(560px, 92vw);
+           background:var(--panel); border:1px solid var(--line);
+           border-radius:8px; padding:.7rem; color:var(--ink);
+           box-shadow:0 8px 40px rgba(0,0,0,.5); overflow:auto; }
+  dialog#alertmodal[open] { display:flex; flex-direction:column; gap:.5rem; }
+  #alertmodal::backdrop { background:rgba(0,0,0,.35); }
+  #alerthead { display:flex; align-items:baseline; justify-content:space-between;
+               gap:.6rem; padding-bottom:.4rem; border-bottom:1px solid var(--line); }
+  #alertmodal button.ghost { background:none; border:1px solid var(--line);
+               color:var(--dim); font:inherit; font-size:11px; padding:.1rem .45rem;
+               border-radius:4px; cursor:pointer; }
+  #alertlist { display:flex; flex-direction:column; gap:.45rem; font-size:12px; }
+  /* Each sentence wraps rather than truncating: these are the measurements
+     behind the verdicts, and a clipped measurement is worse than a long line
+     (principle II). */
+  .alertitem { overflow-wrap:anywhere; }
+  .alertitem.bad { color:var(--bad); }
+  .alertitem.warn { color:var(--warn); }
+  .alertitem.info { color:var(--dim); }
+  /* Not an alert: the machine is idle. It says so in flow, where it can only
+     ever appear when there is nothing on the board to push down. */
+  #idlemsg { display:none; padding:.45rem 1.1rem; font-size:12px; color:var(--dim); }
+  #idlemsg.on { display:block; }
   h1 { font-size:15px; margin:0; }
   h1 span { color:var(--dim); font-weight:400; }
   nav a { color:var(--dim); text-decoration:none; margin-right:.75rem; font-size:12px; }
   nav a.on { color:var(--ink); font-weight:600; }
-  .gauges { display:flex; gap:1.1rem; margin-left:auto; align-items:baseline; flex-wrap:wrap; }
+  /* ⚠️ The meter's height is RESERVED, whether or not there is a reading in
+     it. A usage reading is withheld whenever it goes stale (past
+     CCWATCH_USAGE_STALE) or the feed stops being trusted, and it comes back on
+     the next good snapshot — so without this the header measured 89px with a
+     reading and 52px without one, and the board shifted 37px up and back down
+     every time a statusline went quiet for ten minutes. That is the banner
+     problem again, one element over: a view whose geometry depends on whether
+     a reading arrived cannot be compared against itself.
+     4.8em, in em so the reservation scales with the text rather than being
+     pinned to one font size. Measured: the block is 57.6px here (13px font)
+     and 64.0px in the table view (14px font), so the same 4.8em clears both
+     with a few px to spare — 4.5em did not, and left the table view moving by
+     1px. It is a floor, not a height: at narrow widths the gauges still wrap
+     and the header still grows, in every usage state alike. verify-ui
+     asserts the consequence on both views, which is what makes a measured
+     number here safe. */
+  /* ⚠️ The meter's own column is the header's second grid column (see the
+     header rule), so it is level with the title and cannot wrap around it.
+     It took three attempts to get here, and the two that failed are worth
+     keeping: reserving the height alone left the header at 127px with a
+     reading and 90px without, because what changed was whether the blocks
+     WRAPPED and not the height of a row; giving the meter a row of its own
+     fixed that and left an 85px gap under the title, which reads as a
+     mistake. Columns decide the layout up front, so neither can happen.
+     Measured across the three usage states — a reading, a withheld stale
+     reading, and no usage at all — the header comes out the same height at
+     1180px and at 900px. Below roughly 720px the columns stack and the three
+     blocks wrap among THEMSELVES, and there the guarantee stops holding:
+     measured 248px with a reading against 187px without, at 420px.
+     Stabilising that would mean reserving ~180px of a phone screen for a
+     meter that is usually one line, which is a worse trade than the shift.
+     The boundary is stated here and in README.md rather than papered over,
+     and verify-ui asserts the two widths where it does hold. */
+  /* ⚠️ min-WIDTH as well as min-height, and this was the third fix, not the
+     second. With the column sized to its contents, a withheld reading made it
+     297px instead of 576px — which widened the title's column beside it, so
+     the title re-wrapped and the header still changed height: measured 108px
+     with a reading against 92px without, at 900px. The height was stable and
+     the WIDTH was not.
+     45em against a meter measured at 44.3em here (576px at 13px) and 43.4em
+     in the table view (607px at 14px), so one value clears both. Reserving
+     the widest state is the point: the column is then the same width whether
+     it holds three gauges or a one-line note, and nothing beside it re-wraps. */
+  .gauges { display:flex; gap:1.1rem; align-items:flex-start;
+            flex-wrap:wrap; justify-content:flex-end;
+            min-height:4.8em; min-width:45em; }
   .g-label { color:var(--dim); } .g-val { font-weight:600; }
   .g-reset { color:var(--dim); font-size:11px; }
+  /* One gauge: the numbers, then the two bars, then when it resets. */
+  .g-gauge { display:flex; flex-direction:column; gap:2px; }
+  .g-head { display:flex; gap:.4rem; align-items:baseline; }
+  /* ⚠️ The two bars share one width and one scale, stacked with the
+     consumption on top and the clock directly beneath it. That is the whole
+     instrument: 41% used means nothing until you can see whether 41% of the
+     window has gone with it. Different widths, or side by side, and the
+     comparison stops being a glance. */
+  .g-barrow { display:flex; align-items:center; gap:.4rem; }
+  .g-bars { display:flex; flex-direction:column; gap:2px; width:78px; flex:none; }
+  .g-bar { height:4px; border-radius:2px; overflow:hidden;
+           background:color-mix(in srgb, var(--ink) 14%, transparent); }
+  .g-bar > i { display:block; height:100%; }
+  /* Severity by threshold, as everywhere else. The word is on the number
+     beside it, so the colour is never carrying this alone. */
+  .g-used.ok > i   { background:var(--ok); }
+  .g-used.warn > i { background:var(--warn); }
+  .g-used.bad > i  { background:var(--bad); }
+  /* The clock bar is deliberately neutral: it is a reference, not a verdict,
+     and colouring it would invite reading the pair as two severities. */
+  .g-time > i { background:var(--dim); }
+  .g-elapsed { color:var(--dim); }
+  .g-pace { color:var(--warn); font-weight:600; }
   .stale { color:var(--warn); }
-  #hostwarn { display:none; padding:.45rem 1.1rem; background:color-mix(in srgb, var(--bad) 14%, transparent);
-              border-bottom:1px solid var(--bad); color:var(--bad); font-size:12px; }
-  #hostwarn.on { display:block; }
-  /* data-model.md §5's FeedCondition, rendered: (a)/(b) share this banner
-     because both replace the volatile readings with a stated reason; (c) is
-     a second, additive line (R1); (d) a third — all three are absent, not
-     empty, when the feed is trusted and sessions exist. */
-  #trust { display:none; padding:.45rem 1.1rem; font-size:12px; }
-  #trust.on { display:block; }
-  #trust .main.down { color:var(--bad); background:color-mix(in srgb, var(--bad) 14%, transparent); }
-  #trust .main.warming { color:var(--dim); }
-  #trust .main { display:block; }
-  #trust .unreadable { display:block; color:var(--warn); }
-  #trust .emptymsg { display:block; color:var(--dim); }
 
   /* The map itself: a scrolling column of owner sections, each holding a grid
      of repo cards, each holding its branches and the figures standing in them.
@@ -399,11 +560,6 @@
             border-right:1px solid var(--line); padding:.8rem; }
   #rostertitle { font-size:13px; margin:0 0 .5rem; }
   #rosternote { color:var(--warn); font-size:11px; margin:0 0 .5rem; }
-  #rostercond { font-size:12px; margin-bottom:.5rem; }
-  #rostercond .main.down { display:block; color:var(--bad); }
-  #rostercond .main.warming { display:block; color:var(--dim); }
-  #rostercond .unreadable { display:block; color:var(--warn); }
-  #rostercond .emptymsg { display:block; color:var(--dim); }
   #rostergone { display:none; font-size:12px; margin-bottom:.5rem; }
   #rostergone.on { display:block; }
   #rosterlist { display:flex; flex-direction:column; gap:.3rem; }
@@ -455,12 +611,22 @@
 </head>
 <body>
 <header>
+  <div class="hleft">
   <h1>ccwatch <span id="counts"></span></h1>
   <nav><a href="/">table</a><a href="/map" class="on">map</a></nav>
+  <!-- role="status" so a condition arriving while you are reading the board is
+       announced once, politely, rather than only being available to whoever
+       happens to look at the header. renderAlerts writes the trigger's text
+       only when it actually changes, so a 3-second repaint of an unchanged
+       condition does not re-announce it. -->
+  <div id="alertslot" class="quiet" role="status">
+    <button type="button" id="alertbtn" aria-haspopup="dialog"
+            aria-expanded="false" aria-controls="alertmodal"></button>
+  </div>
+  </div>
   <div class="gauges" id="gauges"></div>
 </header>
-<div id="trust"></div>
-<div id="hostwarn"></div>
+<div id="idlemsg"></div>
 <div id="wrap">
   <!-- tabindex="0" so the scroll container is focusable, which is all that is
        needed for the arrow keys, PageUp/PageDown and Home/End to scroll it:
@@ -477,6 +643,13 @@
     </div>
   </div>
 </div>
+<dialog id="alertmodal" aria-labelledby="alerttitle">
+  <div id="alerthead">
+    <strong id="alerttitle">alerts</strong>
+    <button type="button" id="alertclose" class="ghost">close</button>
+  </div>
+  <div id="alertlist"></div>
+</dialog>
 <dialog id="keymodal" aria-labelledby="keytitle">
   <div id="keyhead">
     <strong id="keytitle">map key</strong>
@@ -510,6 +683,8 @@
 <script src="/md.js"></script>
 <script src="/roster.js"></script>
 <script src="/modal.js"></script>
+<script src="/alerts.js"></script>
+<script src="/usage.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -556,12 +731,13 @@ const rosterEls = (function () {
   const open = document.createElement("button");
   open.type = "button"; open.id = "rosteropen";
 
-  const cond = document.createElement("div");
-  cond.id = "rostercond";
-  const condMain = document.createElement("span"); condMain.className = "main";
-  const condUnreadable = document.createElement("span"); condUnreadable.className = "unreadable";
-  const condEmpty = document.createElement("span"); condEmpty.className = "emptymsg";
-  cond.append(condMain, condUnreadable, condEmpty);
+  // ⚠️ No condition panel here any more. The roster used to state, in its own
+  // four sentences, why it could not be believed — and every one of those
+  // sentences is now in the header's alert control, which is always on screen
+  // above it. Two places saying "the feed is down" in two phrasings is one
+  // fact to read twice and two strings to keep in agreement. What the roster
+  // still owns is the TOMBSTONE below: "that session is gone" is a statement
+  // about your selection, not about the feed, and nothing else says it.
 
   // The tombstone (contracts/page-roster.md §1/§6, data-model.md §6): never
   // a role="option" — it is a statement about a selection, not a row to
@@ -583,7 +759,7 @@ const rosterEls = (function () {
   // so it is declared here rather than living solely in the keydown handler.
   list.setAttribute("aria-keyshortcuts", "o");
 
-  roster.append(title, open, note, cond, gone, list);
+  roster.append(title, open, note, gone, list);
 
   const divider = document.createElement("div");
   divider.id = "rdivider";
@@ -595,8 +771,8 @@ const rosterEls = (function () {
   stage.append(roster, divider, wrap);
 
   return {
-    stage, roster, title, note, open, cond,
-    condMain, condUnreadable, condEmpty, gone, goneMsg, goneDismiss, list, divider,
+    stage, roster, title, note, open,
+    gone, goneMsg, goneDismiss, list, divider,
   };
 })();
 
@@ -1139,63 +1315,180 @@ function wires(peers) {
   return drawn;
 }
 
-// A session killed by the OS leaves the same trace as one that exited
-// cleanly, so without this the dashboard can say an agent is gone but not why.
-// Built once, updated in place (FR-016/V1): the bold lead-in never changes,
-// only the trailing text node does.
-const hostwarnEls = (function () {
-  const el = $("hostwarn");
-  if (!el) return null;
-  const lead = document.createElement("b"); lead.textContent = "host under memory pressure";
-  const rest = document.createTextNode("");
-  el.append(lead, rest);
-  return {el, rest};
+// ---- the alert control -----------------------------------------------------
+// One header control for every condition that says the view cannot be
+// believed, replacing the two block-level banners that used to sit between the
+// header and the board and move it. The sentences are CCWATCH_ALERTS.alerts()'s
+// — see the top of web/alerts.js for what the banners cost, measured, and for
+// why a collapsed count alone would have been the wrong fix.
+const alertEls = (function () {
+  const slot = $("alertslot"), btn = $("alertbtn");
+  const modal = $("alertmodal"), list = $("alertlist"), title = $("alerttitle");
+  return {slot, btn, modal, list, title};
 })();
-function hostwarn(h) {
-  if (!hostwarnEls) return;
-  const {el, rest} = hostwarnEls;
-  if (!h || !h.pressure) { el.className = ""; rest.textContent = ""; return; }
-  el.className = "on";
-  // Every memory figure here is in the VOLATILE set (data-model.md §5): the
-  // pressure itself still appears at its own threshold (FR-044), but the
-  // numbers behind it are withheld, not annotated, while the feed is not
-  // fully trusted.
-  if (!VOLATILE) {
-    rest.textContent = " — readings withheld while the feed is unreliable."
-      + " The OS may kill sessions, and a killed session looks exactly like a clean exit.";
+// Compared before writing, so an unchanged condition does not rewrite the
+// trigger's text on every 3-second repaint — role="status" would announce it
+// again each time, and a monitor that repeats itself is one you mute.
+let lastTriggerText = null;
+
+function makeAlertItem() {
+  const el = document.createElement("div");
+  el.className = "alertitem";
+  return el;
+}
+function updateAlertItem(el, it) {
+  el.className = "alertitem " + it.sev;
+  el.textContent = it.text;
+  // Order as a style, never by re-appending: reconcile() never moves a node,
+  // because moving the focused element would drop the focus.
+  el.style.order = it.order;
+}
+
+// Takes the model, not the payload: everything judged happens in alerts.js, so
+// verify-ui can pose a condition this machine is not in and assert on what the
+// page does with it.
+function renderAlerts(model) {
+  const {slot, btn, modal, list, title} = alertEls;
+  const {items, trigger} = model;
+  reconcile(list, keyBy(items, it => it.key), "alert", makeAlertItem, updateAlertItem);
+  title.textContent = items.length === 1 ? "1 alert" : `${items.length} alerts`;
+  if (!trigger) {
+    // Nothing is wrong: the control is gone, not green (principle XII). The
+    // popover goes with it — a panel left open over a condition that has
+    // cleared is a panel stating something that is no longer true.
+    if (modal.open) closeAlerts();
+    slot.className = "quiet";
+    btn.className = "";
+    if (lastTriggerText !== null) { btn.textContent = ""; lastTriggerText = null; }
+    btn.removeAttribute("aria-label");
     return;
   }
-  // The sessions' own share is stated, so "would killing agents help" is a
-  // number rather than a hunch. Usually it is a small fraction of the total.
-  const share = h.sessions_mb != null
-    ? ` Sessions account for ${h.sessions_mb}MB of it (${h.idle_mb || 0}MB of that idle).` : "";
-  rest.textContent = ` — swap ${h.swap_used_pct}% used `
-    + `(${h.swap_used_mb}/${h.swap_total_mb}MB), ${h.ram_free_mb}MB RAM free. `
-    + `The OS may kill sessions, and a killed session looks exactly like a clean exit.`
-    + share;
+  slot.className = "";
+  btn.className = trigger.sev;
+  if (trigger.text !== lastTriggerText) {
+    btn.textContent = trigger.text;
+    lastTriggerText = trigger.text;
+  }
+  // The accessible name is the whole list; the visible text may be ellipsised
+  // by the slot's width, and "+1" is an abbreviation either way.
+  btn.setAttribute("aria-label", trigger.label);
+  btn.title = trigger.label;
+}
+
+// Anchored under the trigger at open time rather than at a fixed offset: the
+// header wraps at narrow widths, and a panel positioned against a guessed
+// header height is the 258px-below-the-fold bug in a smaller box. Clamped to
+// the viewport on both axes so it is always fully reachable.
+function openAlerts() {
+  const {btn, modal} = alertEls;
+  const r = btn.getBoundingClientRect();
+  const top = Math.round(r.bottom + 6);
+  modal.style.top = top + "px";
+  modal.style.right = Math.max(8, Math.round(innerWidth - r.right)) + "px";
+  modal.style.maxHeight = Math.max(80, innerHeight - top - 12) + "px";
+  modal.showModal();
+  btn.setAttribute("aria-expanded", "true");
+}
+function closeAlerts() {
+  alertEls.modal.close();
+  alertEls.btn.setAttribute("aria-expanded", "false");
+}
+alertEls.btn.addEventListener("click",
+  () => (alertEls.modal.open ? closeAlerts() : openAlerts()));
+alertEls.modal.addEventListener("click", e => {
+  // Light dismiss: with showModal() a click on the backdrop targets the
+  // dialog itself. A dropdown that cannot be dismissed by clicking away is a
+  // dropdown people close by reloading the page.
+  if (e.target === alertEls.modal) closeAlerts();
+});
+// Escape is the browser's own, and it bypasses the button's click handler —
+// so aria-expanded has to be corrected from the dialog's own close event, or
+// it says "open" over a closed panel for the rest of the session.
+alertEls.modal.addEventListener("close",
+  () => alertEls.btn.setAttribute("aria-expanded", "false"));
+$("alertclose").addEventListener("click", closeAlerts);
+
+// (d) of the trust model, and the only one of the five that is not an alert:
+// zero live sessions is a normal condition, so it is stated in flow — where,
+// there being no figures, there is nothing below it to push down.
+function renderIdle(cond) {
+  const el = $("idlemsg");
+  const on = !!(cond && cond.trust === "ok" && cond.empty);
+  el.textContent = on ? "No live sessions. After a reboot, run ccwatch resume." : "";
+  el.className = on ? "on" : "";
 }
 
 // One gauge span per reading, reconciled by name so the DOM node behind each
 // percentage survives a tick (FR-016/V1); the two full-panel messages (no
 // usage at all, or the whole reading stale) replace the gauge set with a
 // single persistent note node instead.
+// One gauge: a name and two percentages, the two bars, and when the window
+// resets. Built once and updated in place (FR-016/V1) like everything else
+// here — nothing in the header is created or replaced by a repaint.
 function makeGaugeSpan() {
   const span = document.createElement("span");
+  span.className = "g-gauge";
+  const head = document.createElement("span"); head.className = "g-head";
   const label = document.createElement("span"); label.className = "g-label";
   const val = document.createElement("span"); val.className = "g-val";
-  span.append(label, document.createTextNode(" "), val, document.createTextNode(" "));
+  const elapsed = document.createElement("span"); elapsed.className = "g-elapsed";
+  const pace = document.createElement("span"); pace.className = "g-pace";
+  head.append(label, val, elapsed);
+  const barrow = document.createElement("span"); barrow.className = "g-barrow";
+  const bars = document.createElement("span"); bars.className = "g-bars";
+  const used = document.createElement("span"); used.className = "g-bar g-used";
+  const usedFill = document.createElement("i");
+  used.appendChild(usedFill);
+  const time = document.createElement("span"); time.className = "g-bar g-time";
+  const timeFill = document.createElement("i");
+  time.appendChild(timeFill);
+  // role="img" with a label, because a length is not available to a screen
+  // reader and "41%" with no subject is not a reading.
+  used.setAttribute("role", "img");
+  time.setAttribute("role", "img");
+  bars.append(used, time);
+  barrow.append(bars, pace);
   const reset = document.createElement("span"); reset.className = "g-reset";
-  span.appendChild(reset);
+  span.append(head, barrow, reset);
   return span;
 }
 function updateGaugeSpan(span, g) {
-  const band = p => p >= 90 ? "var(--bad)" : p >= 70 ? "var(--warn)" : "var(--ink)";
   span.querySelector(".g-label").textContent = g.name;
   const val = span.querySelector(".g-val");
-  val.textContent = `${Math.floor(g.x.used_percentage)}%`;
-  val.style.color = band(g.x.used_percentage);
-  span.querySelector(".g-reset").textContent =
-    g.x.resets_at ? `resets ${dur(g.x.resets_at - g.now)}` : "";
+  val.textContent = g.usedText + " used";
+  val.className = "g-val " + CCWATCH_USAGE.band(g.usedPct);
+  const used = span.querySelector(".g-used");
+  used.className = "g-bar g-used " + CCWATCH_USAGE.band(g.usedPct);
+  used.firstChild.style.width = Math.min(100, Math.max(0, g.usedPct)) + "%";
+  used.setAttribute("aria-label", g.usedLabel);
+  used.title = g.usedLabel;
+  // ⚠️ The clock bar and its number are ABSENT, not zero, when the elapsed
+  // fraction cannot be known — no reset instant in the payload, an unknown
+  // window length, or a reset already in the past. A bar drawn at 0% would
+  // read as "the window just started", which is a measurement nobody took
+  // (principle VI, and see web/usage.js).
+  const time = span.querySelector(".g-time");
+  const elapsedEl = span.querySelector(".g-elapsed");
+  const paceEl = span.querySelector(".g-pace");
+  if (g.elapsedPct == null) {
+    time.style.display = "none";
+    time.removeAttribute("aria-label");
+    elapsedEl.textContent = "";
+    paceEl.textContent = "";
+  } else {
+    time.style.display = "";
+    time.firstChild.style.width = Math.min(100, Math.max(0, g.elapsedPct)) + "%";
+    time.setAttribute("aria-label", g.elapsedLabel);
+    time.title = g.elapsedLabel;
+    elapsedEl.textContent = "· " + g.elapsedText + " elapsed";
+    // Only when it is true (principle XII): running under the clock is the
+    // normal condition and a word for it is a word people stop reading.
+    paceEl.textContent = g.pace === "ahead" ? "ahead of the clock" : "";
+  }
+  // The relative time is what you act on; the wall clock is what you put in a
+  // calendar, in one fixed zone so two people reading this say the same thing.
+  span.querySelector(".g-reset").textContent = g.resetIn == null ? ""
+    : (g.resetClock ? `resets ${g.resetIn} · ${g.resetClock}` : `resets ${g.resetIn}`);
 }
 const gaugesEls = (function () {
   const el = $("gauges");
@@ -1229,11 +1522,11 @@ function updateGauges(u) {
     return;
   }
   note.style.display = "none"; note.textContent = "";
-  const now = Date.now() / 1000;
+  // The shaping — which windows exist, the elapsed fraction, the reset clock
+  // — is web/usage.js's, shared with the table view so the two headers cannot
+  // disagree about how much of a window has gone (principle XI).
   const wanted = {};
-  if (u.five_hour) wanted["5h"] = {name: "5h", x: u.five_hour, now};
-  if (u.seven_day) wanted["7d"] = {name: "7d", x: u.seven_day, now};
-  if (u.seven_day_opus) wanted["7dop"] = {name: "7d opus", x: u.seven_day_opus, now};
+  for (const g of CCWATCH_USAGE.gauges(u, Date.now() / 1000)) wanted[g.key] = g;
   reconcile(el, wanted, "gauge", makeGaugeSpan, updateGaugeSpan);
   if (u.age > 60) {
     note.className = "stale"; note.style.display = "";
@@ -1566,7 +1859,7 @@ function renderModal() {
   const fields = row ? CCWATCH_ROSTER.rowFields(row, {volatile: VOLATILE}) : null;
   const names = (lastBody && lastBody.sessions || []).map(r => r.name);
   const edges = (lastBody && lastBody.peers && lastBody.peers.edges) || [];
-  // ⚠️ `lastCond` — the same object the banner above the map and the roster
+  // ⚠️ `lastCond` — the same object the header's alert control and the roster
   // read, never a second computation of the same judgement. Two renderings
   // that decide independently whether the feed can be trusted will eventually
   // disagree, and a reader has no way to tell which of them is lying
@@ -1758,62 +2051,10 @@ function drawBoard(s) {
 }
 
 // ---- draw ------------------------------------------------------------------
-// data-model.md §5 — the page's trust model. Computed fresh every tick from
-// the read outcome and the payload fields it produced, and from nothing
-// else: there is no flag to latch and no reload needed to clear one
-// (FR-032, R7). `fetchFailure` is the thrown message when the read itself
-// failed (a network error or `!res.ok`); otherwise it is null and `s` is a
-// parsed body.
-function computeFeedCondition(s, fetchFailure) {
-  const ca = (s && s.collected_at) || {};
-  const dataAge = ca.snapshot != null ? (Date.now() / 1000 - ca.snapshot) : null;
-  const unreadable = s ? s.parse_failed : null;
-  if (fetchFailure)
-    return {trust: "feed_down", reason: fetchFailure, dataAge, unreadable, empty: false};
-  if (s.warming)
-    return {trust: "warming", reason: null, dataAge: null, unreadable, empty: false};
-  if (s.snapshot_ok === false)
-    return {trust: "feed_down", reason: s.snapshot_error || s.error || "snapshot failed",
-            dataAge, unreadable, empty: false};
-  return {
-    trust: "ok", reason: null, dataAge, unreadable,
-    empty: !s.error && (s.sessions || []).length === 0,
-  };
-}
-
-// Built once, updated in place (FR-016/V1): sentence (a)/(b) share one node
-// because only one of them can be true at a time; (c) and (d) are separate,
-// additive nodes (R1) — `renderTrust` toggles each independently rather than
-// replacing the whole panel.
-const trustEls = (function () {
-  const root = $("trust");
-  const main = document.createElement("span"); main.className = "main";
-  const unreadable = document.createElement("span"); unreadable.className = "unreadable";
-  const emptyMsg = document.createElement("span"); emptyMsg.className = "emptymsg";
-  root.append(main, unreadable, emptyMsg);
-  return {root, main, unreadable, emptyMsg};
-})();
-function renderTrust(cond) {
-  const {root, main, unreadable, emptyMsg} = trustEls;
-  if (cond.trust === "feed_down") {
-    main.className = "main down";
-    main.textContent = `the feed is down: ${cond.reason} — is \`ccwatch serve\` still running? `
-      + `showing session data from ${dur(cond.dataAge)} ago`;
-  } else if (cond.trust === "warming") {
-    main.className = "main warming";
-    main.textContent = "taking the first snapshot — no session data has been collected yet";
-  } else {
-    main.className = "main"; main.textContent = "";
-  }
-  // R5: absent or null prints nothing, never `0`.
-  unreadable.textContent = cond.unreadable > 0
-    ? `${cond.unreadable} registry file(s) could not be read — run: ccwatch doctor` : "";
-  // (d), verbatim (contracts/page-render.md §1) — never printed alongside
-  // (a) or (c) since `empty` is only ever true when `trust === "ok"` (R6).
-  emptyMsg.textContent = cond.empty
-    ? "No live sessions. After a reboot, run ccwatch resume." : "";
-  root.className = (main.textContent || unreadable.textContent || emptyMsg.textContent) ? "on" : "";
-}
+// The trust model itself is CCWATCH_ALERTS.feedCondition (data-model.md §5),
+// shared with the table view so the two pages cannot judge the same feed
+// differently (principle XI). It was inline here while this was the only page
+// that had one.
 
 // The age of the data, not the age of the request: computed from the
 // absolute collected_at instants in the body we hold, never from a stored
@@ -1917,11 +2158,6 @@ function renderRoster(sessions, cond) {
   // no session data to trust yet, so the panel lists nothing — the retained
   // rows during a feed_down tick are the one case rows are kept (FR-025(b)).
   const rows = cond && cond.trust === "warming" ? [] : sessions;
-  const st = CCWATCH_ROSTER.statements(cond);
-  rosterEls.condMain.className = "main" + (st.mainKind ? " " + st.mainKind : "");
-  rosterEls.condMain.textContent = st.main;
-  rosterEls.condUnreadable.textContent = st.unreadable;
-  rosterEls.condEmpty.textContent = st.empty;
 
   const keys = CCWATCH_ROSTER.keysOf(rows);
   const wanted = {};
@@ -2198,7 +2434,10 @@ function applyFeed(s, cond) {
   // have drawn, which `buildWorldModel`'s `s.sessions || []` already covers.
   const {buildingCount} = drawBoard(s);
   updateGauges(s.usage);
-  hostwarn(s.host);
+  // One model for every condition on the page, built from this tick's `cond`
+  // and this tick's VOLATILE gate — the same object the roster and the modal
+  // read, never a second judgement of the same feed (principle XI).
+  renderAlerts(CCWATCH_ALERTS.alerts({cond, host: s.host, volatile: VOLATILE}));
   // After drawBoard, never before: the wires are measured from the figures'
   // boxes, so they have to be laid out before anything reads them.
   const drawn = wires(s.peers) || 0;
@@ -2206,7 +2445,7 @@ function applyFeed(s, cond) {
   updateCounts(s, buildingCount);
 
   lastDrawn = drawn;
-  renderTrust(cond);
+  renderIdle(cond);
   repaintFooter(cond);
 }
 
@@ -2215,21 +2454,28 @@ async function tick() {
   try {
     const res = await fetch("/api/state", lastEtag ? {headers: {"If-None-Match": lastEtag}} : {});
     if (res.status === 304) {
-      if (lastBody) applyFeed(lastBody, computeFeedCondition(lastBody, null));
+      if (lastBody) applyFeed(lastBody, CCWATCH_ALERTS.feedCondition(lastBody, null));
       return;
     }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     lastEtag = res.headers.get("ETag");
     const s = await res.json();
     lastBody = s;
-    applyFeed(s, computeFeedCondition(s, null));
+    applyFeed(s, CCWATCH_ALERTS.feedCondition(s, null));
   } catch (e) {
     // A dead feed is stated, not left to look like an empty city (R2): the
     // last trusted body, if any, is redrawn with every VOLATILE reading
     // withheld rather than dropped from the page entirely.
-    const cond = computeFeedCondition(lastBody, e.message);
+    const cond = CCWATCH_ALERTS.feedCondition(lastBody, e.message);
     if (lastBody) applyFeed(lastBody, cond);
-    else { VOLATILE = false; renderTrust(cond); }
+    else {
+      // Nothing has ever been drawn, so there is no body to redraw — but the
+      // reason still has to reach the page, and the header is now where it
+      // goes. `host` is null rather than retained: a host reading from a feed
+      // that just failed is exactly the stale number principle III forbids.
+      VOLATILE = false;
+      renderAlerts(CCWATCH_ALERTS.alerts({cond, host: null, volatile: false}));
+    }
   }
 }
 // A page that becomes visible fires once immediately rather than waiting out

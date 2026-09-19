@@ -241,36 +241,20 @@
     return windowWidth < STACK_BREAKPOINT;
   }
 
-  // §8 statements(cond) — the roster's own rendering of the map's existing
-  // FeedCondition object (data-model.md §5). No sort, no derived status:
-  // every sentence is a fixed template over cond's own fields. `empty` is
-  // gated on trust === "ok" *inside* this function, regardless of what the
-  // caller passed for `cond.empty`, so a down or warming feed can never be
-  // read as "no live sessions" (F2, FR-029, SC-007, C-F, C-G).
-  function statements(cond) {
-    var trust = cond && cond.trust;
-    var main = "";
-    var mainKind = "";
-    if (trust === "feed_down") {
-      mainKind = "down";
-      main = "the feed is down: " + cond.reason + " — rows shown are "
-        + dur(cond.dataAge) + " old";
-    } else if (trust === "warming") {
-      mainKind = "warming";
-      main = "taking the first snapshot — no session data has been collected yet";
-    }
-    // R5 of entry 002, repeated here (C-D): absent or zero prints nothing,
-    // never "0 registry files".
-    var unreadable = cond && cond.unreadable > 0
-      ? cond.unreadable + " registry file(s) could not be read — run: ccwatch doctor"
-      : "";
-    var empty = (trust === "ok" && cond && cond.empty)
-      ? "No live sessions right now." : "";
-    return {main: main, mainKind: mainKind, unreadable: unreadable, empty: empty};
-  }
+  // ⚠️ `statements(cond)` is gone. It rendered the same FeedCondition the
+  // header's alert control now renders — feed down, warming, unreadable
+  // registry files — in a second set of words, in a panel directly below a
+  // control that is always on screen. One fact read twice in two phrasings is
+  // two strings to keep in agreement for no gain, and the roster's own version
+  // pushed the row list down every time a condition arrived, which is the
+  // reflow the banners were removed to stop. web/alerts.js owns all of it now;
+  // `resolveSelection` below still reads `cond`, because what a selection
+  // means when the feed cannot be read is the roster's own question.
 
-  // §8 goneText(sid, name) — the tombstone sentence (data-model.md §6),
-  // sharing no leading clause with any string statements() can produce (C-J).
+  // §8 goneText(sid, name) — the tombstone sentence (data-model.md §6). It
+  // shares no leading clause with any sentence the alert control can produce:
+  // "that session is gone" and "the feed is gone" are different facts and must
+  // never be mistaken for each other mid-read (C-J).
   function goneText(sid, name) {
     return (name || "That session") + " is no longer in the roster — it left the machine's session list.";
   }
@@ -301,7 +285,6 @@
     saveSelection: saveSelection,
     loadWidth: loadWidth,
     saveWidth: saveWidth,
-    statements: statements,
     goneText: goneText,
   };
   Object.defineProperty(api, "persistence", {

@@ -106,7 +106,7 @@
       out.main = "taking the first snapshot"
                + " — nothing has been collected about this session yet";
     }
-    // Worded exactly as the page banner words it (web/map.html), so one fact
+    // Worded exactly as the alert control words it (web/alerts.js), so one fact
     // does not acquire two phrasings depending on where you read it.
     if (c.unreadable != null && c.unreadable > 0) {
       out.unreadable = c.unreadable

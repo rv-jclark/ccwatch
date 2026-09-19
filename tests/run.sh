@@ -46,8 +46,14 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # replaced by the scrolling board: web/plots.js and web/camera.js were pure
 # arithmetic modules with 73 node checks between them, and retiring the
 # arithmetic retired the assertions on it.
-TALLY_FLOOR=315
-TALLY_FLOOR_NODE=185
+# Raised by the alert control: 11 static page assertions that always run, and
+# 40 node checks on web/alerts.js - less the 10 on roster.js's statements(),
+# which the alert control replaced and which went with it.
+# Raised again by the usage meter: 14 static, and 28 that need node - 25 on
+# web/usage.js, plus the three that compare the terminal's own rendering of a
+# reset instant against the page's.
+TALLY_FLOOR=342
+TALLY_FLOOR_NODE=243
 
 assert_contains() { case "$1" in *"$2"*) t_pass "$3";; *) t_fail "$3" "expected to contain: $2";; esac; }
 assert_not_contains() { case "$1" in *"$2"*) t_fail "$3" "should NOT contain: $2";; *) t_pass "$3";; esac; }
@@ -1850,16 +1856,19 @@ assert_not_contains "$_maphtml" '"ifoot").style.display' \
 # fail this.
 assert_not_contains "$_maphtml" 'method="dialog"' \
   "web/map.html contains no <form method=\"dialog\">"
-# Two: the agent panel and the map key. Both are <dialog> + showModal() rather
-# than styled divs, so the focus trap, the inert background and Escape-to-close
-# come from the platform instead of being reimplemented twice.
+# Three: the agent panel, the map key and the alert popover. All are <dialog> +
+# showModal() rather than styled divs, so the focus trap, the inert background
+# and Escape-to-close come from the platform instead of being reimplemented
+# three times — and a <dialog> in the top layer is also the one popover shape
+# that cannot contribute to the flex column's height, which is the whole reason
+# the alert panel is one (web/alerts.js).
 _showmodal_count=$(grep -c '\.showModal()' "$ROOT/web/map.html")
-assert_eq "$_showmodal_count" "2" "showModal() opens both dialogs, and nothing else"
+assert_eq "$_showmodal_count" "3" "showModal() opens all three dialogs, and nothing else"
 # ⚠️ A closed <dialog> must stay closed. An unconditional `display:flex` on the
 # dialog overrode the user agent's `dialog:not([open]) { display:none }`, so the
 # closed agent panel rendered in the document flow below the map — a chat window
 # you could see and not use, and 176px of the page scroll it caused.
-assert_eq "$(grep -c 'dialog#[a-z]*\[open\]' "$ROOT/web/map.html")" "2" \
+assert_eq "$(grep -c 'dialog#[a-z]*\[open\]' "$ROOT/web/map.html")" "3" \
   "each dialog's display is scoped to [open], so a closed one cannot render"
 
 # ⚠️ The page fills the viewport and does not scroll — #board does, inside it.
@@ -1869,6 +1878,9 @@ assert_eq "$(grep -c 'dialog#[a-z]*\[open\]' "$ROOT/web/map.html")" "2" \
 # chrome against a 128px allowance: the page scrolled by 258px and the map was
 # shorter than the room it had. A flex column cannot be wrong about a height it
 # never has to predict, so the guard is against the return of the prediction.
+# The sometimes-appearing banners are themselves gone now — their conditions are
+# in the header's alert control, out of this column's flow, and verify-ui
+# asserts the board's top edge does not move when one arrives.
 # ⚠️ Matches a DECLARATION, not the word. The first version grepped the whole
 # file for `calc(100vh -` and was tripped by the comment above the fix that
 # explains why the fix exists — an assertion failing on its own documentation.
@@ -1904,7 +1916,7 @@ assert_not_contains "$_maphtml" 'e.key === " " || e.key === "Spacebar"' \
 _rosterbuild_js=$(awk '/const list = document.createElement\("div"\);/,/roster.append\(/' "$ROOT/web/map.html")
 assert_contains "$_rosterbuild_js" 'list.setAttribute("aria-keyshortcuts", "o");' \
   "#rosterlist carries aria-keyshortcuts"
-assert_contains "$_maphtml" 'roster.append(title, open, note, cond, gone, list);' \
+assert_contains "$_maphtml" 'roster.append(title, open, note, gone, list);' \
   "and #rosteropen is a sibling of #rosterlist under #roster, not appended into the listbox"
 
 # ============================================================ repo identity ==
@@ -2591,58 +2603,21 @@ function check(name, cond, detail) {
         })());
 })();
 
-// statements (contracts/roster-js.md §8, data-model.md §5, C-A..C-I)
-(function () {
-  check("C-A feed_down names the reason and the measured age of the rows still shown",
-        (function () {
-          var s = R.statements({trust: "feed_down", reason: "ECONNREFUSED", dataAge: 125, unreadable: 0});
-          return s.main.indexOf("ECONNREFUSED") !== -1 && s.main.indexOf("2m") !== -1
-            && s.mainKind === "down";
-        })());
-  check("C-B warming says the first snapshot is still being taken and carries no age",
-        (function () {
-          var s = R.statements({trust: "warming", unreadable: 0});
-          return s.mainKind === "warming" && /\d/.test(s.main) === false;
-        })());
-  check("C-C unreadable: 3 states the count and names ccwatch doctor",
-        R.statements({trust: "ok", unreadable: 3}).unreadable.indexOf("3") !== -1
-          && R.statements({trust: "ok", unreadable: 3}).unreadable.indexOf("ccwatch doctor") !== -1);
-  check("C-D unreadable 0 or null is empty, never \"0 registry files\"",
-        R.statements({trust: "ok", unreadable: 0}).unreadable === ""
-          && R.statements({trust: "ok", unreadable: null}).unreadable === "");
-  check("C-E empty:true, trust:ok states there are no live sessions",
-        R.statements({trust: "ok", empty: true, unreadable: 0}).empty !== "");
-  // FR-029/SC-007 spot-check (quickstart.md §2): empty:true produces a
-  // sentence only when trust:"ok" — the exclusion is enforced inside
-  // statements() itself, whatever the caller passed for cond.empty.
-  check("C-F empty:true, trust:feed_down is withheld regardless of the caller's cond.empty",
-        R.statements({trust: "feed_down", reason: "x", dataAge: 1, empty: true, unreadable: 0}).empty === "");
-  check("C-G empty:true, trust:warming is withheld",
-        R.statements({trust: "warming", empty: true, unreadable: 0}).empty === "");
-  check("C-H the four sentences are pairwise distinct, and main/empty are never both non-empty",
-        (function () {
-          var down = R.statements({trust: "feed_down", reason: "x", dataAge: 1, unreadable: 0});
-          var warming = R.statements({trust: "warming", unreadable: 0});
-          var unreadable = R.statements({trust: "ok", unreadable: 3}).unreadable;
-          var empty = R.statements({trust: "ok", empty: true, unreadable: 0});
-          var strs = [down.main, warming.main, unreadable, empty.empty];
-          var uniq = {};
-          strs.forEach(function (s) { uniq[s] = true; });
-          return Object.keys(uniq).length === strs.length
-            && (down.empty === "" ) && (warming.empty === "") && (empty.main === "");
-        })());
-  check("C-I unreadable is additive: it may accompany the down sentence",
-        (function () {
-          var s = R.statements({trust: "feed_down", reason: "x", dataAge: 1, unreadable: 2});
-          return s.main !== "" && s.unreadable !== "";
-        })());
-})();
+// ⚠️ statements() and its nine assertions are gone with it. The roster no
+// longer renders the feed condition in its own words: web/alerts.js does, in
+// the header, and the assertions on those sentences are in the alerts-module
+// section. Two renderings of one fact were two sets of words to keep in
+// agreement, and the roster's own copy pushed the row list down whenever a
+// condition arrived.
 
-// goneText (contracts/roster-js.md §8, C-J). statements() is US4's export
-// (Phase 6); once it lands the cross-check below runs for real, but the
-// invariant it enforces — the tombstone's leading clause is its own, never
-// "the feed"/"registry" wording — is checked either way so this assertion is
-// not vacuous while statements() does not yet exist.
+// goneText (contracts/roster-js.md §8, C-J).
+//
+// ⚠️ The other half of C-J — that the tombstone shares no leading clause with
+// any sentence stating the feed is broken — has moved to the alerts-module
+// section, where those sentences now live. It was written here as
+// `if (typeof R.statements === "function")`, which is a check that reports
+// nothing at all the moment that function stops existing; it would have gone
+// quiet rather than red when statements() was deleted.
 (function () {
   var gone = R.goneText("s1", "alpha");
   var goneLead = gone.split(" ").slice(0, 3).join(" ");
@@ -2651,22 +2626,6 @@ function check(name, cond, detail) {
         gone.indexOf("alpha") !== -1 && gone.toLowerCase().indexOf("the feed") === -1
           && gone.toLowerCase().indexOf("registry") === -1);
 
-  if (typeof R.statements === "function") {
-    var statementsShapes = [
-      R.statements({trust: "feed_down", unreadable: 0}),
-      R.statements({trust: "warming", unreadable: 0}),
-      R.statements({trust: "ok", empty: true, unreadable: 0}),
-      R.statements({trust: "ok", empty: false, unreadable: 3}),
-    ];
-    check("C-J goneText shares no leading clause with any string statements() can produce",
-          statementsShapes.every(function (s) {
-            return [s.main, s.unreadable, s.empty].every(function (str) {
-              if (!str) return true;
-              var lead = String(str).split(" ").slice(0, 3).join(" ");
-              return lead !== goneLead;
-            });
-          }));
-  }
 })();
 
 // clampWidth/stacked (contracts/roster-js.md §6, W-A..W-F)
@@ -3239,6 +3198,504 @@ MODALJS
 else
   t_skip "modal module" "node not installed"
 fi
+
+
+# =============================================================== alerts-module ===
+printf '\nalerts-module\n'
+#
+# web/alerts.js holds the pages' trust model and the alert set both pages render
+# from it. It is in its own file for the reason web/md.js, web/roster.js and
+# web/modal.js are: so these assertions can require() it under node, without a
+# browser. What a browser has to answer instead — whether the control can move
+# the board — is asserted by `ccwatch verify-ui`, because it is a question about
+# boxes and no amount of shaping here can answer it.
+if command -v node >/dev/null 2>&1; then
+  cat > "$WORK/alerts-check.js" <<'ALERTSJS'
+var A = require(process.argv[2]);
+var out = [];
+function check(name, cond, detail) {
+  out.push((cond ? "PASS|" : "FAIL|") + name + "|" + (detail || ""));
+}
+var HOST = {pressure: true, swap_used_pct: 92, swap_used_mb: 8100,
+            swap_total_mb: 9216, ram_free_mb: 210, sessions_mb: 1840, idle_mb: 420};
+function texts(m) { return m.items.map(function (i) { return i.text; }); }
+function keys(m) { return m.items.map(function (i) { return i.key; }); }
+
+// Seed: the module loads under node and exports an object.
+(function () {
+  check("seed require(alerts.js) succeeds and exports an object",
+        typeof A === "object" && A !== null, typeof A);
+})();
+
+// feedCondition — moved here from map.html so both pages judge one feed once
+// (principle XI). The four outcomes, and the fields each carries.
+(function () {
+  var down = A.feedCondition({collected_at: {snapshot: Date.now() / 1000 - 60}}, "ECONNREFUSED");
+  check("F-A a read that threw is feed_down, carrying the thrown reason verbatim",
+        down.trust === "feed_down" && down.reason === "ECONNREFUSED", JSON.stringify(down));
+  check("F-A and the age of what is still on screen, measured not stored",
+        Math.round(down.dataAge) === 60, String(down.dataAge));
+  // ⚠️ The fixture carries a collected_at instant deliberately. With none,
+  // dataAge comes out null whatever the warming branch does, and the second
+  // assertion here could not fail — which is how it was first written.
+  var warming = A.feedCondition(
+    {warming: true, collected_at: {snapshot: Date.now() / 1000 - 300}}, null);
+  check("F-B a warming payload is warming", warming.trust === "warming",
+        JSON.stringify(warming));
+  check("F-B and states no age for data it does not have, whatever the payload carries",
+        warming.dataAge === null, String(warming.dataAge));
+  var failed = A.feedCondition({snapshot_ok: false, snapshot_error: "timed out after 90s"}, null);
+  check("F-C a failed collection is feed_down, named by the collector's own error",
+        failed.trust === "feed_down" && failed.reason === "timed out after 90s",
+        JSON.stringify(failed));
+  check("F-C and falls back to `error` when only that is set, never to a bare \"failed\"",
+        A.feedCondition({snapshot_ok: false, error: "jq: parse error"}, null).reason
+          === "jq: parse error");
+  var ok = A.feedCondition({sessions: [{sid: "a"}], parse_failed: 2,
+                            collected_at: {snapshot: Date.now() / 1000}}, null);
+  check("F-D a good payload is ok, and carries the unreadable count through",
+        ok.trust === "ok" && ok.unreadable === 2, JSON.stringify(ok));
+  check("F-E zero sessions on a good payload is empty:true",
+        A.feedCondition({sessions: [], collected_at: {}}, null).empty === true);
+  // ⚠️ An errored payload is NOT an empty host. They are different facts, and
+  // the table view's "No live sessions. After a reboot, run ccwatch resume."
+  // would be an invented claim about a read that never landed (principle VI).
+  check("F-F a payload with an error is never reported as an empty host",
+        A.feedCondition({sessions: [], error: "boom"}, null).empty === false);
+})();
+
+// alerts() — the set, and what is deliberately not in it.
+(function () {
+  // A-A: nothing wrong says nothing at all (principle XII). Not "all clear",
+  // not a zero count — no trigger for the page to render.
+  var quiet = A.alerts({cond: {trust: "ok", unreadable: 0, empty: false},
+                        host: null, volatile: true});
+  check("A-A a healthy feed on a healthy host produces no items and no trigger",
+        quiet.items.length === 0 && quiet.trigger === null, JSON.stringify(quiet));
+  check("A-A and a host below the pressure threshold is not an item either",
+        A.alerts({cond: {trust: "ok", unreadable: 0}, host: {pressure: false, swap_used_pct: 3},
+                  volatile: true}).items.length === 0);
+
+  // A-B: zero live sessions is a normal condition, not an alert. Each page
+  // states it where a reader looks for sessions; a control that lights up for
+  // an idle machine has lit up for nothing by the time a real one arrives.
+  var idle = A.alerts({cond: {trust: "ok", unreadable: 0, empty: true},
+                       host: null, volatile: true});
+  check("A-B an empty host is not an alert — no item and no trigger for it",
+        idle.items.length === 0 && idle.trigger === null, JSON.stringify(idle));
+
+  // A-C: the measurement travels with the verdict (principle II).
+  var down = A.alerts({cond: {trust: "feed_down", reason: "HTTP 503", dataAge: 125,
+                              unreadable: 0}, host: null, volatile: false});
+  check("A-C feed_down states the reason and the age of the data still on screen",
+        down.items[0].text.indexOf("HTTP 503") !== -1
+          && down.items[0].text.indexOf("2m") !== -1, down.items[0].text);
+  check("A-C and is severity bad",
+        down.items[0].sev === "bad", down.items[0].sev);
+  check("A-C a feed_down with no reason reported still says so, never \"undefined\"",
+        A.alerts({cond: {trust: "feed_down", dataAge: 1}, host: null, volatile: false})
+          .items[0].text.indexOf("undefined") === -1);
+
+  // A-D: the host-pressure numbers are VOLATILE readings. The pressure appears
+  // at its own threshold either way; the numbers behind it are withheld, not
+  // annotated, while the feed is not trusted (principle III).
+  var hot = A.alerts({cond: {trust: "ok", unreadable: 0}, host: HOST, volatile: true});
+  check("A-D host pressure with a trusted feed prints the swap and RAM figures",
+        hot.items[0].text.indexOf("92%") !== -1
+          && hot.items[0].text.indexOf("210MB RAM free") !== -1, hot.items[0].text);
+  check("A-D and what the sessions themselves account for",
+        hot.items[0].text.indexOf("1840MB") !== -1 && hot.items[0].text.indexOf("420MB") !== -1,
+        hot.items[0].text);
+  var hotStale = A.alerts({cond: {trust: "feed_down", reason: "x", dataAge: 5, unreadable: 0},
+                           host: HOST, volatile: false});
+  var pressureText = hotStale.items[1].text;
+  check("A-D an untrusted feed still reports the pressure",
+        pressureText.indexOf("host under memory pressure") === 0, pressureText);
+  check("A-D but withholds every number rather than annotating a stale one",
+        pressureText.indexOf("92") === -1 && pressureText.indexOf("210") === -1
+          && pressureText.indexOf("1840") === -1
+          && pressureText.indexOf("withheld") !== -1, pressureText);
+  check("A-D and either way says a killed session looks like a clean exit",
+        hot.items[0].text.indexOf("looks exactly like a clean exit") !== -1
+          && pressureText.indexOf("looks exactly like a clean exit") !== -1);
+
+  // A-E: additive, and never printed as a zero.
+  check("A-E unreadable registry files are their own item, with the command to run",
+        A.alerts({cond: {trust: "ok", unreadable: 3}, host: null, volatile: true})
+          .items[0].text === "3 registry file(s) could not be read — run: ccwatch doctor");
+  check("A-E zero, null and absent unreadable counts produce no item at all",
+        A.alerts({cond: {trust: "ok", unreadable: 0}, host: null, volatile: true}).items.length === 0
+          && A.alerts({cond: {trust: "ok", unreadable: null}, host: null, volatile: true}).items.length === 0
+          && A.alerts({cond: {trust: "ok"}, host: null, volatile: true}).items.length === 0);
+
+  // A-F: warming is not a failure, and must not be dressed as one — it says
+  // the view has nothing behind it yet.
+  var warm = A.alerts({cond: {trust: "warming", unreadable: 0}, host: null, volatile: false});
+  check("A-F warming is an item, at severity info rather than bad or warn",
+        warm.items.length === 1 && warm.items[0].sev === "info", JSON.stringify(warm.items));
+
+  // A-G: order is by severity, worst first, and is carried as a field because
+  // the map reconciles these nodes by key and never moves one.
+  var all = A.alerts({cond: {trust: "feed_down", reason: "boom", dataAge: 10, unreadable: 4},
+                      host: HOST, volatile: false});
+  check("A-G the set is ordered worst first: feed, host, then unreadable rows",
+        keys(all).join(",") === "feed_down,host_pressure,unreadable", keys(all).join(","));
+  check("A-G and every item carries its rank as a field, not just its position",
+        all.items.map(function (i) { return i.order; }).join(",") === "0,1,2");
+  check("A-G every sev is one the CSS knows, never a number",
+        all.items.every(function (i) { return A.SEV_RANK[i.sev] !== undefined; }),
+        JSON.stringify(all.items.map(function (i) { return i.sev; })));
+
+  // A-H: the items are pairwise distinct and share no leading clause, the same
+  // discipline the modal's five renderings are held to — "the feed is gone" and
+  // "the host is out of memory" must never be mistaken for each other mid-read.
+  (function () {
+    var seen = texts(all).concat(texts(warm));
+    var clash = null;
+    for (var i = 0; i < seen.length; i++) {
+      for (var j = i + 1; j < seen.length; j++) {
+        if (seen[i] === seen[j]) clash = "identical: " + seen[i];
+        else if (seen[i].slice(0, 12) === seen[j].slice(0, 12))
+          clash = "same opening: " + seen[i].slice(0, 12);
+      }
+    }
+    check("A-H no two alert sentences are equal or share a leading clause",
+          clash === null, clash || "");
+  })();
+})();
+
+// triggerOf — the collapsed control. This is the part that has to carry a
+// failure without the panel being open, or the whole change would have turned
+// a stated failure into an absence (principle IV).
+(function () {
+  check("T-A no items means no trigger, so the control is absent rather than reassuring",
+        A.triggerOf([]) === null);
+
+  var one = A.alerts({cond: {trust: "ok", unreadable: 0}, host: HOST, volatile: true}).trigger;
+  check("T-B a single alert names the condition in words, never a bare count",
+        one.text.indexOf("host under memory pressure") !== -1
+          && one.text.indexOf("1 alert") === -1, one.text);
+  check("T-B and carries no +N when it is the only one",
+        one.text.indexOf("+") === -1, one.text);
+  check("T-B and a \"!\" so the severity survives NO_COLOR and a mono screen",
+        one.text.indexOf("!") === 0, one.text);
+
+  var two = A.alerts({cond: {trust: "feed_down", reason: "boom", dataAge: 3, unreadable: 0},
+                      host: HOST, volatile: false}).trigger;
+  check("T-C with several, the trigger names the WORST one, not the first read",
+        two.text.indexOf("the feed is down") !== -1, two.text);
+  check("T-C and counts the rest as +N",
+        two.text.indexOf("+1") !== -1, two.text);
+  check("T-C taking its severity from that worst item",
+        two.sev === "bad", two.sev);
+  // ⚠️ The visible text is ellipsised by the slot's width and "+1" is an
+  // abbreviation regardless, so the accessible name spells the whole set out.
+  check("T-D the accessible name lists every headline, not just the worst",
+        two.label.indexOf("the feed is down") !== -1
+          && two.label.indexOf("host under memory pressure") !== -1, two.label);
+  check("T-D and counts them, in agreement with the visible +N",
+        two.label.indexOf("2 alerts") === 0, two.label);
+  check("T-D a single alert is announced in the singular",
+        one.label.indexOf("1 alert:") === 0, one.label);
+
+  var warmTrigger = A.alerts({cond: {trust: "warming", unreadable: 0},
+                              host: null, volatile: false}).trigger;
+  check("T-E an info-level condition carries no \"!\" — it is not a failure",
+        warmTrigger.text.indexOf("!") === -1 && warmTrigger.sev === "info",
+        warmTrigger.text);
+})();
+
+// C-J's other half, moved here from the roster section with the sentences it
+// is about (contracts/roster-js.md §8). The roster's tombstone and the alert
+// control's sentences describe different facts - "that session is gone" and
+// "the feed is gone" - and a reader must never take one for the other
+// mid-read.
+//
+// ⚠️ Not guarded by a `typeof` test. The version in the roster section was
+// `if (typeof R.statements === "function")`, so when statements() was deleted
+// it reported nothing at all rather than failing: a check that goes quiet
+// instead of red is worse than no check. Here the module is required outright,
+// so a missing goneText is a failure.
+(function () {
+  var R = require(process.argv[3]);
+  var gone = R.goneText("s1", "alpha");
+  var goneLead = gone.split(" ").slice(0, 3).join(" ");
+  var everySentence = [];
+  [{cond: {trust: "feed_down", reason: "boom", dataAge: 9, unreadable: 3}, host: HOST},
+   {cond: {trust: "warming", unreadable: 0}, host: null}].forEach(function (input) {
+    input.volatile = false;
+    texts(A.alerts(input)).forEach(function (t) { everySentence.push(t); });
+  });
+  var clash = everySentence.filter(function (t) {
+    return t.split(" ").slice(0, 3).join(" ") === goneLead;
+  });
+  check("C-J the roster's tombstone shares no leading clause with any alert sentence",
+        everySentence.length > 0 && clash.length === 0,
+        clash.join(" | ") || (everySentence.length + " sentences compared"));
+})();
+
+process.stdout.write(out.join("\n") + "\n");
+ALERTSJS
+
+  while IFS='|' read -r status name detail; do
+    [ -z "$status" ] && continue
+    if [ "$status" = "PASS" ]; then
+      t_pass "$name"
+    else
+      t_fail "$name" "$detail"
+    fi
+  done < <(node "$WORK/alerts-check.js" "$ROOT/web/alerts.js" "$ROOT/web/roster.js" 2>&1)
+else
+  t_skip "alerts module" "node not installed"
+fi
+
+# Both pages load the module, and neither keeps a banner element that could
+# reflow the page under a condition. Static, so it holds with no node and no
+# browser. ⚠️ The element ids are what is asserted, not the CSS: a grep for a
+# declaration is the check that once failed on the comment explaining the
+# declaration (see the mutation table in README.md).
+for _pf in "$ROOT/web/index.html" "$ROOT/web/map.html"; do
+  assert_contains "$(cat "$_pf")" '<script src="/alerts.js">' \
+    "$_pf loads the shared alert module"
+  assert_eq "$(grep -c 'id="hostwarn"' "$_pf")" "0" \
+    "$_pf has no block-level host-pressure banner left to push the page down"
+  assert_contains "$(cat "$_pf")" 'id="alertslot"' \
+    "$_pf carries the alert slot in its header"
+  # ⚠️ The slot's size must not depend on its content, or the trigger's
+  # arrival re-wraps the header — the same reflow, moved up one element. It
+  # must also not be a fixed width: a 234px reservation wrapped the header by
+  # itself, measured 52px -> 86px, which is a constant cost in place of an
+  # intermittent one. `flex:1 1 0` is both: it asks for nothing and grows into
+  # what the line has left. The geometric consequence is what verify-ui
+  # asserts; this is the declaration that produces it.
+  assert_contains "$(cat "$_pf")" '#alertslot { flex:1 1 0; min-width:12ch;' \
+    "and sizes the slot from the header's free space, not from what it holds"
+done
+# One judgement of the feed, in the module, for both pages (principle XI).
+assert_eq "$(grep -c 'function computeFeedCondition' "$ROOT/web/map.html")" "0" \
+  "map.html no longer keeps a trust model of its own"
+assert_contains "$_maphtml" 'CCWATCH_ALERTS.feedCondition' \
+  "and reads the shared one"
+assert_contains "$(cat "$ROOT/web/index.html")" 'CCWATCH_ALERTS.feedCondition' \
+  "as does the table view, which used to decide it a second way in its own try/catch"
+
+
+# =============================================================== usage-module ===
+printf '\nusage-module\n'
+#
+# web/usage.js is the usage meter's arithmetic: how much of a window has
+# elapsed, and when it resets in Eastern wall-clock time. In its own file for
+# the reason the other web modules are: so these assertions can require() it
+# under node, without a browser.
+if command -v node >/dev/null 2>&1; then
+  cat > "$WORK/usage-check.js" <<'USAGEJS'
+var U = require(process.argv[2]);
+var out = [];
+function check(name, cond, detail) {
+  out.push((cond ? "PASS|" : "FAIL|") + name + "|" + (detail || ""));
+}
+var NOW = 1789700000;
+var H = 3600;
+
+(function () {
+  check("seed require(usage.js) succeeds and exports an object",
+        typeof U === "object" && U !== null, typeof U);
+})();
+
+// elapsedPct — the second bar's length, and the four ways it is unknowable.
+(function () {
+  check("U-A two hours left of a five-hour window is 60% elapsed",
+        U.elapsedPct("five_hour", NOW + 2 * H, NOW) === 60,
+        String(U.elapsedPct("five_hour", NOW + 2 * H, NOW)));
+  check("U-A and three days left of the seven-day window is 57%",
+        Math.round(U.elapsedPct("seven_day", NOW + 3 * 86400, NOW)) === 57,
+        String(U.elapsedPct("seven_day", NOW + 3 * 86400, NOW)));
+  // ⚠️ Each of these is null, not 0. A bar drawn at 0% reads as "the window
+  // just started", which is a measurement nobody took (principle VI).
+  check("U-B no reset instant means no elapsed fraction at all",
+        U.elapsedPct("five_hour", null, NOW) === null
+          && U.elapsedPct("five_hour", undefined, NOW) === null);
+  check("U-C a window this module does not know the length of yields null, never a guess",
+        U.elapsedPct("thirty_day", NOW + H, NOW) === null);
+  check("U-D a reset instant already past yields null — that window has ended",
+        U.elapsedPct("five_hour", NOW - 1, NOW) === null
+          && U.elapsedPct("five_hour", NOW, NOW) === null);
+  check("U-E a reset further out than the window is clamped to 0, never negative",
+        U.elapsedPct("five_hour", NOW + 9 * H, NOW) === 0,
+        String(U.elapsedPct("five_hour", NOW + 9 * H, NOW)));
+  check("U-F a non-numeric reset instant yields null rather than NaN",
+        U.elapsedPct("five_hour", "soon", NOW) === null);
+})();
+
+// resetClock — Eastern, with the abbreviation, and honest about daylight saving.
+(function () {
+  var july = Date.parse("2026-07-04T19:45:00Z") / 1000;
+  var january = Date.parse("2026-01-04T19:45:00Z") / 1000;
+  check("U-G the reset instant is stated as an Eastern wall clock",
+        U.resetClock(july) === "3:45 PM EDT", String(U.resetClock(july)));
+  // ⚠️ The same UTC instant is an hour apart in the two halves of the year,
+  // and the abbreviation is what tells the reader which. A clock time without
+  // one is ambiguous for half the year — and jq's strflocaltime got this
+  // wrong, which is why bin/ccwatch uses `date -r` (see reset_clock there).
+  check("U-G and follows daylight saving, naming EST in winter",
+        U.resetClock(january) === "2:45 PM EST", String(U.resetClock(january)));
+  check("U-H a missing or non-numeric instant has no clock, rather than a wrong one",
+        U.resetClock(null) === null && U.resetClock(undefined) === null
+          && U.resetClock("later") === null);
+})();
+
+// gauge — one window's model.
+(function () {
+  var ahead = U.gauge("five_hour", "5h", {used_percentage: 78.9, resets_at: NOW + 4 * H}, NOW);
+  check("U-I the used percentage is floored, not rounded up",
+        ahead.usedText === "78%", ahead.usedText);
+  check("U-I and carries its own subject for a screen reader, which cannot read a bar",
+        ahead.usedLabel === "78% of the 5h limit used"
+          && ahead.elapsedLabel === "20% of the 5h window elapsed",
+        ahead.usedLabel + " | " + ahead.elapsedLabel);
+  check("U-J 78% used against 20% elapsed is reported as ahead of the clock",
+        ahead.pace === "ahead", String(ahead.pace));
+  var behind = U.gauge("five_hour", "5h", {used_percentage: 10, resets_at: NOW + 1 * H}, NOW);
+  check("U-J 10% used against 80% elapsed is not — and says nothing at all",
+        behind.pace === null, String(behind.pace));
+  var level = U.gauge("five_hour", "5h", {used_percentage: 60, resets_at: NOW + 2 * H}, NOW);
+  check("U-J and neither is consumption exactly level with the clock",
+        level.pace === null, String(level.pace));
+  // ⚠️ No elapsed fraction means no pace: "ahead" would be a comparison
+  // against a number this module refused to produce two checks ago.
+  var noWindow = U.gauge("seven_day_opus", "7d opus", {used_percentage: 99}, NOW);
+  check("U-K a window with no reset instant has no time bar, no pace and no clock",
+        noWindow.elapsedPct === null && noWindow.pace === null
+          && noWindow.resetIn === null && noWindow.resetClock === null,
+        JSON.stringify(noWindow));
+  check("U-K but still reports what it does know — the consumption",
+        noWindow.usedText === "99%", noWindow.usedText);
+  var expired = U.gauge("five_hour", "5h", {used_percentage: 50, resets_at: NOW - 10}, NOW);
+  check("U-L a window whose reset has passed states no reset time either",
+        expired.resetIn === null && expired.resetClock === null,
+        JSON.stringify([expired.resetIn, expired.resetClock]));
+  check("U-M a window object with no percentage produces no gauge at all",
+        U.gauge("five_hour", "5h", {resets_at: NOW + H}, NOW) === null
+          && U.gauge("five_hour", "5h", null, NOW) === null);
+  check("U-N the relative time and the wall clock are both stated",
+        ahead.resetIn === "4h" && /(AM|PM) E[DS]T$/.test(ahead.resetClock),
+        ahead.resetIn + " / " + ahead.resetClock);
+})();
+
+// gauges — the set, in the header's own order, with nothing filled in.
+(function () {
+  var all = U.gauges({
+    five_hour: {used_percentage: 41, resets_at: NOW + H},
+    seven_day: {used_percentage: 12, resets_at: NOW + 86400},
+    seven_day_opus: {used_percentage: 3},
+  }, NOW);
+  check("U-O every window the payload reports gets a gauge, in the header's order",
+        all.map(function (g) { return g.key; }).join(",")
+          === "five_hour,seven_day,seven_day_opus",
+        all.map(function (g) { return g.key; }).join(","));
+  check("U-P a window absent from the payload is absent here, not zeroed",
+        U.gauges({five_hour: {used_percentage: 41}}, NOW).length === 1);
+  check("U-P and no usage at all is an empty set rather than three empty gauges",
+        U.gauges(null, NOW).length === 0 && U.gauges(undefined, NOW).length === 0);
+})();
+
+// band — the same thresholds the terminal and both views already use.
+(function () {
+  check("U-Q the bar's severity bands at 90 and 70, as a word the page maps to a colour",
+        U.band(90) === "bad" && U.band(89) === "warn" && U.band(70) === "warn"
+          && U.band(69) === "ok",
+        [U.band(90), U.band(89), U.band(70), U.band(69)].join(","));
+})();
+
+process.stdout.write(out.join("\n") + "\n");
+USAGEJS
+
+  while IFS='|' read -r status name detail; do
+    [ -z "$status" ] && continue
+    if [ "$status" = "PASS" ]; then
+      t_pass "$name"
+    else
+      t_fail "$name" "$detail"
+    fi
+  done < <(node "$WORK/usage-check.js" "$ROOT/web/usage.js" 2>&1)
+
+  # ⚠️ Two formatters of one instant, asserted to agree through the terminal's
+  # REAL rendering path rather than a helper called in isolation. The terminal
+  # cannot use web/usage.js and the browser cannot use `date -r`, so the same
+  # reset time is formatted twice — and jq's strflocaltime, the obvious third
+  # option, reported EST for an instant in September. Both sides of a
+  # daylight-saving boundary are checked, because that is the half of the year
+  # a wrong formatter is wrong in.
+  mkdir -p "$WORK/usage-home"
+  for _inst in 1783021500 1767551100; do
+    _js=$(node -e 'process.stdout.write(String(require(process.argv[1]).resetClock(Number(process.argv[2]))))' \
+          "$ROOT/web/usage.js" "$_inst" 2>/dev/null || true)
+    cat > "$WORK/usage-home/usage.json" <<EOF
+{"at": $(date '+%s'), "five_hour": {"used_percentage": 41, "resets_at": $_inst},
+ "seven_day_opus": {"used_percentage": 3}}
+EOF
+    # /dev/null as the liveness probe: no session is live, which is fine
+    # here — the usage line is printed above the table and before the "no live
+    # sessions" return, so this exercises it without depending on a fixture
+    # another section happens to have built.
+    _line=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS=/dev/null \
+      CCWATCH_HOME="$WORK/usage-home" NO_COLOR=1 "$CCWATCH" once 2>/dev/null | head -1)
+    assert_contains "$_line" "$_js" \
+      "the terminal's usage line states the reset instant $_inst as the page does ($_js)"
+  done
+  # ⚠️ And a window with no reset instant gets no clause at all, rather than
+  # "(resets ?)": the last fixture above carries seven_day_opus with no
+  # resets_at precisely so this can be checked against real output.
+  assert_not_contains "$_line" "7d-opus 3% (resets" \
+    "and a window with no reset instant carries no reset clause"
+else
+  t_skip "usage module" "node not installed"
+fi
+
+# Both pages load the module, and neither keeps a usage formatter of its own.
+for _pf in "$ROOT/web/index.html" "$ROOT/web/map.html"; do
+  assert_contains "$(cat "$_pf")" '<script src="/usage.js">' \
+    "$_pf loads the shared usage module"
+  assert_contains "$(cat "$_pf")" 'CCWATCH_USAGE.gauges(' \
+    "$_pf shapes its gauges from it rather than reading the payload directly"
+  # ⚠️ The clock bar must be driven by the module's null — branched on, in
+  # either direction — and never defaulted: `elapsedPct || 0` would draw a bar
+  # at 0%, which reads as "the window just started". Matched as a pattern
+  # rather than one spelling, because which way round the branch is written is
+  # not the property; that it exists is.
+  _elapsed_branch=$(grep -cE 'g\.elapsedPct [!=]= null' "$_pf" || true)
+  [ "$_elapsed_branch" -ge 1 ] \
+    && t_pass "$_pf draws the clock bar only when the elapsed fraction is known" \
+    || t_fail "$_pf draws the clock bar only when the elapsed fraction is known" \
+              "no branch on g.elapsedPct being null"
+  assert_not_contains "$(cat "$_pf")" 'elapsedPct ||' \
+    "and never defaults it to zero, which would read as a window that just started"
+  # ⚠️ The meter's height is reserved whether or not there is a reading in
+  # it. A usage reading is withheld whenever it goes stale or the feed stops
+  # being trusted, and it returns on the next good snapshot — measured on the
+  # map before this, the header was 89px with a reading and 52px without, so
+  # the board moved 37px on its own. verify-ui asserts the geometry on both
+  # views; this is the declaration that produces it.
+  assert_contains "$(cat "$_pf")" 'min-height:4.8em' \
+    "$_pf reserves the usage meter's height, so a withheld reading cannot move the page"
+  # And the header is a two-column grid, because the reservation alone left
+  # the WRAP state depending on the reading (127px with one, 90px without),
+  # and a row of its own then left an 85px gap under the title. Columns decide
+  # the layout up front: level with the title, and nothing wraps between them.
+  assert_contains "$(cat "$_pf")" 'grid-template-columns:minmax(0, 1fr) auto' \
+    "$_pf gives the meter a column of its own, level with the title"
+  assert_contains "$(cat "$_pf")" '<div class="hleft">' \
+    "and groups the title, the view switcher and the alert control in the other"
+done
+# reset_clock's own guard, in the one place it lives: an empty, null or
+# non-numeric instant has no clock rather than a wrong one. Checked at the
+# source level because the rendering path above can only reach it with real
+# instants, and "what does it do with rubbish" is the question that matters.
+_rcfn=$(sed -n '/^reset_clock() {/,/^}/p' "$ROOT/bin/ccwatch")
+assert_contains "$_rcfn" "''|null|*[!0-9]*) return 0;;" \
+  "reset_clock returns nothing for an empty, null or non-numeric instant"
+assert_contains "$_rcfn" "TZ=America/New_York date -r" \
+  "and formats with date -r, never jq, which reported the wrong zone here"
 
 
 # =============================================================== markdown ====

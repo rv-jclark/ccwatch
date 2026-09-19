@@ -15,6 +15,10 @@ web/map.html     the map view — a scrolling column of owner blocks, sessions
 web/md.js        markdown for the transcript inspector; escapes, never links
 web/roster.js    row shaping for the docked agent list beside the map
 web/modal.js     the per-agent inspector's own pure shaping
+web/alerts.js    the trust model both pages read, and the header alert set
+                 shaped from it — never a banner in the page's flow
+web/usage.js     the usage meter's arithmetic: how much of a window has gone,
+                 and when it resets (Eastern, via `date -r` — never jq)
 tests/run.sh     shellcheck + the assertion suite; the only test entry point
 ```
 
@@ -130,10 +134,16 @@ produced a specific wrong output that someone believed.
     invokes the commands the CLI does. Two renderings that compute status
     separately will eventually disagree, and there is no way to tell which is
     lying.
-12. **Normal conditions are silent.** A line that appears on every refresh to
-    say things are fine is a line people learn to skip, and then it is not
-    there when it matters. Warnings appear at a threshold and are absent below
-    it — not green, absent. The host-pressure line works this way.
+12. **Normal conditions are silent, and a warning never moves the content.** A
+    line that appears on every refresh to say things are fine is a line people
+    learn to skip, and then it is not there when it matters. Warnings appear at
+    a threshold and are absent below it — not green, absent. The host-pressure
+    line works this way. In the pages they are also *out of flow*: they were
+    block-level banners, and each arrival pushed the board down by up to 81px
+    of its 676 while somebody was reading it. A condition that comes and goes
+    on its own may not take the layout with it — but it still has to be stated
+    in words where it cannot be missed, because a collapsed "2 alerts" badge
+    turns a failure into an absence, which rule 4 forbids.
 13. **A change under `web/` is not done until it has been rendered and looked
     at.** Not "the assertions pass" — rendered, in a browser, and looked at,
     with `ccwatch verify-ui` and a screenshot. Every UI bug this project has

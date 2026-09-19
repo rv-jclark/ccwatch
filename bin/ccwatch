@@ -997,6 +997,30 @@ snapshot() {
 
 # ============================================================== rendering ====
 
+# reset_clock — an epoch second as an Eastern wall clock, e.g. "3:45 PM EDT".
+# Empty for an empty, null or unparseable input: a usage window with no reset
+# instant has no clock, and inventing one is worse than printing none.
+#
+# ⚠️ Eastern, not the reader's own zone, because that is what was asked for and
+# because a fixed zone means two people reading the same dashboard say the same
+# time out loud. The abbreviation is printed with it: EDT and EST are an hour
+# apart and a bare clock time is ambiguous for half the year.
+#
+# ⚠️ `date -r`, never jq. `TZ=America/New_York jq 'strflocaltime("%Z")'`
+# reported EST for an instant in September — measured against this function and
+# against the browser's Intl formatter, which agree with each other and not
+# with jq. tests/run.sh asserts that this and web/usage.js still agree, on both
+# sides of a daylight-saving boundary, because two formatters of one instant
+# will otherwise drift apart unseen.
+reset_clock() { # reset_clock <epoch-seconds>
+  case "${1:-}" in
+    ''|null|*[!0-9]*) return 0;;
+  esac
+  # %I is zero-padded and BSD date has no %-I, so the pad is stripped rather
+  # than relying on a GNU extension this platform does not have.
+  TZ=America/New_York date -r "$1" '+%I:%M %p %Z' 2>/dev/null | sed 's/^0//'
+}
+
 # write_roster — remember what was live. Called from the places that take a
 # snapshot for display, not from snapshot() itself, so that a --json consumer
 # reading the state does not rewrite history as a side effect.
@@ -1022,7 +1046,21 @@ render() {
   # Account-wide usage, above the table because it is the one fact that is not
   # about any single row. Absent until `ccwatch install-statusline` is wired,
   # and it says which rather than showing nothing.
+  #
+  # The reset instants are turned into Eastern wall clocks HERE, in one read,
+  # rather than inside the jq program below.
+  # ⚠️ Not with jq. `strflocaltime("%Z")` under TZ=America/New_York reported
+  # EST for an instant in September — measured against `date -r` and against
+  # the browser's own Intl formatter, which agree with each other (10:53 PM
+  # EDT) and disagree with jq. An hour wrong, half the year, on a number whose
+  # entire purpose is to be put in a calendar.
+  local r5 r7 r7o
+  IFS='	' read -r r5 r7 r7o <<<"$(printf '%s' "$snap" | jq -r \
+    '[(.usage.five_hour.resets_at // ""), (.usage.seven_day.resets_at // ""),
+      (.usage.seven_day_opus.resets_at // "")] | @tsv')"
   printf '%s' "$snap" | jq -r --argjson now "$(date '+%s')" \
+    --arg c5 "$(reset_clock "$r5")" --arg c7 "$(reset_clock "$r7")" \
+    --arg c7o "$(reset_clock "$r7o")" \
     --arg d "$_c_dim" --arg b "$_c_bold" --arg y "$_c_yellow" --arg r "$_c_red" --arg z "$_c_reset" \
     --argjson usage_stale "$CCWATCH_USAGE_STALE" '
     def dur(s): if s == null then "?"
@@ -1032,11 +1070,14 @@ render() {
       else                "\((s/86400)|floor)d" end;
     # A percentage is coloured by how close it is to the limit, not decoratively.
     def band(p): if p >= 90 then $r elif p >= 70 then $y else $z end;
-    def gauge(nm; x):
+    # The relative time is what you act on; the wall clock is what you put in
+    # a calendar. Both, when the clock could be formatted at all.
+    def gauge(nm; x; clock):
       if x == null then empty
       else "\($d)\(nm)\($z) \(band(x.used_percentage))\($b)\(x.used_percentage|floor)%\($z)"
            + ( if x.resets_at == null then ""
-               else " \($d)(resets \(dur(x.resets_at - $now)))\($z)" end )
+               elif clock == "" then " \($d)(resets \(dur(x.resets_at - $now)))\($z)"
+               else " \($d)(resets \(dur(x.resets_at - $now)) \u00b7 \(clock))\($z)" end )
       end;
     if .usage == null then
       "\($d)usage: not reporting — run: ccwatch install-statusline\($z)"
@@ -1046,9 +1087,9 @@ render() {
       "\($y)usage: last reading is \(dur(.usage.age)) old — not shown\($z)"
       + " \($d)(is the statusline still running? ccwatch doctor)\($z)"
     else
-      ( [ gauge("5h"; .usage.five_hour),
-          gauge("7d"; .usage.seven_day),
-          gauge("7d-opus"; .usage.seven_day_opus) ] | join("  ") )
+      ( [ gauge("5h"; .usage.five_hour; $c5),
+          gauge("7d"; .usage.seven_day; $c7),
+          gauge("7d-opus"; .usage.seven_day_opus; $c7o) ] | join("  ") )
       # The reading has an age, and past a minute it is stated rather than
       # presented as current.
       + ( if .usage.age > 60 then "  \($d)[\(dur(.usage.age)) old]\($z)" else "" end )
@@ -3190,11 +3231,22 @@ write_verify_harness() {
 <style>
   html, body { margin:0; background:#111; }
   /* A fixed frame size, so a proportion check means the same thing on every
-     machine that runs this. */
-  #frame { width:1180px; height:760px; border:0; display:block; }
+     machine that runs this.
+     ⚠️ BOTH frames. #frame2 was added without a width and inherited the
+     default 300x150, so the table view rendered at phone width and its
+     header measured 291px - a real failure with a misleading cause. A frame
+     with no size is a check measuring a layout nobody uses. */
+  #frame, #frame2 { width:1180px; height:760px; border:0; display:block; }
   #verify-out { color:#ddd; font:12px monospace; white-space:pre-wrap; }
 </style>
 <iframe id="frame" src="/map"></iframe>
+<!-- ⚠️ The table view gets a frame of its own. It went unlooked-at in a
+     browser for as long as this harness only drove /map, and what that cost
+     was a usage gauge whose name and percentages were built and never
+     attached: the page rendered two bars and a reset line under nothing at
+     all, with the whole suite green. A shared instrument needs looking at in
+     both places it is drawn. -->
+<iframe id="frame2" src="/"></iframe>
 <pre id="verify-out"></pre>
 <script>
 var out = [];
@@ -3467,6 +3519,361 @@ function run(doc, win) {
   check("no control floats over the board's content", obscured.length === 0,
         obscured.join(", "));
 
+  // 15 - the alert control must not be able to move the board, which is the
+  // entire reason it exists and is a question about boxes that nothing outside
+  // a browser can answer. The banners it replaced were measured pushing the
+  // board down 32px (feed down), 50px (host pressure) and 81px (both, plus an
+  // unreadable-registry line) out of 676 - arriving and clearing on their own
+  // while you read the figures underneath.
+  //
+  // Both states are FORCED here rather than waited for. verify-ui runs against
+  // the real ~/.claude, so whether this machine is swapping or its feed is
+  // healthy varies run to run, and a check that only measures the state it
+  // happened to find is the shape that has passed against three broken
+  // implementations in this file already.
+  var slot = doc.getElementById("alertslot");
+  var abtn = doc.getElementById("alertbtn");
+  var amodal = doc.getElementById("alertmodal");
+  var header = doc.querySelector("header");
+  if (!slot || !abtn || !amodal || !win.CCWATCH_ALERTS || !win.renderAlerts) {
+    bad("the alert control is on the page",
+        "missing: " + [!slot && "#alertslot", !abtn && "#alertbtn",
+                       !amodal && "#alertmodal", !win.CCWATCH_ALERTS && "CCWATCH_ALERTS",
+                       !win.renderAlerts && "renderAlerts"].filter(Boolean).join(", "));
+  } else {
+    var quietModel = win.CCWATCH_ALERTS.alerts(
+      {cond: {trust: "ok", unreadable: 0}, host: null, volatile: true});
+    var loudModel = win.CCWATCH_ALERTS.alerts({
+      cond: {trust: "feed_down", reason: "ECONNREFUSED", dataAge: 125, unreadable: 2},
+      host: {pressure: true, swap_used_pct: 92, swap_used_mb: 8100,
+             swap_total_mb: 9216, ram_free_mb: 210},
+      volatile: false,
+    });
+
+    win.renderAlerts(quietModel);
+    var quiet = {board: boxOf(board), header: boxOf(header)};
+    // A quiet machine has no control at all: not a green one, not an empty
+    // bordered box. visibility:hidden also keeps it out of the tab order.
+    check("no alert control is shown while there is nothing wrong",
+          win.getComputedStyle(abtn).visibility === "hidden"
+            && (abtn.textContent || "") === "",
+          "visibility " + win.getComputedStyle(abtn).visibility
+            + ", text " + JSON.stringify(abtn.textContent));
+
+    win.renderAlerts(loudModel);
+    var loud = {board: boxOf(board), header: boxOf(header)};
+    check("three live alerts do not move the board's top edge",
+          Math.round(loud.board.t) === Math.round(quiet.board.t),
+          "board top " + Math.round(quiet.board.t) + " -> " + Math.round(loud.board.t));
+    check("nor take any of the board's height",
+          Math.round(loud.board.h) === Math.round(quiet.board.h),
+          "board height " + Math.round(quiet.board.h) + " -> " + Math.round(loud.board.h));
+    check("nor re-wrap the header they sit in",
+          Math.round(loud.header.h) === Math.round(quiet.header.h),
+          "header height " + Math.round(quiet.header.h) + " -> " + Math.round(loud.header.h));
+    // ⚠️ A collapsed control that read "3 alerts" would have turned a stated
+    // failure into an absence, which is the one thing this tool may not do.
+    // What is asserted is the words, at a size somebody can read.
+    var tb = boxOf(abtn);
+    check("the trigger names the worst condition in words, not just a count",
+          (abtn.textContent || "").indexOf("the feed is down") !== -1,
+          JSON.stringify(abtn.textContent));
+    check("and is actually rendered, at a non-zero size",
+          tb.w > 0 && tb.h > 0 && win.getComputedStyle(abtn).visibility === "visible"
+            && onScreen(tb, vw, vh),
+          Math.round(tb.w) + "x" + Math.round(tb.h)
+            + ", visibility " + win.getComputedStyle(abtn).visibility);
+
+    abtn.click();
+    check("clicking it opens the panel", amodal.open, "the dialog did not open");
+    // The board must not move when the panel opens either - a popover that
+    // reflows the page on open is the banner again, one click later.
+    //
+    // ⚠️ Mutation-checking this one took three tries and the first two say
+    // something worth keeping: `position:static` on the dialog does NOT turn
+    // it red, and neither does `show()` in place of `showModal()`. A dialog in
+    // the top layer is out of flow whatever `position` says, and a non-modal
+    // dialog is still `position:absolute` by the UA sheet. It goes red only
+    // when the panel is BOTH non-modal and in flow - which is precisely what a
+    // hand-rolled <div> dropdown would be, and is the rewrite this guards.
+    var opened = boxOf(board);
+    check("and opening the panel does not move the board either",
+          Math.round(opened.t) === Math.round(quiet.board.t)
+            && Math.round(opened.h) === Math.round(quiet.board.h),
+          "board " + Math.round(quiet.board.t) + "/" + Math.round(quiet.board.h)
+            + " -> " + Math.round(opened.t) + "/" + Math.round(opened.h));
+    // Whole-view, in the sense check 2 means it: every alert in the model is
+    // drawn, not merely "an alert was drawn".
+    var aitems = [].slice.call(amodal.querySelectorAll(".alertitem"));
+    check("the panel lists every alert the model holds",
+          aitems.length === loudModel.items.length,
+          aitems.length + " rendered vs " + loudModel.items.length + " in the model");
+    var acollapsed = aitems.filter(function (el) {
+      var b = boxOf(el);
+      return b.w === 0 || b.h === 0 || win.getComputedStyle(el).display === "none";
+    });
+    check("and none of them is hidden or collapsed to nothing",
+          acollapsed.length === 0,
+          acollapsed.map(function (el) { return el.textContent.slice(0, 30); }).join(" | "));
+    // ⚠️ The measurement has to be IN the panel. Moving the verdict behind a
+    // control is only acceptable because the reading that produced it is one
+    // click away; a panel that repeated the headline would have lost it.
+    var panelText = amodal.textContent || "";
+    check("the measurements behind the verdicts are in the panel, not only the verdicts",
+          panelText.indexOf("ECONNREFUSED") !== -1 && panelText.indexOf("2m") !== -1
+            && panelText.indexOf("ccwatch doctor") !== -1,
+          JSON.stringify(panelText.slice(0, 160)));
+    // 258px of page scroll with an unreachable dialog below the fold is why
+    // this is asserted rather than assumed.
+    var pb = boxOf(amodal);
+    check("the panel is wholly inside the viewport",
+          pb.t >= tb.t && pb.t <= vh && pb.l >= 0 && pb.r <= vw + 1 && pb.b <= vh + 1,
+          "panel " + [pb.l, pb.t, pb.r, pb.b].map(Math.round).join(",")
+            + " in " + vw + "x" + vh + ", trigger bottom " + Math.round(tb.b));
+    // ⚠️ And anchored to the TRIGGER, which the check above cannot see. The
+    // UA stylesheet gives a dialog `left:0; right:0`; with only `right` set the
+    // box stays stretched from the left edge and max-width resolves it at x=0,
+    // so the panel rendered hard against the left of the window, 288px from
+    // the control that opens it. Every geometric check here passed, and a
+    // screenshot found it in a second.
+    check("and anchored to the trigger rather than to the window",
+          Math.abs(pb.r - tb.r) <= 16,
+          "panel right " + Math.round(pb.r) + " vs trigger right " + Math.round(tb.r));
+
+    abtn.click();
+    check("clicking it again closes the panel, leaving nothing rendered",
+          !amodal.open && boxOf(amodal).h === 0,
+          "open=" + amodal.open + ", height=" + boxOf(amodal).h);
+
+    // ⚠️ And again at a narrow width, because at this harness's 1180px the
+    // header has room to absorb the trigger whether or not its slot reserves
+    // any - so the check above passes with the reservation removed and cannot
+    // see the bug it describes. Measured: at 420px an unreserved slot wraps
+    // the gauges onto a second header line, which moves the board by the
+    // height of that line. The frame is put back afterwards so every check
+    // after this one measures the width they all assume.
+    var frame = document.getElementById("frame");
+    var wideWidth = frame.style.width || "1180px";
+    frame.style.width = "420px";
+    win.renderAlerts(quietModel);
+    var narrowQuiet = {board: boxOf(board), header: boxOf(header)};
+    win.renderAlerts(loudModel);
+    var narrowLoud = {board: boxOf(board), header: boxOf(header)};
+    check("and at 420px, where the header has no room to spare, still neither",
+          Math.round(narrowLoud.board.t) === Math.round(narrowQuiet.board.t)
+            && Math.round(narrowLoud.header.h) === Math.round(narrowQuiet.header.h),
+          "board top " + Math.round(narrowQuiet.board.t) + " -> "
+            + Math.round(narrowLoud.board.t) + ", header height "
+            + Math.round(narrowQuiet.header.h) + " -> " + Math.round(narrowLoud.header.h));
+    frame.style.width = wideWidth;
+
+    // Put the page back to whatever is actually true, rather than leaving a
+    // fabricated condition on screen for the screenshot pass.
+    win.renderAlerts(quietModel);
+  }
+
+  // 16 - the usage meter's two bars. The whole instrument is a comparison of
+  // two lengths, so what has to be true is geometric: both bars drawn, to the
+  // same scale, at widths that match the numbers beside them. A bar that
+  // ignores its percentage still renders, and every structure-only assertion
+  // passes against it.
+  //
+  // The usage state is POSED, for the same reason the alert states are: this
+  // runs against the real ~/.claude, where the statusline may never have
+  // reported and where a window may or may not carry a reset instant.
+  var gaugesEl = doc.getElementById("gauges");
+  if (!gaugesEl || !win.updateGauges || !win.CCWATCH_USAGE) {
+    bad("the usage meter is on the page",
+        "missing: " + [!gaugesEl && "#gauges", !win.updateGauges && "updateGauges",
+                       !win.CCWATCH_USAGE && "CCWATCH_USAGE"].filter(Boolean).join(", "));
+  } else {
+    var nowSec = Date.now() / 1000;
+    win.updateGauges({
+      age: 0, stale_after: 600,
+      // 78% of the limit against 20% of the clock: the bars must come out
+      // visibly different, and the longer one must be the consumption.
+      five_hour: {used_percentage: 78, resets_at: nowSec + 4 * 3600},
+      seven_day: {used_percentage: 12, resets_at: nowSec + 4 * 86400},
+      // No reset instant: this window's clock bar must be ABSENT, not zero.
+      seven_day_opus: {used_percentage: 3},
+    });
+    var gauges = [].slice.call(gaugesEl.querySelectorAll(".g-gauge"));
+    if (gauges.length === 0) {
+      // Withheld for a reason the page is entitled to have (an untrusted feed
+      // withholds every volatile reading), so this is a skip with the reason
+      // rather than a failure against a page doing its job.
+      skip("the usage meter draws a bar pair for every window reported",
+           "the posed usage was withheld - the feed this run is not trusted, "
+             + "so there is nothing to measure");
+    } else {
+      check("the usage meter draws a gauge for every window the payload reports",
+            gauges.length === 3, gauges.length + " of 3");
+      var usedBars = [].slice.call(gaugesEl.querySelectorAll(".g-used"));
+      var timeBars = [].slice.call(gaugesEl.querySelectorAll(".g-time"))
+        .filter(function (b) { return win.getComputedStyle(b).display !== "none"; });
+      check("with a consumption bar on each and a clock bar on the two that can have one",
+            usedBars.length === 3 && timeBars.length === 2,
+            usedBars.length + " consumption, " + timeBars.length + " clock");
+      // ⚠️ Absent, not zero-width. A clock bar at 0% for a window with no
+      // reset instant reads as "this window just started", which is nobody's
+      // measurement - and it is the kind of thing that looks fine in the DOM.
+      var opus = gauges[2];
+      var opusTime = opus.querySelector(".g-time");
+      check("and no clock bar at all for the window with no reset instant",
+            !opusTime || win.getComputedStyle(opusTime).display === "none",
+            opusTime ? "display is " + win.getComputedStyle(opusTime).display : "absent");
+      var collapsed = usedBars.concat(timeBars).filter(function (b) {
+        var bb = boxOf(b);
+        return bb.w === 0 || bb.h === 0;
+      });
+      check("no bar collapses to zero size", collapsed.length === 0,
+            collapsed.length + " of " + (usedBars.length + timeBars.length));
+      // ⚠️ One scale, or the comparison is meaningless: the two tracks must be
+      // the same width, so equal lengths mean equal percentages.
+      var tracks = gauges.map(function (g) { return Math.round(boxOf(g.querySelector(".g-used")).w); });
+      var fiveTrack = boxOf(gauges[0].querySelector(".g-used")).w;
+      var fiveTimeTrack = boxOf(gauges[0].querySelector(".g-time")).w;
+      check("the two bars of a gauge share one width, so their lengths are comparable",
+            Math.abs(fiveTrack - fiveTimeTrack) <= 1,
+            fiveTrack + "px vs " + fiveTimeTrack + "px");
+      check("and every gauge is drawn to that same scale",
+            tracks.every(function (w) { return Math.abs(w - tracks[0]) <= 1; }),
+            tracks.join(","));
+      // ⚠️ The fills must match the numbers. This is the check that a bar
+      // wired to the wrong field, or to a constant, cannot survive - and the
+      // one no amount of DOM structure can stand in for.
+      function fillPct(bar) {
+        var track = boxOf(bar).w;
+        var fill = boxOf(bar.firstChild).w;
+        return track > 0 ? (fill / track) * 100 : null;
+      }
+      var usedAt = fillPct(gauges[0].querySelector(".g-used"));
+      var timeAt = fillPct(gauges[0].querySelector(".g-time"));
+      check("the consumption bar is drawn at the percentage it reports",
+            usedAt != null && Math.abs(usedAt - 78) <= 2,
+            "drawn at " + (usedAt == null ? "?" : Math.round(usedAt)) + "% against 78%");
+      check("and the clock bar at the fraction of the window that has elapsed",
+            timeAt != null && Math.abs(timeAt - 20) <= 2,
+            "drawn at " + (timeAt == null ? "?" : Math.round(timeAt)) + "% against 20%");
+      // The point of the pair: consumption ahead of the clock is visible as
+      // the longer bar, and is also said in words for anyone the lengths do
+      // not reach.
+      check("so consumption ahead of the clock is the longer bar",
+            usedAt > timeAt, Math.round(usedAt) + "% vs " + Math.round(timeAt) + "%");
+      check("and is stated in words, not left to the lengths alone",
+            (gauges[0].textContent || "").indexOf("ahead of the clock") !== -1,
+            JSON.stringify(gauges[0].textContent));
+      // Both times: the relative one to act on, the wall clock to put in a
+      // calendar, with the zone named because EDT and EST are an hour apart.
+      var resetText = (gauges[0].querySelector(".g-reset").textContent || "");
+      check("the reset is stated as a relative time and an Eastern wall clock",
+            /resets \d/.test(resetText) && /(AM|PM) E[DS]T/.test(resetText),
+            JSON.stringify(resetText));
+      // A bar is a length, and a length is not available to a screen reader.
+      var unlabelled = usedBars.concat(timeBars).filter(function (b) {
+        return !(b.getAttribute("aria-label") || "").match(/\d+% of the/);
+      });
+      check("every bar carries its reading as text for a screen reader",
+            unlabelled.length === 0, unlabelled.length + " without a labelled reading");
+
+      // ⚠️ And the meter must not move the board when a reading goes away. A
+      // usage reading is withheld whenever it goes stale or the feed stops
+      // being trusted, and it returns on the next good snapshot - measured
+      // before the reservation: header 89px with a reading, 52px without,
+      // so the board shifted 37px up and back down on its own. This is the
+      // banner problem one element over, and it needs the same assertion.
+      var usageStates = {};
+      [["reading", {age: 0, stale_after: 600,
+                    five_hour: {used_percentage: 78, resets_at: nowSec + 4 * 3600},
+                    seven_day: {used_percentage: 12, resets_at: nowSec + 4 * 86400},
+                    seven_day_opus: {used_percentage: 3}}],
+       ["stale", {age: 9999, stale_after: 600, five_hour: {used_percentage: 78}}],
+       ["absent", null]].forEach(function (pair) {
+        win.updateGauges(pair[1]);
+        usageStates[pair[0]] = {
+          header: Math.round(boxOf(header).h),
+          boardTop: Math.round(boxOf(board).t),
+          boardH: Math.round(boxOf(board).h),
+        };
+      });
+      var shapes = Object.keys(usageStates).map(function (k) {
+        return k + " " + usageStates[k].header + "/" + usageStates[k].boardTop
+          + "/" + usageStates[k].boardH;
+      });
+      check("a withheld usage reading does not move the board either",
+            usageStates.reading.header === usageStates.stale.header
+              && usageStates.reading.header === usageStates.absent.header
+              && usageStates.reading.boardTop === usageStates.absent.boardTop
+              && usageStates.reading.boardH === usageStates.absent.boardH,
+            shapes.join(" | "));
+      // ⚠️ And again at 1100px, which is chosen and not arbitrary. The header
+      // has two columns above 1000px and one below, and the width the meter's
+      // column reserves only matters in the two-column band - below it the
+      // columns stack and nothing sits beside the meter to be squeezed.
+      // Measured with the reservation removed: 108/92/92 at 1100px and
+      // 108/92/92 at 1020px, against 130/130/130 at 900px. A check at 900px
+      // was green through all of it, which is what a check in the wrong
+      // regime looks like.
+      //
+      // Not asserted at phone width, and that is a stated boundary rather
+      // than an oversight: there the three blocks wrap among themselves
+      // (248px with a reading against 187px without, at 420px) and reserving
+      // for that would be a header wider than the window. See web/map.html.
+      var frame900 = document.getElementById("frame");
+      var wide900 = frame900.style.width || "1180px";
+      frame900.style.width = "1100px";
+      // ⚠️ The title's own length is POSED here, and without that this check
+      // could not fail. What the width reservation prevents is the title
+      // re-wrapping when the meter's column narrows - so whether the bug
+      // reproduces depends on how long the title happens to be, which depends
+      // on how many sessions this machine is running. Measured: with the
+      // reservation removed the check stayed green against the real
+      // ~/.claude, and went red the moment the title was pinned to a length
+      // that wraps. A fixed string is the fixture.
+      var countsEl = doc.getElementById("counts");
+      var realCounts = countsEl ? countsEl.textContent : null;
+      if (countsEl) {
+        countsEl.textContent = " 6 live in 3 projects \u00b7 1 waiting on you \u00b7 3 suspect";
+      }
+      var narrowHeaders = [];
+      [{age: 0, stale_after: 600,
+        five_hour: {used_percentage: 78, resets_at: nowSec + 4 * 3600},
+        seven_day: {used_percentage: 12, resets_at: nowSec + 4 * 86400},
+        seven_day_opus: {used_percentage: 3}},
+       {age: 9999, stale_after: 600, five_hour: {used_percentage: 78}},
+       null].forEach(function (u) {
+        win.updateGauges(u);
+        narrowHeaders.push(Math.round(boxOf(header).h));
+      });
+      check("and does not at 1100px either, where the column's width is what decides it",
+            narrowHeaders.every(function (h) { return h === narrowHeaders[0]; }),
+            "header heights: " + narrowHeaders.join(","));
+      if (countsEl && realCounts != null) { countsEl.textContent = realCounts; }
+      // ⚠️ And the header must not be wider than the window at phone width.
+      // The fix above reserves 45em for the meter's column, which is 585px -
+      // wider than a 420px window - and `body` is overflow:hidden, so the far
+      // end would be clipped and unreachable rather than scrollable. That is a
+      // failure presenting as an absence, and it was one media query away from
+      // shipping: every height check was green while it was true.
+      frame900.style.width = "420px";
+      win.updateGauges({age: 0, stale_after: 600,
+                        five_hour: {used_percentage: 78, resets_at: nowSec + 4 * 3600},
+                        seven_day: {used_percentage: 12, resets_at: nowSec + 4 * 86400},
+                        seven_day_opus: {used_percentage: 3}});
+      var de420 = doc.documentElement;
+      check("and at 420px the header does not overflow the window sideways",
+            de420.scrollWidth <= de420.clientWidth + 1,
+            de420.scrollWidth + "px of content in " + de420.clientWidth + "px");
+      frame900.style.width = wide900;
+      // And the meter is really the tall thing being reserved for, so the
+      // check above is guarding something rather than comparing two short
+      // headers that happen to match.
+      check("and the reservation is what makes that true, not a coincidence",
+            usageStates.reading.header >= 70,
+            "header is " + usageStates.reading.header + "px with a reading");
+    }
+  }
+
   // 14 - the key is reachable, and named rather than identified by a glyph.
   var keyBtn = doc.getElementById("keyhelp");
   check("the map key is behind a named control",
@@ -3479,8 +3886,79 @@ function run(doc, win) {
           km ? "did not open" : "#keymodal missing");
     if (km && km.open) { km.close(); }
   }
+}
 
-  done();
+// The table view, checked for the properties it shares with the map rather
+// than re-checking the map's own layout: the gauge is one instrument built by
+// two renderers, and "both renderers draw all of it" is the property.
+function runTable(doc, win) {
+  var gaugesEl = doc.getElementById("gauges");
+  if (!gaugesEl || !win.renderGauges || !win.CCWATCH_USAGE) {
+    bad("the table view's usage meter is on the page",
+        "missing: " + [!gaugesEl && "#gauges", !win.renderGauges && "renderGauges",
+                       !win.CCWATCH_USAGE && "CCWATCH_USAGE"].filter(Boolean).join(", "));
+    return;
+  }
+  var nowSec = Date.now() / 1000;
+  win.renderGauges({
+    age: 0, stale_after: 600,
+    five_hour: {used_percentage: 78, resets_at: nowSec + 4 * 3600},
+    seven_day: {used_percentage: 12, resets_at: nowSec + 4 * 86400},
+    seven_day_opus: {used_percentage: 3},
+  });
+  var gauges = [].slice.call(gaugesEl.querySelectorAll(".g-gauge"));
+  check("the table view draws a gauge for every window too",
+        gauges.length === 3, gauges.length + " of 3");
+  if (gauges.length === 0) { return; }
+  // ⚠️ The check the missing `appendChild` would have failed. A gauge is the
+  // numbers AND the bars: bars under no name and no percentage are an
+  // instrument with its scale cut off.
+  var first = gauges[0];
+  var headText = (first.querySelector(".g-head") || {textContent: ""}).textContent || "";
+  check("and each carries the window's name and both percentages above its bars",
+        headText.indexOf("5h") !== -1 && headText.indexOf("78%") !== -1
+          && headText.indexOf("20%") !== -1,
+        JSON.stringify(headText));
+  var hb = boxOf(first.querySelector(".g-head"));
+  check("with that head actually rendered, not built and left off the page",
+        hb.w > 0 && hb.h > 0 && onScreen(hb, doc.documentElement.clientWidth,
+                                         doc.documentElement.clientHeight),
+        Math.round(hb.w) + "x" + Math.round(hb.h));
+  var usedBar = first.querySelector(".g-used"), timeBar = first.querySelector(".g-time");
+  check("and both bars, to one scale",
+        !!usedBar && !!timeBar
+          && Math.abs(boxOf(usedBar).w - boxOf(timeBar).w) <= 1,
+        usedBar && timeBar
+          ? Math.round(boxOf(usedBar).w) + "px vs " + Math.round(boxOf(timeBar).w) + "px"
+          : "a bar is missing");
+  if (usedBar && timeBar) {
+    var uw = boxOf(usedBar.firstChild).w / boxOf(usedBar).w * 100;
+    var tw = boxOf(timeBar.firstChild).w / boxOf(timeBar).w * 100;
+    check("drawn at the percentages they report",
+          Math.abs(uw - 78) <= 2 && Math.abs(tw - 20) <= 2,
+          Math.round(uw) + "% / " + Math.round(tw) + "%");
+  }
+  // The same reservation, on the page whose gauge head went missing for want
+  // of anybody looking at it in a browser.
+  var tHeader = doc.querySelector("header");
+  var tShapes = [];
+  [[ "reading", {age: 0, stale_after: 600,
+                 five_hour: {used_percentage: 78, resets_at: nowSec + 4 * 3600},
+                 seven_day: {used_percentage: 12, resets_at: nowSec + 4 * 86400},
+                 seven_day_opus: {used_percentage: 3}}],
+   ["stale", {age: 9999, stale_after: 600, five_hour: {used_percentage: 78}}],
+   ["absent", null]].forEach(function (pair) {
+    win.renderGauges(pair[1]);
+    tShapes.push(Math.round(boxOf(tHeader).h));
+  });
+  check("a withheld usage reading does not move the table either",
+        tShapes.every(function (h) { return h === tShapes[0]; }),
+        "header heights: " + tShapes.join(","));
+
+  check("the table view's alert control is a control, not a banner in the flow",
+        !!doc.getElementById("alertslot") && !!doc.getElementById("alertmodal")
+          && !doc.getElementById("hostwarn"),
+        "#hostwarn present: " + !!doc.getElementById("hostwarn"));
 }
 
 document.getElementById("frame").addEventListener("load", function () {
@@ -3496,7 +3974,28 @@ document.getElementById("frame").addEventListener("load", function () {
     var ready = doc.querySelector("#boardinner .agent[data-sid]") && list && list.children.length > 0;
     if (ready || waited > 8000) {
       if (!ready) { bad("the map rendered at all", "no figures after 8s - see the server log"); }
-      try { run(doc, win); } catch (e) { bad("the harness ran without throwing", e && e.message); done(); }
+      try { run(doc, win); } catch (e) { bad("the harness ran without throwing", e && e.message); }
+      // The table view second, into the same output, so one run covers both
+      // renderers of the shared instrument. `done()` moves here: it publishes
+      // the results, and publishing before the second frame has been read
+      // would report a pass for checks that never ran.
+      var f2 = document.getElementById("frame2");
+      var waited2 = 0;
+      (function settle2() {
+        var d2 = f2.contentDocument, w2 = f2.contentWindow;
+        var ready2 = d2 && d2.getElementById("gauges") && w2 && w2.CCWATCH_USAGE;
+        if (ready2 || waited2 > 8000) {
+          if (!ready2) { bad("the table view rendered at all", "no #gauges after 8s"); }
+          else {
+            try { runTable(d2, w2); }
+            catch (e) { bad("the table harness ran without throwing", e && e.message); }
+          }
+          done();
+          return;
+        }
+        waited2 += 250;
+        setTimeout(settle2, 250);
+      })();
       return;
     }
     waited += 250;

@@ -92,11 +92,13 @@ The header shows how much of your rate limit you have used, and each session
 shows how full its context window is:
 
 ```
-5h 42% (resets 1h)   7d 18% (resets 3d)
+5h 42% (resets 1h · 3:45 PM EDT)   7d 18% (resets 3d · 1:12 PM EDT)
 
 NAME                  PROJECT            STATUS      AGE   CTX  LAST
 checkout-api-8e       checkout-api       ● busy      2h    18%  3s ago
 ```
+
+In a browser each window is drawn as **two stacked bars** instead — see below.
 
 These come from a feed Claude Code is **already pushing**: it hands its
 statusline command a JSON payload containing `rate_limits` (`five_hour`,
@@ -130,6 +132,87 @@ read as current no matter what is printed next to it, so a monitoring tool
 showing a confidently wrong number is worse than one showing none. The same
 rule already applied to the context gauge; it should have applied here from the
 start.
+
+#### Consumption against the clock, as two bars
+
+A single percentage does not answer the question people actually have. "78% of
+the five-hour limit used" is a crisis an hour in and spare capacity four hours
+in, and the payload gives no hint which — so the reader was left doing the
+arithmetic from a `(resets 1h)` in the corner.
+
+So each window in the browser draws two bars, stacked, to one scale:
+
+```
+5h  78% used · 20% elapsed
+    ████████████████░░░░░   ahead of the clock
+    ████░░░░░░░░░░░░░░░░
+    resets 3h · 5:45 PM EDT
+```
+
+The top bar is consumption, the bottom one is how much of the window has gone.
+One scale and one width, stacked rather than side by side, because the only
+question that matters — am I burning this faster than the clock — is then a
+comparison of two lengths and not a calculation. When the top bar is the longer
+one it also **says so in words**, because a length is not available to a screen
+reader and a colour is not a carrier of meaning on its own. Running *under* the
+clock says nothing at all: that is the normal condition, and a label that
+appears every time is a label people stop reading.
+
+The clock bar is **absent, not zero**, in three cases: a payload with no reset
+instant for that window, a window whose length `web/usage.js` does not know,
+and a reset instant already in the past. A bar drawn at 0% reads as "this
+window just started", which is a measurement nobody took — the `7d opus` window
+routinely arrives with no reset instant, and it shows one bar.
+
+The reset is stated **twice**: the relative time, which is what you act on, and
+the wall clock, which is what you put in a calendar. The wall clock is always
+**Eastern with its abbreviation** (`5:45 PM EDT`), not the reader's own zone,
+so two people looking at the same dashboard say the same time out loud, and so
+the half of the year when EDT and EST are an hour apart is not ambiguous.
+
+The meter's height is **reserved whether or not there is a reading in it**,
+which is not a detail. A usage reading is withheld the moment it goes stale
+(past `CCWATCH_USAGE_STALE`) or the feed stops being trusted, and it comes back
+on the next good snapshot — so before the reservation the header measured 89px
+with a reading and 52px without, and the board shifted **37px** up and back
+down on its own while nobody touched anything. That is the same defect as the
+banners, one element over, and `verify-ui` now asserts on both views that the
+header's height does not depend on whether a reading arrived.
+
+It took **four** goes, and each failed fix looked like the whole answer:
+
+| Attempt | What it fixed | What it left |
+|---|---|---|
+| `min-height` on the meter | a withheld reading no longer shortened its own row | the header still moved 127px → 90px: what changed was whether the blocks *wrapped onto a row of their own*, not the height of a row |
+| the meter gets its own row (`flex-basis:100%`) | the wrap no longer depended on the reading | an 85px gap under the title, which reads as a mistake — and is what prompted "too much padding on top of the status bar" |
+| a two-column grid | the meter sits level with the title, and nothing wraps between the columns | the meter's column was still sized to its contents: 576px with a reading, 297px without, so the *title* beside it re-wrapped — 108px against 92px at 1100px |
+| `min-width` on that column too | the column is the same width in every state, so nothing beside it re-wraps | the reservation is 45em, wider than a phone, so it is dropped where the columns stack |
+
+Both reservations are measured rather than chosen: 4.8em against a block of
+57.6px on the map and 64.0px in the table view, and 45em against a column of
+44.3em and 43.4em. The header now measures the same height in all three usage
+states — a reading, a withheld stale reading, and no usage at all — at every
+width from 1440px down to 900px.
+
+**Below roughly 1000px the columns stack, and below roughly 720px the
+guarantee stops.** The three blocks wrap among themselves there (248px with a
+reading against 187px without, at 420px), and stabilising it would mean a
+header wider than the window — which `body { overflow:hidden }` would clip,
+turning a reading into an absence. That is a worse trade than the shift, so the
+boundary is stated here and in the stylesheet rather than papered over.
+
+The assertion for this sits at **1100px**, not at the 900px it was first
+written against. The reserved width only matters in the two-column band; below
+1000px the columns stack and nothing sits beside the meter to be squeezed. At
+900px the check was green with the reservation removed — a check in the wrong
+regime, which is the same family of mistake as the six in the table below.
+
+That clock is formatted twice — `Intl` in the browser, `date -r` in the
+terminal — and **the suite asserts the two agree**, on both sides of a
+daylight-saving boundary. That is not ceremony: the obvious third option,
+`jq`'s `strflocaltime` under `TZ=America/New_York`, reported **EST for an
+instant in September**. An hour wrong, half the year, on the one number whose
+whole purpose is to be written down.
 
 ### Projects are repositories, not directory names
 
@@ -443,6 +526,82 @@ Unfinished runs lie in the territory they belong to, deploy badges sit in its
 header, and messages between sessions are drawn as arrows between the two
 figures — including across territories, which is the case worth seeing.
 
+### Warnings live in the header, because a banner moves the board
+
+Both views used to print each condition — the feed being down, the host
+swapping, registry files that could not be read — as a block-level banner
+between the header and the content. Each one appeared and cleared on its own
+schedule, because each is derived from a reading collected every couple of
+seconds, and every arrival pushed everything below it down. Measured on the map
+at 1180x760, against a board 676px tall:
+
+| On screen | Board top | Board height |
+|---|---|---|
+| nothing wrong | 52px | 676px |
+| feed down | 83px | 645px |
+| host under memory pressure | 102px | 626px |
+| both, plus unreadable registry files | 133px | 595px |
+
+So the map lost up to **81px — 12% of its height** — and every figure on it
+moved, while you were looking at the figures. A view whose geometry depends on
+whether the machine is swapping cannot be compared against itself from one
+glance to the next, which for a monitoring view is most of its value.
+
+The conditions now go to one control in the header, with the details in a
+popover anchored under it. What matters is what the collapsed control says:
+
+```
+ccwatch  8 live · 2 waiting on you   table | map   [! the feed is down +1]   5h 41%
+──────────────────────────────────────────────────────────────────────────────────
+(the board starts here, at the same y whatever the machine is doing)
+```
+
+It names the **worst live condition in that condition's own words**, and counts
+the rest as `+N`. A control reading "2 alerts" was the obvious design and is the
+wrong one: it turns a stated failure into an absence, which is the one thing
+this tool is not allowed to do. The `!` matches the terminal's own marker, so
+the severity survives `NO_COLOR` and a monochrome screen; the accessible name
+spells out the whole list, since `+1` is an abbreviation and the visible text is
+ellipsised at narrow widths. The measurement behind each verdict is in the
+popover — one click, not gone.
+
+Two things are deliberately **not** in it:
+
+- **Nothing, when nothing is wrong.** Not a green tick, not "0 alerts" — the
+  control is not rendered at all, and is out of the tab order and the
+  accessibility tree with it. A line that appears on every refresh to say
+  things are fine is a line people learn to skip.
+- **"No live sessions."** An idle machine is a normal condition, not a failure.
+  It is still stated in flow, where — there being no figures — there is nothing
+  below it to push down, and where a reader looking for sessions will find it.
+
+The slot the trigger sits in keeps its width whether or not it holds anything.
+That looks like waste and is not: the header's free space is there anyway,
+between the view switcher and the right-aligned gauges, and a slot that
+collapsed when the machine was quiet would let the trigger's *arrival* re-wrap
+the header at narrow widths — the same reflow, moved up one element. At 420px
+that is a whole header line.
+
+The popover is a `<dialog>` opened with `showModal()`, like the map key, rather
+than a hand-rolled dropdown: the focus move, the focus restore, Escape and a
+stacking context above everything come from the platform, and a closed
+`<dialog>` occupies nothing. It is positioned against its trigger's measured box
+at open time rather than at an offset from the top of the page, because this
+header wraps — a panel positioned against a guessed header height is the
+258px-below-the-fold bug in a smaller box.
+
+Both pages render this from one module, `web/alerts.js`, which also holds the
+trust model itself. The table view used to decide separately whether the feed
+could be believed — a `try/catch` that wrote its own sentence into the footer,
+below a table that is often longer than the screen. Two renderings that judge
+the same feed independently will eventually disagree, and a reader has no way
+to tell which of them is lying.
+
+`verify-ui` asserts the part of this that only a browser can answer: that the
+board's top edge and height are **identical** with three live alerts and with
+none, at 1180px and again at 420px where the header has no room to spare, and
+that opening the panel moves nothing either.
+
 ### The map is a scrolling list of blocks, not a camera over a world
 
 `/map` is a column of owner sections. Each owner holds a responsive grid of
@@ -651,8 +810,8 @@ validated on the way back in — and is *not* the same file `ccwatch resume` rea
 writes neither `~/.claude/ccwatch/roster.json` (the `write_roster` record) nor
 anything else under `~/.claude/ccwatch/`, only the browser's own storage. If
 the stored session has since left the machine's session list, the roster says
-so with its own sentence, worded so it shares no leading clause with any of
-`statements()`'s four failure sentences — "that session is gone" and "the feed
+so with its own sentence, worded so it shares no leading clause with any
+sentence the alert control can produce — "that session is gone" and "the feed
 is gone" describe different facts and must never be mistaken for each other
 mid-read. That tombstone pins above the row list, carries a real `<button>` to
 dismiss it, and never blocks the remaining rows from continuing to render.
@@ -662,32 +821,34 @@ lost entirely (`feed_down`) resolves to "unknown", never "gone" — a feed that
 cannot be read is not evidence that a session exited, only that this run has
 nothing to say about it either way.
 
-### The roster states when it cannot be believed, in four distinct sentences
+### The roster used to state its own trust, and no longer does
 
-The map's own trust model (`computeFeedCondition`) already decides, every
-tick, whether the payload is `ok`, `feed_down`, or `warming`, and whether
-`s.sessions` came back empty. `statements(cond)` reads that *same* object —
-never a second derivation of trust — and maps it to the roster's own wording,
-because two renderings that compute trust separately will eventually disagree,
-and there is no way to tell which one is lying:
+The roster had its own condition panel above the row list, rendering the same
+`FeedCondition` in a second set of words: "the feed is down: ECONNREFUSED —
+rows shown are 2m old", the warming sentence, the unreadable-registry count,
+and "No live sessions right now." It read the *same* `cond` object the rest of
+the page did, which was the right call at the time, and it is gone anyway.
 
-- **feed down** — the reason the read failed, and the measured age of the
-  rows still shown, because those rows are retained, not current.
-- **warming** — the first snapshot has not landed yet; no rows are listed at
-  all, because there is nothing yet to state an order over.
-- **N registry files unreadable** — additive, can accompany any of the other
-  three, and disappears the moment `cond.unreadable` is `0` or absent, never
-  printed as `"0 registry files"`.
-- **no live sessions** — stated only when the feed is `ok` and genuinely
-  reports zero sessions. This exclusion is enforced *inside* `statements()`
-  itself, not by its caller, so a warming or down tick can never be misread as
-  "nothing is running" — those are different facts.
+The reason is the header. With an alert control that is always on screen
+directly above the panel, the roster's copy meant one fact stated twice in two
+phrasings — two strings to keep in agreement, for a reader who has already read
+it — and the panel pushed the row list down every time a condition arrived,
+which is the reflow the banners were removed to stop. `web/alerts.js` owns
+those sentences now; `statements()` and its nine assertions were deleted rather
+than kept "just in case", because a second rendering that nothing reads is a
+second rendering that will drift.
 
-Nothing here is latched: `cond` is recomputed fresh every tick from the read
-outcome and the body, so a good snapshot right after a down one clears the
-statement and restores `ctx`/`mem` on that same repaint, through the same
-`VOLATILE` gate `applyFeed` already sets before calling `renderRoster` — one
-gate, read once, not two gates that could drift apart.
+What the roster still owns is the **tombstone** — "that session is gone" — and
+`resolveSelection`. Those are questions about *your selection*, not about the
+feed, and a session absent from a payload the map does not yet trust
+(`warming`) or has lost entirely (`feed_down`) still resolves to "unknown",
+never "gone": a feed that cannot be read is not evidence that a session exited.
+
+Nothing about the condition is latched anywhere: `cond` is recomputed fresh
+every tick from the read outcome and the body, so a good snapshot right after a
+down one clears the alert and restores `ctx`/`mem` on that same repaint,
+through the same `VOLATILE` gate `applyFeed` sets before it renders anything —
+one gate, read once, not two gates that could drift apart.
 
 ### The roster's width is yours, not the map's
 
@@ -758,7 +919,7 @@ the feed is trustworthy; otherwise it reports the feed and says nothing about
 where the session went. Announcing an exit on the strength of a failed read
 invents an event that may never have happened.
 
-The condition object is the same one the banner above the map and the roster
+The condition object is the same one the header's alert control and the roster
 read — `lastCond`, passed in, not recomputed. Two renderings that decide
 independently whether the feed can be trusted will eventually disagree, and a
 reader has no way to tell which of them is lying.
@@ -1197,16 +1358,8 @@ implementation broken in the specific way it describes:
 | let `validateSelection` accept a `sid` that is not session-id-shaped | 1 |
 | re-flip `persistence` back to `"ok"` after a throwing selection read/write | 2 |
 | let `saveSelection(setItem, null)` leave the previous sid's record in place | 1 |
-| word the tombstone with the same leading clause as a `statements()` sentence | 1 |
+| word the tombstone with the same leading clause as an alert sentence | 1 |
 | merge the selection ring into a status-appearance `.agent.*` rule instead of its own `.agent.selected .hit` | 1 |
-| drop the reason or the measured age from the feed-down sentence | 1 |
-| leak an age into the warming sentence | 1 |
-| hardcode the unreadable count instead of reading `cond.unreadable` | 1 |
-| treat `unreadable: 0` as truthy, printing "0 registry file(s)" | 1 |
-| always render the empty-sessions sentence regardless of `empty` | 1 |
-| drop the `trust === "ok"` gate `statements()` enforces on its own `empty` output | 2 |
-| leak the down/empty sentences into each other instead of keeping the four pairwise distinct | 1 |
-| drop `unreadable` when the feed is down, instead of keeping it additive | 1 |
 | word the tombstone with the same leading clause as the feed-down sentence | 1 |
 | move `renderRoster`'s call in `applyFeed` ahead of the `VOLATILE =` line | 1 |
 | toggle the selection class on a queried child (e.g. inside `.figart`) instead of on `g` itself | 2 |
@@ -1260,6 +1413,71 @@ implementation broken in the specific way it describes:
 | drop the directory path from a no-repo card's hover, leaving an ambiguous basename | 2 |
 | float the map-key button back over the board, where it covers whatever has scrolled under it | 1 (verify-ui) + 2 |
 | give any figure animation an interpolating timing function again (`ease-in-out`, `linear`, a `cubic-bezier`) instead of `step-end` | 2 |
+| drop the thrown reason, or the measured age of the retained data, from `feedCondition`'s `feed_down` | 2 |
+| leak a `dataAge` into the `warming` condition | 1 |
+| let a failed collection fall through `feedCondition` as healthy, or replace the collector's own error with a generic one | 4 |
+| report an errored payload as an empty host, so "No live sessions" is claimed about a read that never landed | 1 |
+| stop propagating `parse_failed` through `feedCondition` | 1 |
+| return a trigger for an empty alert set, so a quiet machine grows a control | 3 |
+| add `cond.empty` to the alert set, so an idle machine raises an alert | 1 |
+| report host pressure below its own threshold | 1 |
+| print the swap/RAM/session-share figures while the feed is untrusted, instead of withholding them | 3 |
+| drop the "a killed session looks exactly like a clean exit" clause from the pressure sentence | 1 |
+| treat `unreadable: 0`/`null` as truthy in the alert set, printing "0 registry file(s)" | 1 |
+| drop `ccwatch doctor` from the unreadable-rows sentence | 1 |
+| escalate `warming` from `info` to `bad`, so "taking the first snapshot" reads as a failure | 2 |
+| remove the severity sort, or the `order` field it writes, from the alert set | 2 |
+| make a `sev` a number the page's CSS cannot read | 2 |
+| give two alert sentences the same leading clause | 2 |
+| collapse the trigger to a bare count, or drop the `!` marker, so severity rests on colour alone | 5 |
+| pick the last alert read for the trigger instead of the worst | 1 |
+| drop the `+N` count, or print `+0` for a single alert | 2 |
+| let the trigger's accessible name list only the worst condition, or disagree with the visible count | 3 |
+| mark an `info` condition with the `!` a failure carries | 1 |
+| remove `web/alerts.js` from a page, or let either page keep a trust model of its own | 5 |
+| let the alert slot collapse when the machine is quiet, so the trigger's arrival re-wraps the header | 1 (verify-ui) + 2 |
+| give the loud state styling of its own that grows the header (the block banner, smaller) | 3 (verify-ui) |
+| leave the trigger hidden under a live condition, or show it on a quiet machine | 2 (verify-ui) |
+| render only the worst alert in the popover, or the headline in place of the measured sentence | 2 (verify-ui) |
+| hide a popover item with `display:none` | 1 (verify-ui) |
+| position the popover off the top of the viewport | 1 (verify-ui) |
+| make the popover neither modal nor out of flow — a hand-rolled `<div>` dropdown in all but name | 1 (verify-ui) |
+| stop the trigger opening the panel, or closing it again on a second click | 2 (verify-ui) |
+| invert `elapsedPct`, so the clock bar shows the time remaining rather than the time gone | 5 |
+| give a usage window the wrong length, or default an unknown one to five hours | 2 |
+| treat a missing reset instant as "the window just started" instead of unknowable | 3 |
+| report 100% elapsed for a window whose reset has already passed | 1 |
+| let a reset further out than the window length produce a negative elapsed fraction | 1 |
+| coerce a non-numeric reset instant rather than refusing it | 1 |
+| format the reset clock in UTC, or drop the zone abbreviation | 3 |
+| hand a null instant to the clock formatter | 1 |
+| round the used percentage up instead of flooring it | 1 |
+| strip the subject from a bar's accessible reading, leaving a bare "78%" | 1 |
+| report the pace from consumption alone, from `>=` instead of `>`, or never | 4 |
+| claim a pace for a window whose elapsed fraction is unknown | 1 |
+| print a reset time for a window whose reset has passed | 1 |
+| produce a gauge for a window carrying no percentage | 1 |
+| drop the relative time, leaving only the wall clock | 1 |
+| order the gauges by the payload instead of the header's own order | 1 |
+| fill an absent window in with an empty gauge | 1 |
+| remove `gauges()`'s null guard (throws, so the section fails loudly rather than passing) | all of them |
+| shift the bar's severity bands off 90/70 | 1 |
+| draw the consumption bar at a constant width, ignoring its percentage | 1 (verify-ui) |
+| wire the clock bar to the consumption number | 1 (verify-ui) |
+| draw a clock bar at zero rather than omitting it when the fraction is unknown | 1 (verify-ui) |
+| give the two bars of a gauge different widths, so their lengths are not comparable | 1 (verify-ui) |
+| leave the pace to the bar lengths alone, with no word for it | 1 (verify-ui) |
+| drop a bar's `aria-label`, leaving a length with no reading | 1 (verify-ui) |
+| drop the Eastern wall clock, leaving only the relative time | 1 (verify-ui) |
+| draw only the first usage window in the header | 1 (verify-ui) |
+| drop the meter's reserved height, so a withheld reading moves the page | 2 (verify-ui) + 2 |
+| reserve less height than the gauge block needs (4.5em against a 64px block) | 1 (verify-ui) |
+| build the table view's gauge head and never attach it, leaving bars under nothing | 3 (verify-ui) |
+| leave `#frame2` unsized in the harness, so the table view is measured at 300px | 1 (verify-ui) |
+| let the meter share the title's header row, so the reading decides whether it wraps | 1 (verify-ui) + 2 |
+| drop the meter column's reserved width, so a withheld reading narrows it and the title beside it re-wraps | 1 (verify-ui) |
+| keep that reservation at phone width, making the header wider than the window | 1 (verify-ui) |
+| write the narrow-width override as `.gauges` rather than `header .gauges`, so it loses to a later rule | 1 (verify-ui) |
 
 That last table is not decoration. Two of those mutations are bugs that were
 actually **in** the code and were found this way, and two entries started life
@@ -1303,6 +1521,28 @@ mutation that does not mutate looks exactly like a check that does not check.
 That is the argument for the rule above in its strongest form — the only way to
 know a check works is to watch it go red on purpose, and the only way to know
 the mutation works is to watch something go red because of it.
+
+The alert control and the usage meter added four more of the same kind, all
+four caught before they were trusted:
+
+| The check | Why it could not fail, and what it is now |
+|---|---|
+| "a warming payload states no data age" | the fixture was `{warming: true}` with no `collected_at`, so `dataAge` came out `null` whatever the branch did. The fixture now carries a snapshot instant on purpose, which is the only way the assertion can see the branch inheriting one |
+| "three live alerts do not re-wrap the header" | true at the harness's 1180px whether or not the slot reserves its width, because the header has room to absorb the trigger either way — it passed against an unreserved slot. There is now a second pass at 420px, where an unreserved slot wraps the gauges onto a second line |
+| "a withheld usage reading does not move the board", at 900px | 900px is below the header's stacking breakpoint, so the meter has nothing beside it to squeeze there and the reserved *width* plays no part. The check was green with that reservation removed; it now runs at 1100px, in the two-column band, with the title posed to a fixed length so the result does not depend on how many sessions the machine is running |
+| "opening the panel does not move the board" | no **single**-property mutation turns it red: a `<dialog>` in the top layer is out of flow whatever `position` says, and a non-modal dialog is still `position:absolute` by the UA sheet. It goes red only when the panel is both non-modal *and* in flow — which is exactly what a hand-rolled `<div>` dropdown is, and is the rewrite it guards. Recorded rather than deleted, because "this check can only fail one way" is worth knowing at the moment somebody changes that one way |
+
+The last is the case the rule's own wording covers: make a check report the
+failure you are looking for, **or establish that it can**. Two mutations that
+should have broken it did not, and the reason they did not is a fact about the
+platform that the next person to touch this will want.
+
+The third is the one worth generalising. A geometric check is only as good as
+the *regime* it measures in — a width where the thing under test does not
+participate, a title short enough not to wrap, a machine whose session count
+happens to fit — and a green check in the wrong regime is indistinguishable
+from a working page. Both usage-meter checks now pose their own inputs: the
+window's percentages, the reading's staleness, and the title's own length.
 
 Two flakes were found and fixed the same way: a backup-file count that depended
 on whether two writes landed in the same second, and a `serve` warm-up that
