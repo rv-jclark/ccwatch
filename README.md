@@ -22,6 +22,7 @@ UNFINISHED RUNS — stopped in the last 24h, and no live session is holding them
 ```
 
 ```bash
+ccwatch setup            # put it on PATH, once, from the checkout
 ccwatch                  # live table, refreshed until you quit (q / Ctrl-C)
 ccwatch once             # draw it once — safe in a pipe or a status bar
 ccwatch --json           # the same data, for scripting
@@ -1274,23 +1275,57 @@ branch and be presented as though it had been read.
 
 ```bash
 git clone https://github.com/rv-jclark/ccwatch.git
-ln -s "$PWD/ccwatch/bin/ccwatch" /usr/local/bin/ccwatch
-ccwatch doctor          # confirm it can read what it needs to read
+cd ccwatch && ./bin/ccwatch setup
 ```
 
-A symlink rather than a copy, so `git pull` upgrades it. `bin/ccwatch` runs from
-anywhere and finds `web/` relative to its own resolved path, so it does not
-matter where the clone lives.
+`setup` does one thing and tells you the rest. It symlinks `ccwatch` into the
+first writable of `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`
+(creating the first if it has to), **runs what it just installed** to prove the
+link works, says whether that directory is on your `PATH` and prints the line
+to add if it is not, and lists which optional tools are missing with what each
+absence costs. Running it twice is a no-op that says so.
 
-Optional, and each shows the exact change before making it:
+```
+ccwatch 1.1.0 /Users/you/code/ccwatch/bin/ccwatch
+
+  ✓ python3      Python 3.9.6
+  ✓ git         repository names come from the git remote
+  ! gh          absent — no deploy panel (brew install gh)
+
+✓ linked /Users/you/.local/bin/ccwatch -> /Users/you/code/ccwatch/bin/ccwatch
+✓ runs through the link (ccwatch 1.1.0)
+✓ /Users/you/.local/bin is on your PATH
+```
+
+`--bin-dir DIR` if you want it somewhere specific. **Do not run it under
+`sudo`** — it refuses an unwritable directory rather than asking you to, because
+the old instructions here said `/usr/local/bin`, which is root-owned on a stock
+Apple Silicon machine, and the reader's next move was a root-owned symlink to a
+file in their home directory.
+
+A symlink rather than a copy, so `git pull` upgrades it — and because `serve`
+finds `web/` relative to its own *resolved* path, a copy sitting alone in a bin
+directory cannot find the pages at all. `bin/ccwatch` runs from anywhere, so it
+does not matter where the clone lives.
+
+Then, optionally, and each shows its exact change and asks first:
 
 ```bash
-ccwatch install-hooks         # never miss a prompt that opened between polls
 ccwatch install-statusline    # wrap your statusline to report usage + context
+ccwatch install-hooks         # never miss a prompt that opened between polls
 ```
 
-For the menu bar item, symlink the plugin into SwiftBar's or xbar's plugin
-folder — see [In the menu bar](#in-the-menu-bar).
+And for the menu bar item, which `setup` prints the exact command for:
+
+```bash
+brew install --cask swiftbar
+ln -s "$PWD/extra/swiftbar/ccwatch.10s.sh" ~/Library/Application\ Support/SwiftBar/
+```
+
+`setup` deliberately does not run those three for you. Each already shows its
+own change and asks, and a second place asking the same question is a second
+place to keep honest; SwiftBar's plugin directory is not one this should guess
+at.
 
 ### Requirements
 
@@ -1305,8 +1340,11 @@ folder — see [In the menu bar](#in-the-menu-bar).
 ### Uninstall
 
 ```bash
-rm /usr/local/bin/ccwatch && rm -rf ~/.claude/ccwatch
+rm "$(command -v ccwatch)" && rm -rf ~/.claude/ccwatch
 ```
+
+That removes the symlink wherever `setup` put it, and the runtime state. The
+checkout itself is yours to delete.
 
 Hooks and the statusline wrapper, if you installed them, are entries in
 `~/.claude/settings.json` — remove the ones naming `ccwatch`. Every write is
@@ -1512,6 +1550,13 @@ implementation broken in the specific way it describes:
 | read the CPU cache with a per-value filter instead of slurping, so a poisoned cache stays poisoned | 3 |
 | drop the `$TMPDIR` template from `mktemp -d` in `resume`/`peers` | 1 sandboxed, 4 not (see below) |
 | fail rather than skip the orphan check on a host that refuses process enumeration | 1 (observed red before the guard was added) |
+| have `setup` copy `bin/ccwatch` instead of symlinking it | 5 |
+| have `setup` report success from the `ln` without running what it installed | 3 |
+| have `setup` clobber a plain file already at that path | 3 |
+| repoint an existing symlink even when the answer was no | 2 |
+| drop `setup`'s `PATH` check | 1 |
+| list an absent tool without saying what its absence costs | 1 |
+| have `setup` install the SwiftBar plugin rather than printing the path | 1 |
 | stop toggling `.selected`, so the selected row's figure carries no mark | 1 (verify-ui) |
 | leave the wire overlay unsized, so every wire is clipped to the SVG's default 300x150 | 1 (verify-ui) |
 | drop `--force-prefers-reduced-motion` from verify-ui's Chrome, so the reveal check races a compositor that virtual time never advances | 1 (verify-ui) |
@@ -1674,6 +1719,16 @@ reverting the template and watching which went red where.
 The lesson generalises past this one assertion: *where* a check can fail is a
 property of the host, not just of the code, and "I watched it go red" is only
 evidence for the host you watched it on.
+
+`setup` added one more, and it is the message-versus-behaviour trap in its
+purest form. "setup runs what it installed rather than reporting success from
+the `ln`" was written as a check that the words *runs through the link* appear
+in the output — which they do whether or not it ran anything, so faking the
+version string it compares left the assertion green. The claim needs a link
+that genuinely cannot run, and the realistic way to get one is a checkout that
+has lost its executable bit. That is not hypothetical: a
+`git update-index --cacheinfo 100644` did exactly that to this repository, and
+the symlink was correct in every other respect.
 
 The menu bar added two more, and the first is the plainest example of the kind
 in the whole file:

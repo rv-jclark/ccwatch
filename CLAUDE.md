@@ -37,9 +37,17 @@ served by the static fallback in `serve`, so it needs no route of its own.
 
 `bin/ccwatch` is organised in banner-commented sections — `collection`,
 `statusline`, `the join`, `rendering`, `bar`, `resume`, `events`, `transcript`,
-`pending asks`, `send`, `deploys`, `peers`, `serve`, `doctor`, `dispatch`. A new
-subcommand needs a `cmd_*` function, a line in the `case` in `dispatch`, and an
-entry in `usage()`.
+`pending asks`, `send`, `deploys`, `peers`, `serve`, `doctor`, `setup`,
+`dispatch`. A new subcommand needs a `cmd_*` function, a line in the `case` in
+`dispatch`, and an entry in `usage()`.
+
+`setup` is the install path and deliberately does **one** thing — the PATH
+symlink — then prints the rest. `install-hooks` and `install-statusline` each
+show their own change and ask first, and a second place asking the same
+question is a second place to keep honest. It verifies by RUNNING what it
+installed and comparing the version, because a symlink that exists proves
+nothing: it can point at a moved path or a file that has lost its executable
+bit, and the latter has happened here.
 
 `bar` is the third renderer of the same snapshot, after the terminal and the
 pages, and it exists as a subcommand for the reason `/api/state` invokes the

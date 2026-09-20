@@ -79,7 +79,9 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # which is one machine's configuration written into the suite.
 # Raised again by the `collectors` section: 20, all of which always run - they
 # need no port, no server and no optional tool.
-TALLY_FLOOR=393
+# And by `setup`: 24, likewise - it installs into a temp directory, so it needs
+# nothing the host might not have.
+TALLY_FLOOR=417
 TALLY_FLOOR_NODE=243
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -790,6 +792,143 @@ _none=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-u" CCWATCH_HOME="$WORK
         NO_COLOR=1 "$CCWATCH" once 2>&1)
 assert_contains "$_none" "install-statusline" "with no feed wired, the header says how to wire it"
 rm -f "$FH/sessions/9101.json"
+
+# =================================================================== setup ==
+printf '\nsetup\n'
+
+SUB="$WORK/setup-bin"
+setup_run() { # setup_run <bin-dir> [stdin]
+  printf '%s' "${2:-}" | CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$WORK/setup-cch" \
+    NO_COLOR=1 "$CCWATCH" setup --bin-dir "$1" 2>&1
+}
+
+mkdir -p "$SUB"
+_su=$(setup_run "$SUB")
+assert_contains "$_su" "linked" "setup links ccwatch into the directory it was given"
+# ⚠️ A symlink, never a copy. `git pull` is the documented upgrade path and a
+# copy silently stops receiving it — still working, at whatever version it was
+# copied at. It also breaks `serve`: bin/ccwatch finds web/ relative to its own
+# RESOLVED path, so a copy alone in a bin directory cannot find the pages.
+assert_eq "$(readlink "$SUB/ccwatch")" "$CCWATCH" \
+  "and it is a symlink to the checkout, not a copy of it"
+
+# ⚠️ Delivery is observed, not assumed (constitution VIII). A symlink that
+# exists proves nothing — it can point at a moved path, a file that lost its
+# executable bit, or a checkout whose web/ is gone. setup runs the thing it
+# just made and compares the version it reports.
+assert_contains "$_su" "runs through the link" "setup says it ran the link"
+assert_eq "$("$SUB/ccwatch" --version 2>/dev/null)" "$("$CCWATCH" --version)" \
+  "and the installed link really does report the same version"
+
+# ⚠️ The two above are message checks and neither can fail against a setup that
+# merely CLAIMS to have run the link — written the obvious way, faking the
+# version string it compares left both green, so they were coverage of nothing.
+# The claim needs a link that genuinely cannot run, and the realistic way to
+# get one is a checkout that lost its executable bit. That is not hypothetical:
+# a `git update-index --cacheinfo 100644` did it to this repository, and the
+# symlink was correct in every other respect.
+SUC="$WORK/setup-noexec-checkout"
+mkdir -p "$SUC/bin"
+cp "$CCWATCH" "$SUC/bin/ccwatch"
+chmod -x "$SUC/bin/ccwatch"
+SUB4="$WORK/setup-noexec-bin"
+mkdir -p "$SUB4"
+_sunoexec=$(printf '' | CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$WORK/setup-cch" \
+            NO_COLOR=1 bash "$SUC/bin/ccwatch" setup --bin-dir "$SUB4" 2>&1; echo "rc=$?")
+assert_contains "$_sunoexec" "does not run" \
+  "setup runs what it installed, and says so when the link cannot"
+assert_contains "$_sunoexec" "rc=1" "and that is a failure, not a note"
+assert_contains "$_sunoexec" "chmod +x" "with the fix named"
+
+# Running it again must not be an error, and must not stack a second install.
+_su2=$(setup_run "$SUB")
+assert_contains "$_su2" "already linked" "running setup twice reports the existing link"
+assert_eq "$(find "$SUB" -name 'ccwatch*' | wc -l | tr -d ' ')" "1" \
+  "and leaves exactly one entry behind, not two"
+
+# ⚠️ Stated, not guessed. An installer that says "installed" while the
+# directory is not on PATH has reported a success the reader cannot use, and
+# the symptom — `ccwatch: command not found` — reads as a failed install rather
+# than one missing line of shell config.
+assert_contains "$_su2" "NOT on your PATH" \
+  "a bin directory that is not on PATH is called out"
+assert_contains "$_su2" "export PATH=" "with the line that fixes it"
+# The other direction, so the check above is not satisfied by an installer that
+# always complains.
+_supath=$(printf '' | PATH="$SUB:$PATH" CLAUDE_CONFIG_DIR="$FH" \
+          CCWATCH_HOME="$WORK/setup-cch" NO_COLOR=1 "$CCWATCH" setup --bin-dir "$SUB" 2>&1)
+assert_contains "$_supath" "is on your PATH" "and a directory that IS on PATH is confirmed"
+assert_not_contains "$_supath" "NOT on your PATH" "rather than warned about anyway"
+
+# --- what is already there is not ours to destroy ---------------------------
+# A plain file at that path is somebody else's, possibly another install of
+# this tool. Clobbering it is not recoverable, so it is refused by name.
+SUB2="$WORK/setup-occupied"
+mkdir -p "$SUB2"
+printf 'not a symlink\n' > "$SUB2/ccwatch"
+_suocc=$(setup_run "$SUB2"; echo "rc=$?")
+assert_contains "$_suocc" "already exists and is not a symlink" \
+  "a plain file in the way is refused by name"
+assert_contains "$_suocc" "rc=1" "and refusing is a failure, not a silent no-op"
+assert_eq "$(cat "$SUB2/ccwatch")" "not a symlink" "and the file is left untouched"
+
+# A symlink pointing somewhere else is a question, not a refusal — it is most
+# likely an older checkout of this same tool — but answering no has to leave it
+# exactly as it was.
+SUB3="$WORK/setup-elsewhere"
+mkdir -p "$SUB3"
+ln -s /bin/echo "$SUB3/ccwatch"
+_suelse=$(setup_run "$SUB3" 'n
+')
+assert_contains "$_suelse" "points somewhere else" "a link to another target is reported"
+assert_eq "$(readlink "$SUB3/ccwatch")" "/bin/echo" "and declining leaves it alone"
+# ⚠️ And accepting actually repoints it. Without this the assertion above would
+# pass against a setup that could never repoint anything at all.
+_suyes=$(setup_run "$SUB3" 'y
+')
+assert_eq "$(readlink "$SUB3/ccwatch")" "$CCWATCH" "while accepting repoints it"
+assert_contains "$_suyes" "relinked" "and says so"
+
+# --- an absent optional tool costs something, and the line says what --------
+# ⚠️ "gh: not found" is not an answer; "no deploy panel" is. A dependency list
+# that only ticks boxes leaves the reader to guess what they lose, which is the
+# same failure as an unexplained absence anywhere else in this tool.
+# ⚠️ Posed by building a PATH that holds every directory ccwatch needs EXCEPT
+# the one gh lives in, rather than by a shim — `command -v` keeps searching
+# past a non-executable file, so a fake gh cannot make gh absent. The first
+# attempt set PATH to a directory holding only jq/awk/python3/git, which also
+# removed sed, date and readlink, so ccwatch could not start and the assertion
+# failed for a reason that had nothing to do with gh.
+_ghdir=""
+command -v gh >/dev/null 2>&1 && _ghdir=$(dirname "$(command -v gh)")
+_needdirs=$(for _t in jq awk python3 git sed date readlink cksum tr head cut od; do
+              _p=$(command -v "$_t" 2>/dev/null) && dirname "$_p"
+            done | sort -u)
+if [ -z "$_ghdir" ]; then
+  # An absence is the default here, so it is the PRESENT case that cannot be
+  # posed. Assert the half this host can show and skip the other with why.
+  assert_contains "$_su" "no deploy panel" \
+    "an absent gh is reported with what it costs, not just as absent"
+  t_skip "and a present one is confirmed" "gh is not installed on this host"
+elif printf '%s\n' "$_needdirs" | grep -qx "$_ghdir"; then
+  t_skip "an absent gh is reported with what it costs, not just as absent" \
+         "gh shares a directory with a tool ccwatch needs, so no PATH omits only gh"
+  assert_contains "$_su" "deploy panel available" "and a present one is confirmed"
+else
+  _sunogh=$(printf '' | PATH="$(printf '%s\n' "$_needdirs" | tr '\n' ':')" \
+            CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$WORK/setup-cch" NO_COLOR=1 \
+            "$CCWATCH" setup --bin-dir "$SUB" 2>&1)
+  assert_contains "$_sunogh" "no deploy panel" \
+    "an absent gh is reported with what it costs, not just as absent"
+  assert_contains "$_su" "deploy panel available" "and a present one is confirmed"
+fi
+
+# The menu bar plugin is pointed at rather than installed: its directory is
+# SwiftBar's, and setup has no business guessing whether that is where you
+# want it.
+assert_contains "$_su" "extra/swiftbar/ccwatch.10s.sh" \
+  "setup prints the plugin path rather than symlinking into SwiftBar itself"
+assert_contains "$_su" "install-statusline" "and names the optional steps it does not take"
 
 # ============================================================== collectors ===
 printf '\ncollectors\n'

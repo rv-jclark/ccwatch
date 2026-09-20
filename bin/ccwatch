@@ -4722,6 +4722,9 @@ USAGE
                            away
 
   ccwatch log [N]            recent hook events (needs install-hooks)
+  ccwatch setup              put ccwatch on your PATH and say what is left to
+                           do. Run it once, from the checkout.
+        --bin-dir DIR      install the symlink here instead of choosing
   ccwatch install-hooks      record "needs your input" events, so a prompt that
                            opens and closes between polls is never lost
   ccwatch install-statusline  wrap your statusline to report rate limits and
@@ -4782,6 +4785,168 @@ ENVIRONMENT
 EOF
 }
 
+# =============================================================== setup ======
+#
+# `ccwatch setup` — put the tool on PATH, then say what is left to do.
+#
+# What this does NOT do is install anything on your behalf beyond one symlink.
+# `install-hooks` and `install-statusline` each show their exact change and ask
+# first, and duplicating that consent here would mean two places to keep honest;
+# the SwiftBar plugin is a symlink into a directory this has no business
+# guessing at. So setup does the one step that is fiddly and prints the rest.
+#
+# The fiddly step is choosing where the symlink goes. The README said
+# /usr/local/bin for a long time, which on a stock Apple Silicon machine is
+# root-owned — so the documented install ended in `Permission denied` and the
+# reader's next move was `sudo`, which puts a root-owned symlink to a file in
+# their home directory on PATH. `~/.local/bin` is preferred here because it
+# needs no privileges, and whether it is on PATH is checked rather than assumed.
+setup_bin_dir() {
+  local d
+  # ⚠️ Ordered by how little damage a mistake does, not by convention.
+  # ~/.local/bin is per-user and needs no sudo; the Homebrew and /usr/local
+  # directories are shared, so they are only used when already writable.
+  for d in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin; do
+    if [ -d "$d" ] && [ -w "$d" ]; then printf '%s' "$d"; return 0; fi
+  done
+  # Nothing writable existed. Creating the per-user one is the only option that
+  # does not need privileges, and it is the one the reader can undo.
+  if mkdir -p "$HOME/.local/bin" 2>/dev/null; then
+    printf '%s' "$HOME/.local/bin"; return 0
+  fi
+  return 1
+}
+
+cmd_setup() {
+  local bindir="" self link cur reply
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --bin-dir) bindir="${2:-}"; shift 2 || exit 3;;
+      *) die "setup: unrecognised argument '$1'" \
+             "usage: ccwatch setup [--bin-dir DIR]";;
+    esac
+  done
+
+  self=$(resolved_self)
+  say "${_c_bold}ccwatch $CCWATCH_VERSION${_c_reset} ${_c_dim}$self${_c_reset}"
+  say ""
+
+  # --- what is present, and what that costs when it is not -----------------
+  # jq and awk are already guaranteed: `need` runs for both before dispatch,
+  # so this cannot be reached without them. The rest degrade rather than fail,
+  # and each line says what is lost so an absence is never just an absence.
+  local missing=0
+  if command -v python3 >/dev/null 2>&1; then
+    say "  ${_c_green}✓${_c_reset} python3      ${_c_dim}$(python3 --version 2>&1)${_c_reset}"
+  else
+    say "  ${_c_red}x${_c_reset} python3      ${_c_dim}no dashboard, no send, no date parsing${_c_reset}"
+    missing=$((missing + 1))
+  fi
+  if command -v git >/dev/null 2>&1; then
+    say "  ${_c_green}✓${_c_reset} git         ${_c_dim}repository names come from the git remote${_c_reset}"
+  else
+    say "  ${_c_yellow}!${_c_reset} git         ${_c_dim}absent — every session shows as 'no repo'${_c_reset}"
+  fi
+  if command -v gh >/dev/null 2>&1; then
+    say "  ${_c_green}✓${_c_reset} gh          ${_c_dim}deploy panel available${_c_reset}"
+  else
+    say "  ${_c_yellow}!${_c_reset} gh          ${_c_dim}absent — no deploy panel (brew install gh)${_c_reset}"
+  fi
+  say ""
+
+  # --- the symlink ----------------------------------------------------------
+  if [ -z "$bindir" ]; then
+    bindir=$(setup_bin_dir) || die "no writable directory to install into" \
+      "tried ~/.local/bin, /opt/homebrew/bin and /usr/local/bin — pass --bin-dir DIR"
+  fi
+  [ -d "$bindir" ] || mkdir -p "$bindir" 2>/dev/null \
+    || die "cannot create $bindir"
+  [ -w "$bindir" ] || die "$bindir is not writable" \
+    "pass --bin-dir DIR, or make it writable — do NOT run this under sudo"
+
+  link="$bindir/ccwatch"
+  # ⚠️ A symlink, never a copy. The documented upgrade path is `git pull`, and
+  # a copy silently stops receiving them — it would keep working, at whatever
+  # version it was copied at, which is the worst way for this to be wrong.
+  # It also matters for `serve`: bin/ccwatch finds web/ relative to its own
+  # RESOLVED path, so a copy sitting alone in a bin directory cannot find the
+  # pages at all.
+  if [ -L "$link" ]; then
+    cur=$(readlink "$link")
+    if [ "$cur" = "$self" ]; then
+      say "${_c_green}✓${_c_reset} already linked ${_c_dim}$link${_c_reset}"
+    else
+      say "${_c_yellow}!${_c_reset} $link already points somewhere else:"
+      say "    ${_c_dim}$cur${_c_reset}"
+      printf 'Repoint it at this checkout? [y/N] '
+      read -r reply
+      case "$reply" in
+        y|Y|yes|YES)
+          rm -f "$link" && ln -s "$self" "$link" || die "could not replace $link"
+          say "${_c_green}✓${_c_reset} relinked ${_c_dim}$link${_c_reset}";;
+        *) say "Left alone. ${_c_dim}Nothing else here depends on it.${_c_reset}";;
+      esac
+    fi
+  elif [ -e "$link" ]; then
+    # Refused rather than overwritten: this is somebody else's file, possibly
+    # another install of this tool, and clobbering it is not recoverable.
+    die "$link already exists and is not a symlink" \
+        "move it aside, or pass --bin-dir DIR to install elsewhere"
+  else
+    ln -s "$self" "$link" || die "could not create $link"
+    say "${_c_green}✓${_c_reset} linked ${_c_dim}$link -> $self${_c_reset}"
+  fi
+
+  # ⚠️ Delivery is observed, not assumed. A symlink that exists proves nothing:
+  # it can point at a path that has moved, a file without its executable bit,
+  # or a checkout whose web/ is gone. So it is RUN, through the link, and the
+  # version it reports is compared against the one doing the installing.
+  local got
+  got=$("$link" --version 2>/dev/null) || got=""
+  if [ "$got" = "ccwatch $CCWATCH_VERSION" ]; then
+    say "${_c_green}✓${_c_reset} runs through the link ${_c_dim}($got)${_c_reset}"
+  elif [ -n "$got" ]; then
+    warn "$link runs but reports '$got', not 'ccwatch $CCWATCH_VERSION'"
+    say "  ${_c_dim}another checkout may be shadowing it${_c_reset}"
+  else
+    die "$link was created but does not run" \
+        "is $self executable? try: chmod +x '$self'"
+  fi
+
+  # ⚠️ Stated, not guessed. An installer that says "installed" while the
+  # directory is not on PATH has reported a success the reader cannot use, and
+  # the symptom — `ccwatch: command not found` — reads as a failed install
+  # rather than as one missing line of shell config.
+  case ":$PATH:" in
+    *":$bindir:"*) say "${_c_green}✓${_c_reset} $bindir is on your PATH";;
+    *)
+      say ""
+      warn "$bindir is NOT on your PATH"
+      say "  ${_c_dim}add this to your shell profile, then open a new terminal:${_c_reset}"
+      say "    export PATH=\"$bindir:\$PATH\"";;
+  esac
+
+  say ""
+  say "${_c_bold}Try it${_c_reset}"
+  say "  ccwatch                    ${_c_dim}the live table${_c_reset}"
+  say "  ccwatch doctor             ${_c_dim}check it can read what it needs${_c_reset}"
+  say "  ccwatch serve --open       ${_c_dim}the same thing in a browser${_c_reset}"
+  say ""
+  say "${_c_bold}Optional, each asks first${_c_reset}"
+  say "  ccwatch install-statusline ${_c_dim}report rate limits and context fill${_c_reset}"
+  say "  ccwatch install-hooks      ${_c_dim}never miss a prompt between polls${_c_reset}"
+  local plugin
+  plugin=$(cd -- "$(dirname -- "$self")/.." && pwd)/extra/swiftbar/ccwatch.10s.sh
+  if [ -f "$plugin" ]; then
+    say ""
+    say "${_c_bold}Menu bar${_c_reset} ${_c_dim}(needs SwiftBar: brew install --cask swiftbar)${_c_reset}"
+    say "  ln -s '$plugin' \\"
+    say "     ~/Library/Application\\ Support/SwiftBar/"
+  fi
+  [ "$missing" -gt 0 ] && say "" && warn "$missing required tool(s) missing — see above"
+  return 0
+}
+
 # ============================================================== dispatch ====
 
 need jq "install with: brew install jq"
@@ -4794,6 +4959,7 @@ case "${1:-}" in
   resume)          shift; cmd_resume "$@";;
   hook)            shift; cmd_hook "$@";;
   log)             shift; cmd_log "${1:-30}";;
+  setup)           shift; cmd_setup "$@";;
   install-hooks)   cmd_install_hooks;;
   statusline)      shift; cmd_statusline "$@";;
   install-statusline) cmd_install_statusline;;
