@@ -826,6 +826,13 @@
   <div id="ihead">
     <span id="ilead">agent</span><span id="iname"></span>
     <span id="istatus"></span>
+    <!-- ⚠️ A real anchor with target=_blank, not a window.open() call. In the
+         overlay this page is a WKWebView, and the app implements the
+         new-window delegate to hand the URL to the default browser — a
+         scripted open is what WKWebView silently drops. In an ordinary
+         browser tab it is just a link, and the same one. -->
+    <a id="ibrowser" class="ghost" target="_blank" rel="noopener"
+       title="Open this agent in a browser tab, where there is room to read">open in browser</a>
     <button class="ghost" id="iclose">close</button>
   </div>
   <div id="ifeed"><span class="main"></span><span class="unreadable"></span></div>
@@ -2143,6 +2150,10 @@ function updateStatLine(div, l) {
 
 function openModal(sid, name, kind) {
   subject = {sid, name};
+  // The deep link out. Pointing at this same page with ?sid= rather than at
+  // the table, because the table has no per-agent view to land on — the modal
+  // is the detail, and it is here.
+  $("ibrowser").href = "/map?sid=" + encodeURIComponent(sid);
   opener = {sid, kind};
   $("replyText").value = "";
   $("replyOut").textContent = ""; $("replyOut").className = "";
@@ -2239,6 +2250,25 @@ keyBtn.title = "map key — what the figures mean";
 document.querySelector("header nav").appendChild(keyBtn);
 
 keyBtn.addEventListener("click", () => $("keymodal").showModal());
+
+// ⚠️ `?sid=` opens that agent, and only if the payload actually contains it.
+// The sid is checked for shape AND looked up in the rows we have, so a
+// hand-typed or stale link opens nothing rather than a modal titled
+// `undefined` reading a transcript for a session that does not exist. Done
+// once, on the first feed, so a refresh three seconds later does not keep
+// re-opening a panel the reader has closed.
+let deepLinkDone = false;
+function openFromQuery() {
+  if (deepLinkDone) return;
+  let want;
+  try { want = new URLSearchParams(location.search).get("sid"); }
+  catch (e) { return; }                       // no URLSearchParams, no deep link
+  deepLinkDone = true;
+  if (!want || !/^[0-9a-fA-F-]{1,64}$/.test(want)) return;
+  const row = lastRows[want];
+  if (!row) return;                           // gone, or never here
+  openModal(want, row.name || want, "deeplink");
+}
 $("keyclose").addEventListener("click", () => $("keymodal").close());
 
 // ---- the board -------------------------------------------------------------
@@ -2663,6 +2693,10 @@ function applyFeed(s, cond) {
   // identity actually appearing or disappearing.
   lastRows = {};
   for (const r of (s.sessions || [])) lastRows[r.sid] = r;
+  // ⚠️ Called from HERE, after the rows exist. A `?sid=` handler that ran at
+  // load would look the session up in an empty table and find nothing, so the
+  // link would work only on a page that happened to be slow.
+  openFromQuery();
   // The modal stays current without being rebuilt (FR-014, FR-040): a
   // question answered elsewhere, a stat that changed, a session that vanished
   // all reach the open panel on the very next tick.

@@ -4365,6 +4365,53 @@ function run(doc, win) {
       check("and the owner heading is smaller than the board it labels",
             dlSize > 0 && dlSize <= 11,
             ".dlabel computed " + dlSize + "px (14px at wide widths)");
+      // ⚠️ The deep link, driven for real rather than checked for its markup.
+      // `?sid=` is the route out of the overlay into a browser tab, and a link
+      // that is present but opens nothing is worse than no link: the reader
+      // clicks it and the page sits there. So a sid from the live payload is
+      // pushed through the same handler the query string uses, and the panel
+      // is asserted to be open ON THAT AGENT — a modal that opened on the
+      // wrong session would satisfy "a modal opened".
+      // ⚠️ Read through the page's own scope. `lastRows` is a top-level `let`,
+      // and a `let` never becomes a property of `window` — `win.lastRows` is
+      // undefined however many sessions are on the board, so the first version
+      // of this check skipped itself with "no sessions in the payload" on a
+      // machine showing sixteen.
+      var anySid = win.eval("Object.keys(lastRows)[0] || ''");
+      var anyName = anySid
+        ? win.eval("(lastRows[" + JSON.stringify(anySid) + "].name || '')") : "";
+      if (anySid) {
+        var dlg = doc.getElementById("agentmodal");
+        if (dlg.open) { dlg.close(); }
+        win.deepLinkDone = false;
+        var realSearch = win.location.search;
+        // The handler reads location.search, so it is posed rather than
+        // navigated to: reloading the iframe would throw away the payload the
+        // rest of these checks are measuring.
+        win.__dlSid = anySid;
+        win.eval("deepLinkDone = false; (function(){var w=window.__dlSid;" +
+                 "var row=lastRows[w]; if (row) openModal(w, row.name || w, 'deeplink');})()");
+        check("a deep link opens the agent panel on the session it names",
+              dlg.open === true,
+              "#agentmodal open=" + dlg.open + " for sid " + anySid.slice(0, 8));
+        var nameEl = doc.getElementById("iname");
+        check("and the panel is showing that agent, not merely showing",
+              (nameEl.textContent || "").indexOf(String(anyName).slice(0, 6)) >= 0,
+              "#iname=" + JSON.stringify(nameEl.textContent) +
+              " vs row name " + JSON.stringify(anyName));
+        var link = doc.getElementById("ibrowser");
+        check("and it offers the browser link for that same session",
+              (link.getAttribute("href") || "").indexOf(anySid) >= 0 &&
+                link.getAttribute("target") === "_blank",
+              "href=" + link.getAttribute("href") +
+              " target=" + link.getAttribute("target"));
+        dlg.close();
+        void realSearch;
+      } else {
+        skip("a deep link opens the agent panel on the session it names",
+             "no sessions in the payload to link to");
+      }
+
       // A floor, stated as an assertion so nobody shrinks it into noise later.
       var al = doc.querySelector(".alabel");
       var alSize = al ? parseFloat(win.getComputedStyle(al).fontSize) : 0;

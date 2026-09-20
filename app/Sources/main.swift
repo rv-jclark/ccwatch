@@ -340,8 +340,31 @@ final class ServeSupervisor {
 ///   .fullScreenAuxiliary — lets it show over a full-screen Space at all.
 ///   .nonactivatingPanel — clicking the overlay must not steal focus from the
 ///     terminal you are working in.
+/// Hands a link that wants a new window to the real browser.
+///
+/// ⚠️ A WKWebView does NOTHING with `target="_blank"` unless its host
+/// implements this: the click is swallowed in silence, which is the worst
+/// possible outcome — the reader sees a link, clicks it, and nothing at all
+/// happens. The overlay's "open in browser" is exactly such a link, and the
+/// whole point of it is to leave this window.
+final class OverlayUIDelegate: NSObject, WKUIDelegate {
+    func webView(_ webView: WKWebView,
+                 createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction,
+                 windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = navigationAction.request.url {
+            NSWorkspace.shared.open(url)
+        }
+        // nil: no in-panel window is created. The overlay is one page, and a
+        // second WKWebView stacked inside it would be a browser nobody asked
+        // for and could not navigate.
+        return nil
+    }
+}
+
 final class OverlayPanel: NSPanel {
     private let webView: WKWebView
+    private let uiDelegate = OverlayUIDelegate()
     private static let frameKey = "CCWatchOverlayFrame"
 
     init(url: URL) {
@@ -362,6 +385,7 @@ final class OverlayPanel: NSPanel {
         titlebarAppearsTransparent = true
         isMovableByWindowBackground = true
         contentView = webView
+        webView.uiDelegate = uiDelegate
         webView.load(URLRequest(url: url))
     }
 
@@ -618,6 +642,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 // MARK: - entry point
 
+/// A navigation action carrying a URL, for the selftest. `WKNavigationAction`
+/// has no public initialiser, so the request is overridden on a subclass —
+/// which is enough to prove the delegate reads the URL and returns nil.
+final class TestNavigationAction: WKNavigationAction {
+    private let req: URLRequest
+    init(_ req: URLRequest) { self.req = req; super.init() }
+    override var request: URLRequest { req }
+}
+
 /// `--selftest` exercises the real AppKit objects and prints what it checked.
 ///
 /// ⚠️ It exists because a menu bar and a floating panel are the two things a
@@ -686,6 +719,21 @@ func selftest() -> Int32 {
     check(!panel.hidesOnDeactivate, "and does not vanish when another app activates")
 
     check(!ServeSupervisor.portIsOpen(1), "the port probe reports a closed port as closed")
+
+    // ⚠️ The delegate has to exist and has to return nil. A WKWebView with no
+    // UI delegate drops `target="_blank"` silently — the reader clicks "open
+    // in browser" and nothing happens at all — and one that returns a new
+    // WKWebView would stack a second, un-navigable page inside the panel.
+    let ui = OverlayUIDelegate()
+    let cfg = WKWebViewConfiguration()
+    let host = WKWebView(frame: .zero, configuration: cfg)
+    let req = URLRequest(url: URL(string: "http://127.0.0.1:8787/map?sid=abc")!)
+    check(host.uiDelegate == nil, "a bare WKWebView has no new-window handling of its own")
+    host.uiDelegate = ui
+    check(host.uiDelegate != nil, "and the overlay installs one")
+    check(ui.webView(host, createWebViewWith: cfg,
+                     for: TestNavigationAction(req), windowFeatures: WKWindowFeatures()) == nil,
+          "which creates no window inside the panel, so the link leaves it")
 
     print(failures == 0 ? "\nselftest: all checks passed" : "\nselftest: \(failures) FAILED")
     return failures == 0 ? 0 : 1

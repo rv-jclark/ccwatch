@@ -626,6 +626,13 @@ fighting it for the port are both worse. A serve that keeps dying is restarted
 three times and then reported, with the reason, instead of respawned forever
 under a menu that says "running".
 
+From a figure's panel, **open in browser** takes that agent to a browser tab —
+`/map?sid=<session>`, where there is room to read the transcript. It is a real
+link with `target="_blank"`, and the app hands it to your default browser,
+because a `WKWebView` drops both that and `window.open()` in silence unless its
+host intervenes. A stale or hand-typed `sid` opens nothing rather than a panel
+titled `undefined`.
+
 `Open at Login` registers the app with `SMAppService`, and only when you click
 it. Signing is ad-hoc, so the first launch on someone else's machine needs
 **right-click → Open**; notarising is the upgrade and needs an Apple Developer
