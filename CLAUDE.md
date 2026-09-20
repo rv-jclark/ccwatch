@@ -88,35 +88,42 @@ The `markdown` section runs `web/md.js` under `node`. That is the only optional
 tool the suite uses: with no `node` the section skips with the reason and
 nothing else is affected.
 
-The suite starts real HTTP servers on loopback and creates temp directories, so
-it needs `mktemp -d` to work. **In a restricted sandbox it will fail 13
-assertions with empty output** (`resume`, `peers`, `serve`, and the `resume`
-invocations in `roster`) — not a regression. Re-run with the sandbox off before
-believing a failure.
+The suite starts real HTTP servers on loopback, creates temp directories, and
+reads `ps`. In a restricted sandbox some of that is refused, and it is worth
+knowing exactly which — the bare count of failures was read as a regression
+here more than once.
 
-There are **two** mechanisms behind that, and neither is "the sandbox denies
-`mktemp`" — knowing which is which saves re-diagnosing it every time.
+**`mktemp` used to account for 13 of them and no longer does.** `cmd_resume`
+and `cmd_peers` called `mktemp -d` with no template, and macOS resolves that
+against `confstr(_CS_DARWIN_USER_TEMP_DIR)` — the login `/var/folders/…/T` —
+*not* against `$TMPDIR`. A sandbox granting `$TMPDIR` and not `/var/folders`
+refused it, `die` fired, and both commands printed nothing, so `resume`,
+`peers` and the `ccwatch resume` assertions inside `roster` all failed with
+empty output. Both calls now pass a template, as `cmd_verify_ui` always did.
+Do not remove those templates: the failure they prevent looks like a missing
+feature, not a permissions problem.
 
-1. `cmd_resume` and `cmd_peers` call **`mktemp -d` with no template**, and macOS
-   `mktemp` resolves that against `confstr(_CS_DARWIN_USER_TEMP_DIR)` — the
-   login `/var/folders/…/T` — *not* against `$TMPDIR`. A sandbox that grants
-   `$TMPDIR` and not `/var/folders` fails it with `Operation not permitted`,
-   `die` fires, and the command prints nothing, so every assertion reading its
-   output sees an empty string. `mktemp -d "${TMPDIR:-/tmp}/…"` in the same
-   shell succeeds — which is what `cmd_verify_ui` already does, and why
-   `verify-ui` is not in the list. This accounts for `resume`, `peers`, and the
-   `ccwatch resume` assertions inside the `roster` section (whose `write_roster`
-   assertions pass, because those do not shell out to `resume`).
-2. The `serve` orphan assertion reaps with **`pkill -f`**, and process
-   enumeration can be refused outright: `pgrep` reports `sysmon request failed
-   … pgrep: Cannot get process list`. The server is then never killed, the port
-   stays up, and "leaving no orphan" fails while describing the opposite of the
-   problem. `cleanup_suite` reaps the same way, so a sandboxed run also **leaks
-   every server it started** — measured 2026-09-19: 5 left listening on
-   18542/18615/18673/18734/18785 after one run, and `kill <pid>` on them is
-   refused too, so they can only be reaped from an unsandboxed shell with
-   `pkill -f 'ccwatch serve'`. That is the 1686-orphan problem again by a
-   different route, so check for them after a sandboxed run.
+**`ps` is the one that matters most**, because it is refused outright here and
+what it costs is a wrong answer rather than a failure. `collect_live` runs
+`ps`; where `ps` cannot run it prints nothing, so the collector would report
+`[]` and every session would be filtered out as not-live — `ccwatch` stating
+"No live Claude Code sessions" on a machine running eighteen of them.
+`collect_live` now cross-checks an empty answer against `ps -o pid= -p $$`,
+which cannot legitimately be empty, and says nothing rather than reporting an
+empty machine. So under a sandbox that refuses `ps`, expect `collect_live
+produced no usable JSON` and a `cc ?` in the menu bar — that is the tool
+working correctly, and the *old* silent `0 live` was the bug.
+
+The remaining sandbox failure is the `serve` orphan assertion, which reaps with
+**`pkill -f`** — and process enumeration can be refused outright: `pgrep`
+reports `sysmon request failed … pgrep: Cannot get process list`. The server is
+then never killed, the port stays up, and "leaving no orphan" fails while
+describing the opposite of the problem. `cleanup_suite` reaps the same way, so
+a sandboxed run also **leaks every server it started** — measured 2026-09-19:
+5 left listening on 18542/18615/18673/18734/18785 after one run, and
+`kill <pid>` on them is refused too, so they can only be reaped from an
+unsandboxed shell with `pkill -f 'ccwatch serve'`. That is the 1686-orphan
+problem again by a different route, so check for them after a sandboxed run.
 
 ## The rules that are not negotiable
 
