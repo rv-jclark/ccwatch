@@ -87,6 +87,15 @@ because one `Bash` call running a long test suite is legitimately silent, and a
 column that cries wolf on it is a column you stop reading. The measurement
 behind every verdict is printed next to it, so the judgement stays yours.
 
+And the signals themselves are held to it. `collect_live` reads `ps`, and where
+`ps` cannot run — refused by a sandbox, missing — it prints nothing, so the
+collector would have reported "no sessions are live" and every row would have
+been filtered out. Found exactly that way: 18 sessions running, `0 live` on
+screen, stated with no hedge. An empty answer is now cross-checked against a
+query that cannot legitimately be empty (the process's own pid), and where that
+fails `ccwatch` says so instead. **An empty list is a claim, and it has to be
+corroborated like any other.**
+
 ### Usage, without handing your credential to a monitoring tool
 
 The header shows how much of your rate limit you have used, and each session
@@ -1495,6 +1504,12 @@ implementation broken in the specific way it describes:
 | `exec` into `ccwatch` from the plugin, so a tool that died leaves a blank item | 2 |
 | pass `ccwatch`'s stderr into a menu line without the pipe strip | 1 |
 | have the plugin report a failure whatever `ccwatch` printed | 1 |
+| check a collector's output with `jq empty`, which accepts a stream where `--argjson` accepts one value | 2 |
+| check it with `jq -e .` instead, so a legitimate `null` reads as a failed collector | 6 |
+| weld `collect_live`'s fallback back onto the end of its pipeline, so it appends a second value | 10 |
+| let `collect_live` believe an empty answer without checking that `ps` can run at all | 1 |
+| let `collect_live` call a working `ps` with no live pids a failure rather than an absence | 1 |
+| read the CPU cache with a per-value filter instead of slurping, so a poisoned cache stays poisoned | 3 |
 | stop toggling `.selected`, so the selected row's figure carries no mark | 1 (verify-ui) |
 | leave the wire overlay unsized, so every wire is clipped to the SVG's default 300x150 | 1 (verify-ui) |
 | drop `--force-prefers-reduced-motion` from verify-ui's Chrome, so the reveal check races a compositor that virtual time never advances | 1 (verify-ui) |

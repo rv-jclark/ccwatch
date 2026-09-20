@@ -77,7 +77,9 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # eight are the four needing a free port to bind and the four behind the jq
 # shim, and a floor counting those would fail on a host that can do neither -
 # which is one machine's configuration written into the suite.
-TALLY_FLOOR=373
+# Raised again by the `collectors` section: 20, all of which always run - they
+# need no port, no server and no optional tool.
+TALLY_FLOOR=393
 TALLY_FLOOR_NODE=243
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -788,6 +790,162 @@ _none=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-u" CCWATCH_HOME="$WORK
         NO_COLOR=1 "$CCWATCH" once 2>&1)
 assert_contains "$_none" "install-statusline" "with no feed wired, the header says how to wire it"
 rm -f "$FH/sessions/9101.json"
+
+# ============================================================== collectors ===
+printf '\ncollectors\n'
+
+# Everything in this section is about ONE failure, which happened for real and
+# took `ccwatch` off this machine entirely: a collector that printed its answer
+# and then appended a fallback, so `$live` was `[]\n[]` — two JSON values.
+# `jq --argjson` accepts exactly one and refuses the rest with
+#
+#     jq: invalid JSON text passed to --argjson
+#
+# naming no stage, which is precisely the message `require_json` exists to
+# replace. The guard did not catch it because `jq empty` accepts a STREAM of
+# values while `--argjson` does not, so the guard was weaker than the
+# constraint it was enforcing.
+
+# require_json is lifted out and called directly rather than probed through the
+# whole snapshot. What is under test is a four-line predicate with five
+# interesting inputs, and driving it from outside would need five fixtures able
+# to make five different collectors misbehave.
+# shellcheck disable=SC2016  # the extraction is literal text, not an expansion
+eval "$(sed -n '/^err()  {/,/^}/p;/^require_json()/,/^}/p' "$CCWATCH")"
+
+rj() { # rj <value> -> "ok" | "rejected"
+  if printf '%s' "$1" | { require_json teststage "$(cat)" >/dev/null 2>&1; }; then
+    printf 'ok'
+  else
+    printf 'rejected'
+  fi
+}
+assert_eq "$(rj '{"a":1}')" "ok" "require_json accepts one object"
+assert_eq "$(rj '[]')" "ok" "and one empty array"
+# ⚠️ `null` and `false` each have to pass. collect_usage returns `null` on any
+# machine with no statusline wired, which is most of them, and an earlier
+# version of this guard used `jq -e .` — which exits 1 for both — and reported
+# "collect_usage produced no usable JSON" as a normal condition.
+assert_eq "$(rj 'null')" "ok" "and a bare null, which collect_usage really returns"
+assert_eq "$(rj 'false')" "ok" "and a bare false"
+# The assertion this whole section exists for.
+assert_eq "$(rj '[]
+[]')" "rejected" "but REFUSES two values, which is what --argjson refuses"
+assert_eq "$(rj '{"a":1}
+{"b":2}')" "rejected" "however well-formed each of them is on its own"
+assert_eq "$(rj '')" "rejected" "an empty collector output is refused"
+assert_eq "$(rj 'not json')" "rejected" "and so is garbage"
+
+# --- the collector that produced that stream ---------------------------------
+# collect_live is `ps_out | python3 ... `, and `set -o pipefail` is on. `ps -p`
+# exits non-zero whenever none of the pids it was handed still exist — the
+# ordinary state after a reboot — so the pipeline failed AFTER python had
+# printed, and a fallback welded to the end appended rather than replaced.
+#
+# ⚠️ The fixture points CCWATCH_FAKE_PS at a file that does not exist, which is
+# the point: `cat` of a missing file exits non-zero and prints nothing, so
+# python prints `[]` into a failed pipeline. A fixture with a readable ps file
+# could not fail — the pipeline would succeed and the old code would not append
+# either, so it would have passed against the bug and been counted as coverage.
+# shellcheck disable=SC2016  # literal extraction again
+eval "$(sed -n '/^ps_out()/,/^}/p;/^collect_live()/,/^}/p' "$CCWATCH")"
+_clive=$(CCWATCH_FAKE_PS="$WORK/no-such-ps-file" collect_live '[{"pid":9001}]')
+assert_eq "$(printf '%s' "$_clive" | jq -s 'length' 2>/dev/null)" "1" \
+  "collect_live emits exactly one JSON value when its pipeline fails mid-print"
+assert_eq "$_clive" "[]" "and that value is the empty answer, not two of them"
+
+# --- an absence has to be an absence, not a failure wearing its clothes ------
+# ⚠️ Where `ps` cannot run at all it prints nothing, python reports `[]`, every
+# session is filtered out as not-live, and ccwatch states "No live Claude Code
+# sessions" on a machine running eighteen of them. Measured exactly that way
+# here, under a sandbox that refuses `ps`. Nothing downstream can tell that
+# from a genuinely quiet machine, so collect_live cross-checks an empty answer
+# against a query that cannot legitimately be empty: its own pid.
+#
+# Driven with a `ps` shim on PATH rather than through CCWATCH_FAKE_PS, because
+# the cross-check deliberately does not run when that fixture seam is in use —
+# a fake ps says nothing about whether the real one works.
+mkdir -p "$WORK/psshim"
+printf '#!/bin/sh\nexit 1\n' > "$WORK/psshim/ps"
+chmod +x "$WORK/psshim/ps"
+_cdead=$(PATH="$WORK/psshim:$PATH" CCWATCH_FAKE_PS='' collect_live '[{"pid":9001}]')
+assert_eq "$_cdead" "" \
+  "a ps that cannot run makes collect_live say nothing, not \"nothing is alive\""
+# And the other branch, so the check above cannot be satisfied by a collector
+# that always says nothing. A working ps with no matching pids IS an absence.
+# Discriminates on the QUERY, not on a pid: `$$` inside the shim is the
+# shim's own pid, not the caller's, so matching on it never fires. ps_out asks
+# for lstart; the liveness cross-check asks only for pid.
+printf '#!/bin/sh\ncase "$*" in *lstart*) exit 1;; *) echo " 1";; esac\nexit 0\n' > "$WORK/psshim/ps"
+chmod +x "$WORK/psshim/ps"
+_cnone=$(PATH="$WORK/psshim:$PATH" CCWATCH_FAKE_PS='' collect_live '[{"pid":9001}]')
+assert_eq "$_cnone" "[]" \
+  "but a working ps with no live pids is an absence, and is reported as one"
+
+# --- the poisoned cache, which is the same bug's other half -----------------
+# While collect_live was appending, `$live` was two values, so the CPU-cache
+# writer's `reduce` ran twice and wrote TWO objects into the cache file. The
+# reader then passed that stream straight to `--argjson prev`, so a machine
+# that had ever hit the bug stayed broken afterwards even once the writer was
+# fixed. The read has to heal it, not merely stop causing it.
+CJH="$WORK/cache-heal"
+mkdir -p "$CJH"
+mksess 9401 c0000001-0000-0000-0000-000000000001 cacheheal /fake/repo idle cli
+mktrans c0000001-0000-0000-0000-000000000001 30
+mkps 9401 "0:10.00" > "$WORK/ps-ch"
+_cpucache="${TMPDIR:-/tmp}/ccwatch-cpu-$(id -u)-$(printf '%s' "$FH" | cksum | cut -d' ' -f1).json"
+printf '{}\n{}\n' > "$_cpucache"
+_heal=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-ch" CCWATCH_HOME="$CJH" \
+        NO_COLOR=1 "$CCWATCH" --json 2>&1)
+assert_eq "$(printf '%s' "$_heal" | jq -s 'length' 2>/dev/null)" "1" \
+  "a CPU cache holding two objects is discarded, not passed on as a stream"
+assert_not_contains "$_heal" "invalid JSON text" \
+  "so the snapshot survives a cache poisoned before the writer was fixed"
+assert_eq "$(printf '%s' "$_heal" | jq -r '.sessions[0].name' 2>/dev/null)" "cacheheal" \
+  "and still reports the session"
+rm -f "$FH/sessions/9401.json"
+
+# --- $TMPDIR, which is where a temp directory has to land -------------------
+# ⚠️ `mktemp -d` with no template ignores $TMPDIR: macOS resolves it against
+# confstr(_CS_DARWIN_USER_TEMP_DIR), the login /var/folders/…/T. Anything that
+# grants $TMPDIR and not /var/folders then refuses it, `die` fires, and the
+# command prints NOTHING — which is how 13 assertions in this suite failed with
+# empty output under a sandbox and were read as a regression in the tool.
+#
+# The claim is "the temp directory comes from $TMPDIR", and it is driven by
+# pointing $TMPDIR somewhere that does not exist: with a template that fails
+# and the command says so, and with a bare `mktemp -d` it would quietly
+# succeed elsewhere and print a normal report.
+#
+# ⚠️ It takes BOTH directions to catch the mutation, and which one does the
+# catching depends on the host — measured by reverting the template and
+# watching what went red:
+#
+#   unsandboxed  bare `mktemp -d` succeeds in /var/folders, so resume reports
+#                normally and the four negative assertions below go red.
+#   sandboxed    /var/folders is refused, so bare `mktemp -d` dies too and
+#                those four stay GREEN against the bug. The positive assertion
+#                at the end is the only one that moves.
+#
+# Neither direction alone is a check; together they cover both hosts. Deleting
+# the positive case because it looks redundant would leave a sandboxed run
+# unable to see this regression at all.
+TMPH="$WORK/tmpdir-home"
+mkdir -p "$TMPH/projects/-t"
+printf '{"type":"user","sessionId":"dddd","cwd":"/t"}\n' > "$TMPH/projects/-t/dddd.jsonl"
+for _sub in resume peers; do
+  _tout=$(TMPDIR="$WORK/no-such-tmpdir-xyz" CLAUDE_CONFIG_DIR="$TMPH" \
+          CCWATCH_HOME="$WORK/tmpdir-cch" CCWATCH_FAKE_PS=/dev/null NO_COLOR=1 \
+          "$CCWATCH" "$_sub" 2>&1; echo "rc=$?")
+  assert_contains "$_tout" "could not create a temp directory" \
+    "ccwatch $_sub takes its temp directory from \$TMPDIR"
+  assert_contains "$_tout" "rc=1" "and says so rather than half-running"
+done
+# And with a usable $TMPDIR the same command works, so the pair above is not
+# satisfied by a subcommand that is simply broken.
+_tok=$(TMPDIR="$WORK" CLAUDE_CONFIG_DIR="$TMPH" CCWATCH_HOME="$WORK/tmpdir-cch" \
+       CCWATCH_FAKE_PS=/dev/null NO_COLOR=1 "$CCWATCH" resume 2>&1)
+assert_contains "$_tok" "RESUMABLE" "and a usable \$TMPDIR lets resume report"
 
 # ==================================================================== bar ====
 printf '\nbar\n'
@@ -1763,7 +1921,22 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
     # first test fails.
     _after=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
              "http://127.0.0.1:$SPORT3/" 2>/dev/null) || _after="000"
-    if [ "$_after" = "000" ]; then
+    # ⚠️ Skipped, not failed, where the host refuses process enumeration.
+    # `pkill -f` matches by scanning the process table, so on a host that
+    # answers `pgrep: Cannot get process list` it signals nothing at all: the
+    # server is never asked to stop, the port stays up, and this assertion
+    # goes red while describing the exact opposite of what happened. That is
+    # one runner's configuration reported as a regression, which costs the
+    # same attention as a real one (constitution XIV).
+    #
+    # `ps -o pid= -p $$` is the probe because this process certainly exists,
+    # so an empty answer can only mean the table is not readable. The same
+    # probe guards collect_live, for the same reason.
+    if [ -z "$(ps -o pid= -p $$ 2>/dev/null)" ]; then
+      t_skip "killing the wrapper takes the HTTP server with it, leaving no orphan" \
+             "this host refuses process enumeration, so pkill -f can match nothing"
+      t_note "the server on $SPORT3 is still up and cannot be reaped from here"
+    elif [ "$_after" = "000" ]; then
       t_pass "killing the wrapper takes the HTTP server with it, leaving no orphan"
     else
       t_fail "killing the wrapper takes the HTTP server with it, leaving no orphan" \

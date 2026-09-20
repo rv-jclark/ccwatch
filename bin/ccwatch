@@ -254,14 +254,21 @@ collect_sessions() {
 # doing work; CPU that did not, alongside a transcript that did not grow, is
 # what turns a guess about a hang into two agreeing measurements.
 collect_live() {
-  local pids sessions="$1"
+  local pids out sessions="$1"
   pids=$(printf '%s' "$sessions" | jq -r '[.[].pid // empty] | join(",")')
   [ -n "$pids" ] || { printf '[]'; return 0; }
   # ps, plus all the parsing, in ONE process. The first version forked `date -j`
   # once per pid to convert lstart and `awk` once per pid to convert the CPU
   # clock — ~1.7s of fork overhead on 19 sessions, inside a loop that is
   # supposed to repaint every 2s.
-  ps_out "$pids" | python3 -c '
+  # ⚠️ Captured and then chosen between, never `... || printf '[]'` welded onto
+  # the end of the pipeline. `set -o pipefail` is on and `ps -p` exits non-zero
+  # whenever none of the pids it was handed still exist — the ordinary state
+  # after a reboot, not an error. python has already printed its `[]` by then,
+  # so the fallback did not replace the answer, it APPENDED to it, and
+  # collect_live returned `[]\n[]`: two JSON values, which `jq --argjson`
+  # refuses outright. Measured here on a real machine.
+  out=$(ps_out "$pids" | python3 -c '
 import calendar, json, sys, time
 
 MONTHS = {m: i + 1 for i, m in enumerate(
@@ -308,7 +315,29 @@ for line in sys.stdin:
         # would make the pid-reuse guard reject a live session.
         continue
 print(json.dumps(out))
-' 2>/dev/null || printf '[]'
+' 2>/dev/null)
+  # ⚠️ An empty answer is only believable if `ps` could run at all. Where it
+  # cannot — denied by a sandbox, or absent — it prints nothing, python
+  # dutifully reports `[]`, every session is filtered out as not-live, and
+  # ccwatch states "No live Claude Code sessions" on a machine running
+  # eighteen of them. That is a failure wearing an absence's clothes, which is
+  # the single worst thing this tool can say, and nothing downstream can tell
+  # the two apart. Measured here: `ps` refused, 18 sessions live, 0 reported.
+  #
+  # So a `[]` is cross-checked against a query that cannot legitimately come
+  # back empty — this process's own pid. Only on that path, so the normal
+  # answer costs nothing.
+  if [ "$out" = "[]" ] && [ -z "${CCWATCH_FAKE_PS:-}" ] \
+     && [ -z "$(ps -o pid= -p $$ 2>/dev/null)" ]; then
+    out=""
+  fi
+  # Nothing printed at all means the collector never spoke — python missing or
+  # refused, or the check above rejecting an unbelievable answer — and that is
+  # a failure require_json names rather than an empty machine. python printing
+  # `[]` with a working `ps` is a different claim, a measured "nothing is
+  # alive", and passes straight through.
+  [ -n "$out" ] && printf '%s' "$out"
+  return 0
 }
 
 # CPU is only meaningful as a delta, which needs a previous sample.
@@ -340,6 +369,7 @@ CCWATCH_CPU_MIN_GAP="${CCWATCH_CPU_MIN_GAP:-1.5}"
 # guessing it wrong would silently report "no transcript" for a healthy session
 # — precisely the class of quiet mistake this tool exists to prevent.
 collect_transcripts() { # collect_transcripts <sid>...
+  local out
   [ -d "$PROJ_DIR" ] || { printf '[]'; return 0; }
   [ $# -gt 0 ] || { printf '[]'; return 0; }
   # ONE traversal of the transcript tree, filtered afterwards, rather than a
@@ -350,7 +380,7 @@ collect_transcripts() { # collect_transcripts <sid>...
   #
   # Session transcripts sit at depth 2. Subagent sidechains live deeper and are
   # deliberately out of scope: they are not sessions and have no registry entry.
-  printf '%s\n' "$@" | python3 -c '
+  out=$(printf '%s\n' "$@" | python3 -c '
 import json, os, sys
 
 proj = sys.argv[1]
@@ -378,7 +408,9 @@ try:
 except OSError:
     pass
 print(json.dumps(out))
-' "$PROJ_DIR" 2>/dev/null || printf '[]'
+' "$PROJ_DIR" 2>/dev/null)
+  [ -n "$out" ] && printf '%s' "$out"
+  return 0
 }
 
 # collect_pipelines — spec-run's own record, for each distinct working directory.
@@ -591,10 +623,14 @@ cmd_install_statusline() {
 # this whole tool exists to avoid: a number presented as current when nobody
 # knows whether it is.
 collect_usage() {
+  local out
   [ -f "$USAGE_FILE" ] || { printf 'null'; return 0; }
-  jq -c --argjson now "$(date '+%s')" --argjson stale "$CCWATCH_USAGE_STALE" \
-    '. + { age: ($now - .at), stale_after: $stale }' "$USAGE_FILE" 2>/dev/null \
-    || printf 'null'
+  # Captured rather than `|| printf 'null'`: jq reading a FILE can print the
+  # values it managed to parse and then fail on trailing garbage, and a
+  # fallback welded to the end of that appends instead of replacing.
+  out=$(jq -c --argjson now "$(date '+%s')" --argjson stale "$CCWATCH_USAGE_STALE" \
+    '. + { age: ($now - .at), stale_after: $stale }' "$USAGE_FILE" 2>/dev/null)
+  if [ -n "$out" ]; then printf '%s' "$out"; else printf 'null'; fi
 }
 
 collect_context() { # collect_context <sid>...
@@ -644,8 +680,22 @@ pids_alive() {
 # with no usage feed report "collect_usage produced no usable JSON", turning a
 # normal condition into a failure, which is the same mistake in the opposite
 # direction as the bug this function exists to fix.
+# ⚠️ The test is "exactly ONE JSON value", not "this parses". `jq empty`
+# accepts a STREAM of values, and `--argjson` accepts exactly one — so the
+# guard was weaker than the constraint it exists to enforce, and the one shape
+# that mattered walked straight through it. Measured on a real machine:
+# `collect_live` returned `[]\n[]`, `jq empty` passed it, and two lines later
+# the operator got
+#     jq: invalid JSON text passed to --argjson
+# with no stage named — which is the exact failure the comment above describes
+# and this function was written to replace. `jq -s length` counts the values,
+# which is the property `--argjson` actually requires.
+#
+# `null` and `false` each count as one and still pass, which they must:
+# `collect_usage` returns `null` on any machine with no statusline wired, and
+# rejecting that would turn a normal condition into a failure.
 require_json() { # require_json <stage> <value>
-  if [ -n "$2" ] && printf '%s' "$2" | jq empty >/dev/null 2>&1; then
+  if [ -n "$2" ] && [ "$(printf '%s' "$2" | jq -s 'length' 2>/dev/null)" = "1" ]; then
     return 0
   fi
   err "snapshot: $1 produced no usable JSON — it failed or was killed"
@@ -739,8 +789,25 @@ snapshot() {
   # other's baselines.
   local prev='{}' nowf
   nowf=$(perl -MTime::HiRes -e 'print Time::HiRes::time()' 2>/dev/null) || nowf="$now"
+  # ⚠️ Slurped, so a cache holding more than one object yields `{}` rather than
+  # a stream. `jq -c 'if type == "object" …'` without -s is a per-value filter:
+  # handed a file with two objects in it, it prints BOTH, jq exits 0, the `||`
+  # never fires, and `$prev` becomes `{}\n{}` — which `--argjson prev` two
+  # lines down refuses outright, taking every snapshot with it.
+  #
+  # That file really does end up holding two objects, and this is the second
+  # half of one bug: the writer below feeds `$live` to `jq`, and while
+  # collect_live was appending its fallback, `$live` was two values, so the
+  # reduce ran twice and wrote two objects. The writer is fixed, but a cache
+  # poisoned before that fix would otherwise break ccwatch on that machine
+  # for good — the read has to heal it, not just stop causing it. Measured
+  # here: one real cache file with 2 values, and `ccwatch --json` dead until
+  # this discarded it.
+  #
+  # Discarding costs one CPU baseline, which the next frame re-establishes.
   if [ -f "$CPU_CACHE" ]; then
-    prev=$(jq -c 'if type == "object" then . else {} end' "$CPU_CACHE" 2>/dev/null) || prev='{}'
+    prev=$(jq -cs 'if length == 1 and (.[0] | type) == "object" then .[0] else {} end' \
+           "$CPU_CACHE" 2>/dev/null) || prev='{}'
     [ -n "$prev" ] || prev='{}'
   fi
   printf '%s' "$live" | jq -c --argjson prev "$prev" --argjson at "$nowf" \
@@ -1510,7 +1577,13 @@ cmd_resume() {
   [ -d "$PROJ_DIR" ] || die "no transcript directory at $PROJ_DIR" \
     "nothing to resume from — has Claude Code ever run as this user?"
 
-  TMP=$(mktemp -d) || die "could not create a temp directory"
+  # ⚠️ With a template, so it lands in $TMPDIR. Bare `mktemp -d` resolves
+  # against confstr(_CS_DARWIN_USER_TEMP_DIR) — the login /var/folders/…/T —
+  # and ignores $TMPDIR entirely, so anything that grants $TMPDIR and not
+  # /var/folders refuses it with "Operation not permitted". This died, `die`
+  # fired, and the command printed nothing at all.
+  TMP=$(mktemp -d "${TMPDIR:-/tmp}/ccwatch.XXXXXX") \
+    || die "could not create a temp directory" "tried under ${TMPDIR:-/tmp}"
 
   # Live sessions are excluded: resuming one that is already running is how you
   # end up with two processes on one conversation. This read has to be `.sessions`
@@ -2027,7 +2100,8 @@ kill_record() { # kill_record <target-json> <method> <outcome>
 CCWATCH_SWAP_WARN="${CCWATCH_SWAP_WARN:-80}"
 
 collect_host() {
-  python3 -c '
+  local out
+  out=$(python3 -c '
 import json, re, subprocess
 
 def sh(*args):
@@ -2066,7 +2140,8 @@ if m:
     out["load1"] = float(m.group(1))
 
 print(json.dumps(out) if out else "null")
-' 2>/dev/null || printf 'null'
+' 2>/dev/null)
+  if [ -n "$out" ]; then printf '%s' "$out"; else printf 'null'; fi
 }
 
 # ============================================================ pending asks ==
@@ -2575,7 +2650,10 @@ collect_repos() { # collect_repos <cwd>...
 
   jq -cn --argjson a "$cached" --argjson b "${fresh:-\{\}}" '$a + $b' >"$REPO_CACHE.tmp" 2>/dev/null \
     && mv "$REPO_CACHE.tmp" "$REPO_CACHE" 2>/dev/null
-  jq -c '.' "$REPO_CACHE" 2>/dev/null || printf '{}'
+  # Not `|| printf '{}'`: the same file-input hazard as collect_usage, and this
+  # one reaches `--argjson repos` with no require_json in front of it at all.
+  cached=$(jq -c '.' "$REPO_CACHE" 2>/dev/null)
+  if [ -n "$cached" ]; then printf '%s' "$cached"; else printf '{}'; fi
 }
 
 # repo_slug — owner/name for a working directory, or nothing.
@@ -2882,7 +2960,13 @@ cmd_peers() {
   done
   [ -d "$PROJ_DIR" ] || die "no transcript directory at $PROJ_DIR" "nothing to read"
 
-  TMP=$(mktemp -d) || die "could not create a temp directory"
+  # ⚠️ With a template, so it lands in $TMPDIR. Bare `mktemp -d` resolves
+  # against confstr(_CS_DARWIN_USER_TEMP_DIR) — the login /var/folders/…/T —
+  # and ignores $TMPDIR entirely, so anything that grants $TMPDIR and not
+  # /var/folders refuses it with "Operation not permitted". This died, `die`
+  # fired, and the command printed nothing at all.
+  TMP=$(mktemp -d "${TMPDIR:-/tmp}/ccwatch.XXXXXX") \
+    || die "could not create a temp directory" "tried under ${TMPDIR:-/tmp}"
 
   # Live names, so a pid or a session id can be shown as the name you know it by.
   snapshot | jq -c '[.sessions[] | {sid, pid, name}]' >"$TMP/live.json"
