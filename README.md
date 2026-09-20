@@ -1511,6 +1511,7 @@ implementation broken in the specific way it describes:
 | let `collect_live` call a working `ps` with no live pids a failure rather than an absence | 1 |
 | read the CPU cache with a per-value filter instead of slurping, so a poisoned cache stays poisoned | 3 |
 | drop the `$TMPDIR` template from `mktemp -d` in `resume`/`peers` | 1 sandboxed, 4 not (see below) |
+| fail rather than skip the orphan check on a host that refuses process enumeration | 1 (observed red before the guard was added) |
 | stop toggling `.selected`, so the selected row's figure carries no mark | 1 (verify-ui) |
 | leave the wire overlay unsized, so every wire is clipped to the SVG's default 300x150 | 1 (verify-ui) |
 | drop `--force-prefers-reduced-motion` from verify-ui's Chrome, so the reveal check races a compositor that virtual time never advances | 1 (verify-ui) |
