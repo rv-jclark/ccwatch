@@ -4159,6 +4159,27 @@ function run(doc, win) {
       // the root-size change: the board is laid out in rem, so a figure at
       // 4.4rem is 70px at the default and 57px at 13px. A check on the media
       // query would pass against a rule that no longer applies to anything.
+      // ⚠️ The chip is out of flow, so nothing stops the nav rendering under
+      // it — and the nav did: "show agents" was half-hidden behind the alert.
+      // Neither the height checks above nor "no control floats over the
+      // board" can see a collision INSIDE the header, so it gets its own
+      // geometric check.
+      win.renderAlerts(loudModel);
+      var chipB = boxOf(doc.getElementById("alertbtn"));
+      var navB = boxOf(doc.querySelector("header nav"));
+      var h1B = boxOf(doc.querySelector("header h1"));
+      var hits = [];
+      [["nav", navB], ["h1", h1B]].forEach(function (pair) {
+        var b = pair[1];
+        if (b.w === 0 || chipB.w === 0) { return; }
+        if (b.l < chipB.r && b.r > chipB.l && b.t < chipB.b && b.b > chipB.t) {
+          hits.push(pair[0]);
+        }
+      });
+      check("and the alert chip does not render over the title or the nav",
+            hits.length === 0,
+            "chip " + Math.round(chipB.l) + ".." + Math.round(chipB.r) +
+            " overlaps: " + (hits.join(", ") || "nothing"));
       var figW = boxOf(doc.querySelector(".agent")).w;
       check("and a figure is scaled down so more of them fit per row",
             figW > 0 && figW < 66,

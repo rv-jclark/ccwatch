@@ -104,8 +104,17 @@
      sentence stays in the popover, the `title` attribute and the accessible
      name. Never a bare glyph, and never a hover as the only route to it. */
   @media (max-width:720px) {
-    #alertslot { position:absolute; right:1.1rem; top:.75rem;
-                 max-width:min(46%, 28ch); min-width:0; z-index:2; }
+    /* ⚠️ The chip is out of flow, so it reserves nothing — and the nav ran
+       UNDER it: "show agents" was half-hidden behind "! host under memory
+       press…". Out of flow fixed the height problem and created an overlap
+       one, so the space has to be given back explicitly. `.hleft` reserves
+       exactly the chip's own maximum, so they cannot collide whatever the
+       alert says, and the reservation is a constant — it does not depend on
+       whether anything is wrong, which is the property that keeps the
+       header's height independent of the machine. */
+    #alertslot { position:absolute; right:.7rem; top:.5rem;
+                 max-width:min(40%, 20ch); min-width:0; z-index:2; }
+    .hleft { padding-right:min(40%, 20ch); }
     /* ⚠️ And the counts go, to make room for it. They are the one thing in
        this header that is repeated verbatim two lines down — the roster's own
        title says "agents · 19" and stays visible even when the roster is
