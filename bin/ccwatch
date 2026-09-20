@@ -3037,9 +3037,20 @@ cmd_serve() {
   fi
   [ "$open" -eq 1 ] && command -v open >/dev/null 2>&1 && open "http://127.0.0.1:$port" 2>/dev/null
 
-  local srv_pid=""
+  # ⚠️ NOT `local`, and the trap reads it with `${srv_pid:-}`. Both matter, and
+  # a Ctrl-C used to print an error because of it: the EXIT trap body runs
+  # AFTER cmd_serve has returned, where a local of its is out of scope, so
+  # under `set -u` the trap itself aborted with
+  #   ccwatch: line NNNN: srv_pid: unbound variable
+  # and the kill/wait that reaps the HTTP child never ran. Two costs, and the
+  # second is the real one: a clean Ctrl-C looked like a crash, exited
+  # non-zero, and printed exactly what a crashed child would print — so the
+  # case worth noticing was indistinguishable from the one that happens every
+  # time. The line number moves between runs because bash names wherever
+  # execution had reached, which makes it read like a different bug each time.
+  srv_pid=""
   # shellcheck disable=SC2064
-  trap 'if [ -n "$srv_pid" ]; then kill "$srv_pid" 2>/dev/null; wait "$srv_pid" 2>/dev/null; fi' \
+  trap 'if [ -n "${srv_pid:-}" ]; then kill "${srv_pid}" 2>/dev/null; wait "${srv_pid}" 2>/dev/null; fi' \
     EXIT INT TERM
 
   # ⚠️ CCWATCH_WEB is an override, not a fixed path, so `verify-ui` can serve a
