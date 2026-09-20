@@ -13,3 +13,6 @@ specs/*/.pipeline/
 # committed: the repo deliberately ships no binary assets, and a screenshot's
 # value is in being looked at now, not in being diffed later.
 .screens/
+
+# Built by app/build.sh. A compiler output, not a source.
+app/build/

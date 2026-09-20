@@ -1345,11 +1345,19 @@ bar_dashboard_up() { # bar_dashboard_up <port>
 }
 
 cmd_bar() {
-  local title_only=false
+  local title_only=false actions=true
   while [ $# -gt 0 ]; do
     case "$1" in
       --title) title_only=true; shift;;
-      *) die "bar: unrecognised argument '$1'" "usage: ccwatch bar [--title]";;
+      # ⚠️ For a host that supplies its own actions natively — the menu bar app
+      # under app/ opens its overlay and its dashboard in-process, so the
+      # shell-out versions of those items would be a second way to do the same
+      # thing, and the one that works differently. The STATUS content is never
+      # affected by this flag: what a host may replace is the verbs, never a
+      # verdict.
+      --no-actions) actions=false; shift;;
+      *) die "bar: unrecognised argument '$1'" \
+             "usage: ccwatch bar [--title] [--no-actions]";;
     esac
   done
 
@@ -1371,9 +1379,11 @@ cmd_bar() {
     say "---"
     say "ccwatch could not read the sessions | color=red"
     say "This is NOT \"nothing is running\" — the snapshot itself failed. | size=11"
-    say "---"
-    say "Run ccwatch doctor | bash=\"$self\" param1=doctor terminal=true"
-    say "Refresh now | refresh=true"
+    if [ "$actions" = true ]; then
+      say "---"
+      say "Run ccwatch doctor | bash=\"$self\" param1=doctor terminal=true"
+      say "Refresh now | refresh=true"
+    fi
     return 0
   fi
 
@@ -1383,8 +1393,24 @@ cmd_bar() {
   # whether or not a terminal happened to be open.
   write_roster "$snap"
 
+  # ⚠️ The reset instants become Eastern wall clocks HERE, with `date -r`, for
+  # the reason `render` records: `TZ=America/New_York jq 'strflocaltime("%Z")'`
+  # reported EST for an instant in September, an hour wrong for half the year,
+  # on a number whose whole purpose is to go in a calendar. The terminal and
+  # web/usage.js agree with each other and not with jq, and the suite asserts
+  # that this and the page still match on both sides of a DST boundary.
+  local r5 r7 r7o
+  IFS='	' read -r r5 r7 r7o <<<"$(printf '%s' "$snap" | jq -r \
+    '[(.usage.five_hour.resets_at // ""), (.usage.seven_day.resets_at // ""),
+      (.usage.seven_day_opus.resets_at // "")] | @tsv')"
+
   printf '%s' "$snap" | jq -r \
+    --argjson now "$(date '+%s')" \
+    --arg c5 "$(reset_clock "$r5")" \
+    --arg c7 "$(reset_clock "$r7")" \
+    --arg c7o "$(reset_clock "$r7o")" \
     --argjson title_only "$title_only" \
+    --argjson actions "$actions" \
     --argjson up "$up" \
     --arg port "$port" \
     --arg self "$self" \
@@ -1431,17 +1457,46 @@ cmd_bar() {
     # Normal is the quiet case: with no condition found the title is the live
     # count and nothing else, because a title that always says something is
     # one you stop reading.
-    | ( [ "cc \($live)",
-          (if $waiting > 0 then "\($waiting) waiting"    else empty end),
+    | ( [ (if $waiting > 0 then "\($waiting) waiting"    else empty end),
           (if $asking  > 0 then "\($asking) asking"      else empty end),
           (if $suspect > 0 then "\($suspect) suspect"    else empty end),
           (if $unfin   > 0 then "\($unfin) unfinished"   else empty end),
           (if $bad     > 0 then "\($bad) unreadable"     else empty end) ]
-        | join(" · ") )                              as $title
+        | join(" · ") )                              as $conditions
 
-    | ( if   $waiting > 0 or $asking > 0 then " | sfimage=bell.badge"
-        elif $suspect > 0 or $unfin > 0 or $bad > 0 then " | sfimage=exclamationmark.triangle"
-        else "" end )                                     as $icon
+    # ⚠️ The menu bar leads with the rate-limit figure because that is what it
+    # is looked at FOR — but only when the reading is fresh. Past the staleness
+    # window there is no number to lead with, and inventing one there would be
+    # the worst instance of the mistake constitution III exists to stop: a
+    # percentage alone in a menu bar has nothing around it to date it, and the
+    # reader supplies "now" for free. So a stale or absent reading falls back to
+    # the live count, and the dropdown says which it was.
+    | ( if .usage != null
+             and ((.usage.age // 0) <= (.usage.stale_after // 600))
+             and (.usage.five_hour != null)
+        then "5h \(.usage.five_hour.used_percentage|floor)%"
+        else "cc \($live)" end )                          as $lead
+
+    | ( [ $lead, (if $conditions == "" then empty else $conditions end) ]
+        | join(" · ") )                                    as $title
+
+    # ⚠️ The colour is an ADDITION to the words, never the carrier. Every
+    # condition is already spelled out in $conditions, so `ccwatch bar --title
+    # | grep waiting` still works, a screen reader still reads it, and a
+    # screenshot still shows it. Constitution VII, in the one place where a
+    # glance is all anyone gives it.
+    #
+    # Pink for "a session is blocked on you", which is the only state where the
+    # answer is you rather than waiting. Red for suspect/unfinished/unreadable.
+    # Both are light enough to read on a dark menu bar and dark enough on a
+    # light one.
+    | ( [ (if   $waiting > 0 or $asking > 0 then "sfimage=bell.badge"
+           elif $suspect > 0 or $unfin > 0 or $bad > 0 then "sfimage=exclamationmark.triangle"
+           else empty end),
+          (if   $waiting > 0 or $asking > 0 then "color=#ff6fb5"
+           elif $suspect > 0 or $unfin > 0 or $bad > 0 then "color=#ff6b6b"
+           else empty end) ]
+        | if length == 0 then "" else " | " + join(" ") end ) as $icon
 
     | (([ .sessions[] | (.name    | clean | length) ] | max) // 4) as $w1
     | (([ .sessions[] | (.project | clean | length) ] | max) // 7) as $w2
@@ -1475,14 +1530,27 @@ cmd_bar() {
             elif (.usage.age // 0) > (.usage.stale_after // 600) then
               [ "usage: last reading is \(dur(.usage.age)) old — not shown | color=orange size=11" ]
             else
-              ( [ (if .usage.five_hour != null
-                   then "5h \(.usage.five_hour.used_percentage|floor)%" else empty end),
-                  (if .usage.seven_day != null
-                   then "7d \(.usage.seven_day.used_percentage|floor)%" else empty end),
-                  (if .usage.seven_day_opus != null
-                   then "7d-opus \(.usage.seven_day_opus.used_percentage|floor)%" else empty end) ]
-                | join("  ")
-                | if . == "" then [] else [ "\(.) | font=Menlo size=12" ] end )
+              # ⚠️ Both the remaining time AND the wall clock. "resets in 2h"
+              # is what you act on; "3:45 PM EDT" is what you put in a
+              # calendar, and you cannot derive one from the other at a glance
+              # without knowing what time it is now. The terminal has printed
+              # both for a while; the menu was dropping the reset entirely.
+              #
+              # The abbreviation travels with the clock because EDT and EST are
+              # an hour apart and a bare time is ambiguous for half the year.
+              ( def gauge(nm; x; clock):
+                  if x == null then empty
+                  else "\(nm) \(x.used_percentage|floor)%"
+                       + ( if x.resets_at == null then ""
+                           elif clock == ""
+                           then "  resets in \(dur(x.resets_at - $now))"
+                           else "  resets in \(dur(x.resets_at - $now)) · \(clock)"
+                           end )
+                  end;
+                [ gauge("5h"; .usage.five_hour; $c5),
+                  gauge("7d"; .usage.seven_day; $c7),
+                  gauge("7d-opus"; .usage.seven_day_opus; $c7o) ]
+                | map("\(.) | font=Menlo size=12") )
             end )
 
         # Only under pressure. A line that appears on every refresh to say
@@ -1543,13 +1611,16 @@ cmd_bar() {
                      else [] end )
             end )
 
-        + [ "---" ]
-        + ( if $up
-            then [ "Open dashboard | href=http://127.0.0.1:\($port)" ]
-            else [ "Start dashboard | bash=\"\($self)\" param1=serve param2=--open terminal=true" ]
+        + ( if $actions | not then []
+            else
+              [ "---" ]
+              + ( if $up
+                  then [ "Open dashboard | href=http://127.0.0.1:\($port)" ]
+                  else [ "Start dashboard | bash=\"\($self)\" param1=serve param2=--open terminal=true" ]
+                  end )
+              + [ "Refresh now | refresh=true",
+                  "ccwatch \($version) | size=11 color=gray" ]
             end )
-        + [ "Refresh now | refresh=true",
-            "ccwatch \($version) | size=11 color=gray" ]
       ) | join("\n")
       end'
 }
@@ -4703,6 +4774,7 @@ USAGE
   ccwatch bar                the same verdicts as one line for a macOS menu bar
                            item, in SwiftBar/xbar plugin format
         --title            just the title line, for any other status bar
+        --no-actions       status only, for a host with its own menu verbs
   ccwatch serve              table + map in a browser (127.0.0.1 only)
         --open             open it once it is up
         --port N           default 8787

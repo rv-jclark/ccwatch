@@ -79,9 +79,15 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # which is one machine's configuration written into the suite.
 # Raised again by the `collectors` section: 20, all of which always run - they
 # need no port, no server and no optional tool.
+# And by `bar --no-actions`: 7, and the usage-led title and reset clock: 11. The `app` section adds 8 more that are
+# deliberately NOT in the floor: seven need a built app bundle, the eighth needs
+# a linter, and a floor counting them would fail on any machine that has never
+# run swiftc.
+# (Do not begin a comment line here with the linter's name - it is read as a
+# directive and the file stops parsing.)
 # And by `setup`: 24, likewise - it installs into a temp directory, so it needs
 # nothing the host might not have.
-TALLY_FLOOR=417
+TALLY_FLOOR=435
 TALLY_FLOOR_NODE=243
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -1086,6 +1092,53 @@ _tok=$(TMPDIR="$WORK" CLAUDE_CONFIG_DIR="$TMPH" CCWATCH_HOME="$WORK/tmpdir-cch" 
        CCWATCH_FAKE_PS=/dev/null NO_COLOR=1 "$CCWATCH" resume 2>&1)
 assert_contains "$_tok" "RESUMABLE" "and a usable \$TMPDIR lets resume report"
 
+# ================================================================== app =====
+printf '\napp\n'
+
+# The menu bar app cannot be driven from here: `verify-ui` runs headless Chrome,
+# which knows nothing about NSStatusItem or NSPanel, and a menu bar is not a DOM.
+# What CAN be checked is the app's own selftest, which exercises the real AppKit
+# objects — and the properties it asserts are the ones that are silently wrong
+# rather than visibly wrong. A panel at the wrong LEVEL looks perfect until a
+# full-screen app covers it, which is not something a glance catches.
+#
+# ⚠️ Skipped with the reason where the app has not been built, rather than
+# failed. It needs swiftc and a build step, and the CLI and the pages must keep
+# working on a machine that has never run either (constitution XIV).
+APPBIN="$ROOT/app/build/ccwatch.app/Contents/MacOS/ccwatch-menu"
+if [ ! -x "$APPBIN" ]; then
+  t_skip "the menu bar app's own checks" "app not built — run ./app/build.sh"
+elif ! command -v swiftc >/dev/null 2>&1; then
+  t_skip "the menu bar app's own checks" "no swiftc, so a stale build cannot be trusted"
+else
+  _appst=$("$APPBIN" --selftest 2>&1; echo "rc=$?")
+  assert_contains "$_appst" "all checks passed" "the app's selftest passes"
+  assert_contains "$_appst" "rc=0" "and reports success as an exit code"
+  # ⚠️ Named individually, not just counted. These four are the reason the
+  # overlay is usable at all, and a selftest that quietly stopped checking one
+  # would still say "all checks passed".
+  assert_contains "$_appst" "above full-screen apps" \
+    "and it checks the overlay's window level, not merely that a panel exists"
+  assert_contains "$_appst" "across Spaces" "and that the overlay follows you across Spaces"
+  assert_contains "$_appst" "steal focus" "and that clicking it does not take focus"
+  assert_contains "$_appst" "no bash= parameter is ever parsed" \
+    "and that the app never parses a bash= out of a session row"
+  # The app must not be able to drift from the CLI about the format they share.
+  assert_contains "$_appst" "severity colour is carried, not recomputed" \
+    "and that severity is carried from the CLI rather than recomputed"
+fi
+
+# The build script is linted with the rest of the shell, since it ships.
+if command -v shellcheck >/dev/null 2>&1; then
+  if _appsc=$(shellcheck -x -S warning "$ROOT/app/build.sh" 2>&1); then
+    t_pass "app/build.sh is clean at -S warning"
+  else
+    t_fail "app/build.sh is clean at -S warning" "$(printf '%s' "$_appsc" | head -20)"
+  fi
+else
+  t_skip "app/build.sh lint" "shellcheck not installed"
+fi
+
 # ==================================================================== bar ====
 printf '\nbar\n'
 
@@ -1197,6 +1250,32 @@ done
 assert_eq "$(printf '%s\n' "$_bar" | grep -c '^--[^-]' || true)" "0" \
   "no dropdown line is hidden behind a submenu"
 
+# --- --no-actions: a host with its own verbs gets the status and nothing else -
+# ⚠️ The menu bar app opens its overlay and its dashboard in-process, so the
+# shell-out versions would be a second way to do the same thing — and the one
+# that behaves differently. What a host may drop is the VERBS. Every verdict,
+# count and measurement has to survive, because the app renders them and does
+# not compute them.
+_barna=$(bar_run --no-actions)
+assert_not_contains "$_barna" "Refresh now" "--no-actions drops the refresh verb"
+assert_not_contains "$_barna" "dashboard" "and the dashboard verb"
+assert_not_contains "$_barna" "ccwatch $("$CCWATCH" --version | awk '{print $2}')" \
+  "and the version footer that went with them"
+# The status content is untouched — same title, same severity word, same
+# measurement as the default rendering.
+# ⚠️ Compared against the DEFAULT document's first line, not against
+# `bar --title`. The full document's title carries its ` | sfimage=` parameter
+# and `--title` deliberately does not, so comparing those two asserts a
+# difference that is by design and says nothing about --no-actions.
+assert_eq "$(printf '%s\n' "$_barna" | head -1)" "$(printf '%s\n' "$_bar" | head -1)" \
+  "while the title line is byte-for-byte the one the default prints"
+assert_contains "$_barna" "HUNG?" "and the severity word survives"
+assert_contains "$_barna" "quiet 20m" "and so does the measurement beside it"
+# ⚠️ And the default still HAS the verbs, or the four assertions above would be
+# satisfied by a bar that never emitted them at all.
+assert_contains "$_bar" "Refresh now" "the default rendering still carries them"
+
+
 # ⚠️ Security control, not tidying. A bare pipe opens the plugin format's
 # parameter list, and `bash=` is one of the parameters it accepts — so a
 # session name carrying one would put a CLICKABLE COMMAND in the menu. The
@@ -1293,6 +1372,66 @@ _barstale=$(bar_run)
 assert_contains "$_barstale" "not shown" \
   "a stale one has its numbers withheld, not annotated"
 assert_not_contains "$_barstale" "42%" "and the stale percentage reaches the menu nowhere"
+
+# --- the menu bar title leads with the usage figure -------------------------
+# That is what the thing is looked at FOR: the rate-limit number, visible
+# without a click. The live count is one line into the dropdown.
+#
+# ⚠️ This block poses its own waiting session instead of relying on one an
+# earlier block created. Two assertions here were written against the fixture
+# as it stands at the TOP of this section and went red, because a block in
+# between deletes the waiting and suspect rows to test the quiet title. A
+# sub-block whose premise is somebody else's leftover state is one that breaks
+# whenever the order changes.
+bar_sess 9310 f0000010-0000-0000-0000-000000000001 title-waiting /fake/repo waiting cli "permission to run rm"
+bar_trans f0000010-0000-0000-0000-000000000001 30
+mkps 9310 "1:00.00" >> "$WORK/ps-bar"
+python3 -c "import json,time; n=int(time.time()); print(json.dumps({'at':n,'five_hour':{'used_percentage':37.0,'resets_at':n+7500},'seven_day':{'used_percentage':9.0,'resets_at':n+320000}}))" \
+  > "$BCH/usage.json"
+_bartu=$(bar_run --title)
+assert_contains "$_bartu" "5h 37%" "the title leads with the usage percentage"
+assert_contains "$_bartu" "waiting" "and still spells out the condition beside it"
+assert_contains "$(bar_run | head -1)" "color=" "with a colour asked for on the title line"
+assert_contains "$(bar_run | head -1)" "sfimage=" "and an icon"
+
+# ⚠️ A STALE reading must not lead the title. A percentage alone in a menu bar
+# is the worst case for constitution III: nothing around it dates it, and the
+# reader supplies "now" for free. It falls back to the live count instead.
+jq -c '.at = 1' "$BCH/usage.json" > "$BCH/u.tmp" && mv "$BCH/u.tmp" "$BCH/usage.json"
+_bartstale=$(bar_run --title)
+assert_not_contains "$_bartstale" "37%" "a stale reading never leads the title"
+assert_not_contains "$_bartstale" "%" "nor reaches the title as a percentage at all"
+assert_contains "$_bartstale" "cc " "and the live count takes its place"
+
+rm -f "$BH/sessions/9310.json"
+
+# --- the reset instant, both ways -------------------------------------------
+# "resets in 2h" is what you act on; the wall clock is what you put in a
+# calendar, and neither can be derived from the other at a glance without
+# already knowing the time. The menu was printing the percentage and dropping
+# the reset entirely.
+python3 -c "import json,time; n=int(time.time()); print(json.dumps({'at':n,'five_hour':{'used_percentage':37.0,'resets_at':n+7500}}))" \
+  > "$BCH/usage.json"
+_barreset=$(bar_run)
+assert_contains "$_barreset" "resets in 2h" "the menu prints how long is left on the window"
+assert_contains "$_barreset" "EDT" "and the wall clock it resets at, with the zone"
+
+# ⚠️ Cross-renderer, and the reason this assertion exists rather than a
+# format check: the clock is computed by `date -r` in ONE place, and the
+# comment there records that `TZ=America/New_York jq 'strflocaltime("%Z")'`
+# reported EST for an instant in September — an hour wrong for half the year.
+# Two formatters of one instant drift apart unseen, so the menu's clock is
+# compared against the terminal's for the same fixture.
+_barclock=$(printf '%s\n' "$_barreset" | sed -n 's/^5h .*· \([0-9].*\) | font.*/\1/p')
+_termclock=$(CLAUDE_CONFIG_DIR="$BH" CCWATCH_FAKE_PS="$WORK/ps-bar" CCWATCH_HOME="$BCH" \
+             CCWATCH_CPU_MIN_GAP="$CPU_GAP" NO_COLOR=1 "$CCWATCH" once 2>/dev/null \
+             | sed -n 's/^5h .*(resets [^ ]* · \([^)]*\)).*/\1/p')
+if [ -z "$_barclock" ] || [ -z "$_termclock" ]; then
+  t_fail "the menu and the table print the same reset clock" \
+         "could not read a clock from one of them (menu='$_barclock' table='$_termclock')"
+else
+  assert_eq "$_barclock" "$_termclock" "the menu and the table print the same reset clock"
+fi
 rm -f "$BCH/usage.json"
 
 # --- a failure must not look like an absence --------------------------------

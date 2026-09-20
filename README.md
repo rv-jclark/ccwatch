@@ -491,11 +491,77 @@ survives a reboot.
 ## In the menu bar
 
 ```bash
+./app/build.sh --run        # builds ccwatch.app and launches it
+```
+
+One app owns the three surfaces: the menu bar item, an always-on-top overlay,
+and the `ccwatch serve` it supervises. It is the only part of this repository
+that needs a compiler.
+
+```
+┌─ menu bar ────────────────────────────┐
+│ cc 6 · 1 waiting                      │
+├───────────────────────────────────────┤
+│ 6 live · 1 waiting on you             │
+│ 5h 42%  7d 9%                         │
+│ * checkout-api-d9  waiting  perm… 3m  │
+│ ! web-app-fc       HUNG?    quiet 41m │
+├───────────────────────────────────────┤
+│ Show Overlay                     ⌘O   │
+│ Open Dashboard in Browser        ⌘D   │
+├───────────────────────────────────────┤
+│ serve: running (pid 4821)             │
+│ Restart serve                         │
+├───────────────────────────────────────┤
+│ Open at Login                     ✓   │
+│ Quit ccwatch                     ⌘Q   │
+└───────────────────────────────────────┘
+```
+
+**The app decides nothing.** It runs `ccwatch bar --no-actions` and renders
+what comes back — every verdict, count, word, colour and measurement is the
+CLI's. What the app adds is verbs. That is the same rule `/api/state` follows
+by invoking the CLI rather than reimplementing the join, and the overlay is a
+`WKWebView` on the same `/map` the browser gets, so there is one renderer for
+that too.
+
+Four window properties make the overlay work, and the obvious choice is wrong
+for the first: `.statusBar` rather than `.floating`, because `.floating` sits
+*under* a full-screen app — exactly when you most want to see that an agent is
+blocked on you. Plus `.canJoinAllSpaces` so it follows you, `.fullScreenAuxiliary`
+so it may appear over a full-screen Space at all, and `.nonactivatingPanel` so
+clicking it does not steal focus from the terminal you are working in. All four
+are asserted by `./app/build.sh --selftest`, because they fail **invisibly**: a
+panel at the wrong level looks perfect until something covers it.
+
+It supervises `serve` rather than assuming it. If something is already
+listening on the port — most likely a `ccwatch serve` you started in a terminal
+— it adopts it and labels it `not started by this app`, because killing it or
+fighting it for the port are both worse. A serve that keeps dying is restarted
+three times and then reported, with the reason, instead of respawned forever
+under a menu that says "running".
+
+`Open at Login` registers the app with `SMAppService`, and only when you click
+it. Signing is ad-hoc, so the first launch on someone else's machine needs
+**right-click → Open**; notarising is the upgrade and needs an Apple Developer
+account.
+
+<details>
+<summary>SwiftBar/xbar plugin (superseded)</summary>
+
+Before the app there was a plugin, kept for a machine that cannot run the app:
+
+```bash
 ln -s "$PWD/extra/swiftbar/ccwatch.10s.sh" ~/Library/Application\ Support/SwiftBar/
 ```
 
-`ccwatch bar` renders the same snapshot as a [SwiftBar](https://swiftbar.app)
-or [xbar](https://xbarapp.com) plugin: a title line for the menu bar itself,
+It renders the same `ccwatch bar` output the app does, so the two cannot
+disagree about status — only about what the menu items do. A plugin is a script
+that prints text on a timer, so it cannot hold the overlay, cannot supervise
+`serve`, and its items can only shell out.
+</details>
+
+`ccwatch bar` is the format both read: a title line for the menu bar itself,
 then the dropdown behind it.
 
 ```
@@ -562,7 +628,9 @@ Install the plugin as a **symlink**, both so `git pull` upgrades it and because
 that is how the script locates the checkout it came from.
 
 For any other status bar — tmux, Übersicht, a shell prompt — `ccwatch bar
---title` prints just that first line, with no parameters on it.
+--title` prints just that first line, with no parameters on it. And
+`--no-actions` prints the status without the dashboard/refresh items, for a
+host that supplies its own verbs, which is what the app uses.
 
 ## In a browser
 

@@ -116,22 +116,32 @@ ordered — never in a spatial arrangement, which is expected to be remembered.
 - `python3` supplies the socket client, date parsing and the HTTP server.
   Programs are passed with `python3 -c`, never on stdin — a heredoc on stdin
   collides with the payload the program is trying to read.
-- `shellcheck -x -S warning` must be clean for `bin/ccwatch`, `tests/run.sh` and
-  `extra/swiftbar/ccwatch.10s.sh`. Suppress with a narrow
+- `shellcheck -x -S warning` must be clean for `bin/ccwatch`, `tests/run.sh`,
+  `extra/swiftbar/ccwatch.10s.sh` and `app/build.sh`. Suppress with a narrow
   `# shellcheck disable=` and a stated reason, never by loosening the severity.
-- **No build step and no dependencies to install.** `bin/ccwatch` is the whole
-  tool; `web/*.html` are static pages with inline CSS and JS; `extra/` holds
-  plugins for other programs' formats, which hold no judgement of their own. No
-  package manifest, no bundler, no CDN fetch at runtime.
+- **No build step for the CLI or the pages.** `bin/ccwatch` is the whole tool;
+  `web/*.html` are static pages with inline CSS and JS; `extra/` holds plugins
+  for other programs' formats, which hold no judgement of their own. No package
+  manifest, no bundler, no CDN fetch at runtime.
+- **`app/` is the one exception, and it is one-way.** The macOS menu bar app
+  needs `swiftc` and produces a signed bundle. Nothing in `bin/ccwatch` or
+  `web/` may come to depend on it: the terminal and the browser must keep
+  working on a machine that has never run a compiler, and the suite skips the
+  app's checks with the reason rather than failing when it has not been built.
+  The app renders what `ccwatch bar` prints and adds verbs; it may not derive a
+  status, severity or verdict of its own, which is principle XI applying to it
+  exactly as it does to a page.
 - Runtime state lives in `~/.claude/ccwatch/` and is never committed.
 
 ## Development Workflow and Quality Gates
 
 - `./tests/run.sh` is the only test entry point: shellcheck, then the
-  assertions. In a restricted sandbox roughly 13 assertions fail with empty
-  output (`resume`, `peers`, `serve`) because `mktemp` is denied — that is the
-  sandbox, not a regression, and must be re-run with the sandbox off before a
-  failure is believed.
+  assertions. Under a sandbox the `serve` orphan check skips, because `pkill -f`
+  needs a process table it may not be given; a sandboxed run also leaks the
+  servers it started, for the same reason. The 13 `mktemp` failures this section
+  used to warn about are fixed — `resume` and `peers` now pass a `$TMPDIR`
+  template — so a failure there is a regression again and should be believed.
+  `app/` is skipped with the reason unless it has been built.
 - **Hermetic tests.** Every assertion runs against a fabricated `~/.claude`
   under `$WORK` via `CLAUDE_CONFIG_DIR`, with `CCWATCH_FAKE_PS` substituting the
   liveness probe. Never assert against live sessions — that is a screenshot,
@@ -175,4 +185,4 @@ endpoint or destructive action must satisfy IX and VIII.
 Amendments are made to `CLAUDE.md` and mirrored here, with the failure that
 motivated the change named in the commit.
 
-**Version**: 1.0.1 | **Ratified**: 2026-09-07 | **Last Amended**: 2026-09-19
+**Version**: 1.1.0 | **Ratified**: 2026-09-07 | **Last Amended**: 2026-09-20

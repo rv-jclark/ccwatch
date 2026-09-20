@@ -8,10 +8,14 @@ way it is, and most of the rules below are only sensible in light of that.
 ## Layout
 
 ```
-bin/ccwatch      the whole tool (~4700 lines of bash + embedded python3/jq)
-extra/swiftbar/  the menu bar plugin — a symlink target for SwiftBar/xbar that
-                 runs `ccwatch bar` and holds no judgement of its own beyond
-                 "did I get an answer at all"
+bin/ccwatch      the whole tool (~4900 lines of bash + embedded python3/jq)
+app/Sources/     the macOS menu bar app: the status item, the always-on-top
+                 overlay, and the `ccwatch serve` it supervises. Swift, and the
+                 only thing here that needs a build step
+app/build.sh     swiftc -> app/build/ccwatch.app, ad-hoc signed
+extra/swiftbar/  the SwiftBar/xbar plugin the app replaced. Kept as a fallback
+                 for a machine that cannot run the app; it renders the same
+                 `ccwatch bar` bytes, so the two cannot disagree about status
 web/index.html   the table view, served by `ccwatch serve`
 web/map.html     the map view — a scrolling column of owner blocks, sessions
                  as figures inside them
@@ -41,6 +45,23 @@ served by the static fallback in `serve`, so it needs no route of its own.
 `dispatch`. A new subcommand needs a `cmd_*` function, a line in the `case` in
 `dispatch`, and an entry in `usage()`.
 
+`app/` holds no judgement. It parses `ccwatch bar --no-actions` and renders it,
+and adds only verbs — show the overlay, open the dashboard, restart serve. That
+is principle XI: a second place deciding "is anything stuck" would eventually
+disagree with the table and there would be no telling which was lying. The
+overlay is a `WKWebView` on the same `/map` the browser gets, so there is one
+renderer for it too.
+
+⚠️ Four `NSPanel` properties are load-bearing and the obvious subset is wrong:
+`.statusBar` (not `.floating`, which sits *under* a full-screen app — exactly
+when you most need to see a blocked agent), `.canJoinAllSpaces`,
+`.fullScreenAuxiliary`, and `.nonactivatingPanel` so clicking it does not steal
+focus from the terminal. `app/build/ccwatch.app/Contents/MacOS/ccwatch-menu
+--selftest` asserts all four, because those fail *invisibly* — a panel at the
+wrong level looks perfect until something covers it. It is not a substitute for
+opening the thing: `verify-ui` drives headless Chrome and knows nothing about a
+menu bar.
+
 `setup` is the install path and deliberately does **one** thing — the PATH
 symlink — then prints the rest. `install-hooks` and `install-statusline` each
 show their own change and ask first, and a second place asking the same
@@ -61,6 +82,8 @@ is the same expression the table's `LAST` column uses.
 
 ```bash
 ./tests/run.sh                  # everything: shellcheck, then the assertions
+./app/build.sh --selftest       # build the menu bar app and run its own checks
+./app/build.sh --run            # build it and launch it
 ./bin/ccwatch once              # one paint against the real ~/.claude
 ./bin/ccwatch doctor            # is ccwatch's own view still trustworthy
 ./bin/ccwatch verify-ui --shots .screens   # render the pages and check them
