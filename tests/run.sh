@@ -16,6 +16,27 @@ set -uo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 CCWATCH="$ROOT/bin/ccwatch"
 
+# --fast skips the sections that start HTTP servers and wait on real time.
+#
+# ⚠️ It is for the edit-test loop, not for deciding a change is good. Measured
+# on this host: the whole suite is 4m06s at 24% CPU, and the `serve` section
+# alone starts 11 of the 14 servers and owns 49s of the 59s the suite spends
+# waiting. What is left runs in seconds and catches most of what a change to
+# the renderer, the classification or a web module breaks. The full run is
+# still what has to be green before anything is committed, which is why the
+# summary says loudly which one this was.
+FAST=0
+for _arg in "$@"; do
+  case "$_arg" in
+    --fast) FAST=1;;
+    -h|--help)
+      printf 'usage: tests/run.sh [--fast]\n\n'
+      printf '  --fast   skip the server and timing sections (see the note in this file)\n'
+      exit 0;;
+    *) printf 'unknown option: %s\n' "$_arg" >&2; exit 2;;
+  esac
+done
+
 pass=0; fail=0; skipped=0
 
 # ⚠️ `return 0` is load-bearing in t_fail. Without it its status is that of the
@@ -52,8 +73,43 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # Raised again by the usage meter: 14 static, and 28 that need node - 25 on
 # web/usage.js, plus the three that compare the terminal's own rendering of a
 # reset instant against the page's.
-TALLY_FLOOR=342
+# Raised by `ccwatch bar`: 39 assertions, of which 31 always run. The other
+# eight are the four needing a free port to bind and the four behind the jq
+# shim, and a floor counting those would fail on a host that can do neither -
+# which is one machine's configuration written into the suite.
+TALLY_FLOOR=373
 TALLY_FLOOR_NODE=243
+
+# wait_until <seconds> <command...> — poll until the command succeeds, or the
+# deadline passes. Returns 0 if it succeeded.
+#
+# ⚠️ Polling at 100ms, not sleeping for the worst case. Every wait in this
+# suite used to be either a fixed `sleep` sized for a slow machine or a loop
+# with 1-second granularity, and both are paid in full on every run: measured
+# 59s of deliberate waiting, 49s of it in the `serve` section alone, against a
+# 4m06s suite. The deadlines here are unchanged — what changed is that a
+# condition met in 200ms costs 200ms.
+wait_until() { # wait_until <seconds> <command...>
+  local _ticks=$(( $1 * 10 )); shift
+  while [ "$_ticks" -gt 0 ]; do
+    "$@" >/dev/null 2>&1 && return 0
+    sleep 0.1
+    _ticks=$((_ticks - 1))
+  done
+  return 1
+}
+# The conditions the waits above are usually waiting for, named once each so a
+# typo in one is not a wait that silently never succeeds.
+srv_up() { curl -s --max-time 2 -o /dev/null "http://127.0.0.1:$1/"; }
+srv_dead() { ! curl -s --max-time 2 -o /dev/null "http://127.0.0.1:$1/"; }
+srv_warm() { # the first snapshot has landed
+  [ "$(curl -s --max-time 3 "http://127.0.0.1:$1/api/state" 2>/dev/null \
+       | jq -r '.warming' 2>/dev/null)" = "false" ]
+}
+srv_field() { # srv_field <port> <jq-filter> <expected>
+  [ "$(curl -s --max-time 3 "http://127.0.0.1:$1/api/state" 2>/dev/null \
+       | jq -r "$2" 2>/dev/null)" = "$3" ]
+}
 
 assert_contains() { case "$1" in *"$2"*) t_pass "$3";; *) t_fail "$3" "expected to contain: $2";; esac; }
 assert_not_contains() { case "$1" in *"$2"*) t_fail "$3" "should NOT contain: $2";; *) t_pass "$3";; esac; }
@@ -127,7 +183,12 @@ if command -v shellcheck >/dev/null 2>&1; then
   # Pinned expectations: an unpinned linter means "lint" does not mean the same
   # thing on a laptop as in CI.
   t_note "shellcheck $(shellcheck --version | awk '/^version:/{print $2}')"
-  if sc=$(shellcheck -x -S warning "$CCWATCH" "$ROOT/tests/run.sh" 2>&1); then
+  # The menu bar plugin is linted with the rest of it. It is a shell script
+  # that ships, and the plugin host runs it with no terminal to print a
+  # complaint to — a quoting bug there is a menu bar item that silently says
+  # the wrong thing, which is the failure this whole tool is against.
+  if sc=$(shellcheck -x -S warning "$CCWATCH" "$ROOT/tests/run.sh" \
+            "$ROOT/extra/swiftbar/ccwatch.10s.sh" 2>&1); then
     t_pass "clean at -S warning"
   else
     t_fail "shellcheck findings" "$(printf '%s' "$sc" | head -30)"
@@ -138,8 +199,11 @@ fi
 
 # bash 3.2 is what macOS ships, so it is the floor. Grep for the constructs that
 # silently do nothing there rather than trusting whoever edits this next.
+# The plugin is included: its shebang is /bin/bash, which on macOS IS 3.2 —
+# so it is the one file here that cannot even fall back to a newer bash on
+# PATH the way `#!/usr/bin/env bash` would.
 b4=$(grep -nE '(^|[^[:alnum:]_])(mapfile|readarray)([^[:alnum:]_]|$)|declare -A|\$\{[A-Za-z_]+(,,|\^\^)' \
-       "$CCWATCH" 2>/dev/null | grep -v '^\s*#' || true)
+       "$CCWATCH" "$ROOT/extra/swiftbar/ccwatch.10s.sh" 2>/dev/null | grep -v '^\s*#' || true)
 assert_eq "$b4" "" "no bash-4-only construct (macOS ships 3.2)"
 t_note "running under bash ${BASH_VERSION}"
 
@@ -194,9 +258,16 @@ mktrans() { touch -t "$(date -r "$(( $(date '+%s') - $2 ))" '+%Y%m%d%H%M.%S')" "
 # <pid> <cpu-seconds>: what ps would have reported.
 mkps() { printf '%s %s %s\n' "$1" "$(date -r "$(( $(date '+%s') - 3600 ))" '+%a %b %e %T %Y')" "$2"; }
 
+# ⚠️ CCWATCH_CPU_MIN_GAP is lowered from its 1.5s default to 0.2s. The CPU
+# delta is only believed when two samples are far enough apart to mean
+# something, so the assertions on it have to wait out that gap — five times,
+# at 2s each, for 10s of the suite's runtime. The gap is a parameter, so the
+# fixture sets it small and waits 0.3s instead. What is under test is the
+# comparison against the gap, not the gap's default value.
+CPU_GAP=0.2
 ccwatch_json() { # ccwatch_json <fake-ps-file>
   CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$1" CCWATCH_HOME="$WORK/ccwatch-events" \
-    NO_COLOR=1 "$CCWATCH" --json 2>/dev/null
+    CCWATCH_CPU_MIN_GAP="$CPU_GAP" NO_COLOR=1 "$CCWATCH" --json 2>/dev/null
 }
 tok() { printf '%s' "$1" | jq -r --arg n "$2" '.sessions[] | select(.name == $n) | .token'; }
 sev() { printf '%s' "$1" | jq -r --arg n "$2" '.sessions[] | select(.name == $n) | .sev'; }
@@ -212,8 +283,9 @@ cpu_cache_reset
 _f1=$(ccwatch_json "$WORK/ps-a")   # first frame: no previous CPU sample yet
 # The gap has to exceed CCWATCH_CPU_MIN_GAP or the delta is reported as
 # unmeasured rather than as zero — deliberately, because "measured no progress"
-# is the claim that escalates a quiet session to HUNG.
-sleep 2
+# is the claim that escalates a quiet session to HUNG. Comfortably past the
+# 0.2s the fixture sets, not past the 1.5s default.
+sleep 0.3
 _f2=$(ccwatch_json "$WORK/ps-a")   # second frame: CPU identical, so it has not moved
 assert_eq "$(tok "$_f2" hung-one)" "HUNG?" \
   "a busy session whose transcript stopped growing, with no CPU movement, is HUNG?"
@@ -235,7 +307,7 @@ mkps 9001 "1:00.00" > "$WORK/ps-b"
 mkps 9001 "1:30.00" > "$WORK/ps-c"
 cpu_cache_reset
 ccwatch_json "$WORK/ps-b" >/dev/null
-sleep 2
+sleep 0.3
 _f4=$(ccwatch_json "$WORK/ps-c")
 assert_eq "$(tok "$_f4" hung-one)" "busy" \
   "a quiet transcript is NOT a hang while CPU is still moving"
@@ -247,7 +319,7 @@ assert_contains "$(printf '%s' "$_f4" | jq -r '.sessions[] | select(.name=="hung
 mktrans aaaaaaaa-0000-0000-0000-000000000001 2400
 cpu_cache_reset
 ccwatch_json "$WORK/ps-a" >/dev/null
-sleep 2
+sleep 0.3
 assert_eq "$(tok "$(ccwatch_json "$WORK/ps-a")" hung-one)" "HUNG!!" \
   "past 3x the threshold the verdict escalates"
 rm -f "$FH/sessions/9001.json"
@@ -297,7 +369,7 @@ mksess 9005 aaaaaaaa-0000-0000-0000-000000000005 embedded /fake/repo - sdk-ts
 mkps 9005 "1:00.00" >> "$WORK/ps-s"
 cpu_cache_reset
 ccwatch_json "$WORK/ps-s" >/dev/null
-sleep 2
+sleep 0.3
 _s=$(ccwatch_json "$WORK/ps-s")
 assert_eq "$(tok "$_s" headless)" "SDK STALE?" \
   "a headless claude -p run that stopped writing its transcript is flagged"
@@ -313,7 +385,7 @@ mksess 9006 aaaaaaaa-0000-0000-0000-000000000006 unverifiable /fake/repo busy cl
 mkps 9006 "1:00.00" > "$WORK/ps-n"
 cpu_cache_reset
 ccwatch_json "$WORK/ps-n" >/dev/null
-sleep 2
+sleep 0.3
 assert_eq "$(tok "$(ccwatch_json "$WORK/ps-n")" unverifiable)" "NO TRANSCRIPT" \
   "busy with no transcript to corroborate it is reported as unverifiable, not as fine"
 rm -f "$FH/sessions/9006.json"
@@ -716,6 +788,334 @@ _none=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-u" CCWATCH_HOME="$WORK
         NO_COLOR=1 "$CCWATCH" once 2>&1)
 assert_contains "$_none" "install-statusline" "with no feed wired, the header says how to wire it"
 rm -f "$FH/sessions/9101.json"
+
+# ==================================================================== bar ====
+printf '\nbar\n'
+
+# `ccwatch bar` is the menu bar rendering of the same snapshot. It gets its own
+# fabricated home rather than reusing $FH: by this point in the suite $FH has
+# been added to and deleted from by a dozen sections, and an assertion about
+# "the title with nothing wrong" cannot be written against a home whose
+# contents depend on what ran before it.
+BH="$WORK/bar-home"
+BCH="$WORK/bar-ccwatch"
+mkdir -p "$BH/sessions" "$BH/projects/-fake-repo" "$BCH"
+
+bar_sess() { # bar_sess <pid> <sid> <name> <cwd> <status|-> <entrypoint> [waitingFor]
+  local extra=""
+  [ "$5" != "-" ] && extra=",\"status\":\"$5\",\"statusUpdatedAt\":$(( ($(date '+%s') - 240) * 1000 ))"
+  [ -n "${7:-}" ] && extra="$extra,\"waitingFor\":$(printf '%s' "$7" | jq -Rs .)"
+  cat > "$BH/sessions/$1.json" <<EOF
+{"pid":$1,"sessionId":"$2","cwd":"$4","startedAt":$(( ($(date '+%s') - 3600) * 1000 )),
+ "kind":"interactive","entrypoint":"$6","name":$(printf '%s' "$3" | jq -Rs .),"version":"9.9.9"$extra}
+EOF
+}
+bar_trans() { touch -t "$(date -r "$(( $(date '+%s') - $2 ))" '+%Y%m%d%H%M.%S')" "$BH/projects/-fake-repo/$1.jsonl"; }
+# A port nothing is listening on, so the dashboard item has a known state to
+# assert against rather than whatever this machine happens to be running.
+#
+# ⚠️ Found by probing, and deliberately OUTSIDE free_port's 18000-19499 range.
+# A hardcoded number is two bugs waiting: a leaked `serve` from an earlier run
+# holding it turns "with no server listening" into a silent lie, and a port
+# inside free_port's range can be handed to the serve section of a suite
+# running alongside this one.
+BAR_DEAD_PORT=""
+for _bp in 17901 17902 17903 17904 17905 17906 17907 17908; do
+  if ! (exec 3<>"/dev/tcp/127.0.0.1/$_bp") 2>/dev/null; then BAR_DEAD_PORT=$_bp; break; fi
+done
+bar_run() { # bar_run [args...]
+  CLAUDE_CONFIG_DIR="$BH" CCWATCH_FAKE_PS="$WORK/ps-bar" CCWATCH_HOME="$BCH" \
+    CCWATCH_PORT="$BAR_DEAD_PORT" CCWATCH_CPU_MIN_GAP="${CPU_GAP:-0.2}" NO_COLOR=1 \
+    "$CCWATCH" bar "$@" 2>/dev/null
+}
+
+bar_sess 9301 f0000001-0000-0000-0000-000000000001 hung-one   /fake/repo busy    cli
+bar_sess 9302 f0000002-0000-0000-0000-000000000001 asking     /fake/repo waiting cli "permission to run rm"
+bar_sess 9303 f0000003-0000-0000-0000-000000000001 quiet-idle /fake/repo idle    cli
+bar_trans f0000001-0000-0000-0000-000000000001 1200
+bar_trans f0000002-0000-0000-0000-000000000001 30
+bar_trans f0000003-0000-0000-0000-000000000001 30
+mkps 9301 "1:00.00" >  "$WORK/ps-bar"
+mkps 9302 "1:00.00" >> "$WORK/ps-bar"
+mkps 9303 "1:00.00" >> "$WORK/ps-bar"
+
+_bar=$(bar_run)
+_bartitle=$(bar_run --title)
+
+# ⚠️ Every condition found reaches the title, not just the loudest one. The
+# title is the only surface visible without a click, so a condition left out
+# of it is absent — and an absence reads as "nothing wrong", which is the
+# failure constitution IV is about. Mutation check: making the title carry
+# only the highest severity drops "1 suspect" and this fails.
+assert_contains "$_bartitle" "1 waiting" "the title states the sessions blocked on you"
+assert_contains "$_bartitle" "1 suspect" "and states the suspect one in the same breath"
+assert_contains "$_bartitle" "cc 3" "alongside the live count"
+
+# A menu bar title is one line by construction. A second line would be
+# swallowed by the plugin host and become the first dropdown item.
+#
+# ⚠️ Counted with awk on the unterminated string, not `printf '%s\n' | wc -l`.
+# That form appends the newline it is about to count, so it reports 1 for an
+# empty title and the assertion passes against a `bar` that printed nothing at
+# all — which is how it was first written, and it stayed green through a whole
+# run where every other assertion in this section was failing on empty output.
+assert_eq "$(printf '%s' "$_bartitle" | awk 'END{print NR}')" "1" \
+  "the title is a single line, and there is one"
+
+# Rule 2, in the place it matters most: the menu is read at a glance, so a
+# verdict with no measurement beside it is asking to be taken on trust.
+assert_contains "$_bar" "HUNG?" "a suspect session is named with its own word in the dropdown"
+assert_contains "$_bar" "quiet 20m" "and the silence that produced that verdict is printed with it"
+
+# ⚠️ The glyph is the one thing the menu renders from `sev` itself rather than
+# taking verbatim, so it is the one place two renderers of one payload can
+# drift apart — the table maps sev to a glyph in awk and the menu does it in
+# jq, and nothing but this connects the two copies. The claim under test is
+# not "the menu has a glyph", it is "it is the SAME glyph the table printed for
+# that same session". With NO_COLOR the table's fields are name, project,
+# glyph, token; the menu's are glyph first.
+bar_glyph_table() { # bar_glyph_table <name>
+  CLAUDE_CONFIG_DIR="$BH" CCWATCH_FAKE_PS="$WORK/ps-bar" CCWATCH_HOME="$BCH" \
+    CCWATCH_CPU_MIN_GAP="${CPU_GAP:-0.2}" NO_COLOR=1 "$CCWATCH" once 2>/dev/null \
+    | awk -v n="$1" '$1 == n { print $3 }'
+}
+for _bn in asking hung-one quiet-idle; do
+  _bgt=$(bar_glyph_table "$_bn")
+  _bgm=$(printf '%s\n' "$_bar" | awk -v n="$_bn" '$2 == n { print $1 }')
+  # Both empty would be two renderers agreeing about nothing, so the glyph has
+  # to have been found before it can be compared.
+  if [ -z "$_bgt" ]; then
+    t_fail "the menu and the table print the same glyph for $_bn" \
+           "the table printed no row for $_bn"
+  else
+    assert_eq "$_bgm" "$_bgt" "the menu and the table print the same glyph for $_bn"
+  fi
+done
+
+# ⚠️ Nothing may be put behind a submenu. The format offers them and they would
+# tidy the list, but a submenu is a collapsed badge: it turns a crashed phase
+# into something you have to hover to find, which is the same failure-as-absence
+# the pages' alert control exists to avoid. `--` is the submenu prefix; `---` is
+# a separator and is fine.
+assert_eq "$(printf '%s\n' "$_bar" | grep -c '^--[^-]' || true)" "0" \
+  "no dropdown line is hidden behind a submenu"
+
+# ⚠️ Security control, not tidying. A bare pipe opens the plugin format's
+# parameter list, and `bash=` is one of the parameters it accepts — so a
+# session name carrying one would put a CLICKABLE COMMAND in the menu. The
+# fixture name is the attack, not a lookalike: it is exactly what a menu line
+# would need to gain a shell.
+bar_sess 9304 f0000004-0000-0000-0000-000000000001 "evil | bash=/bin/sh param1=-c" /fake/repo idle cli
+bar_trans f0000004-0000-0000-0000-000000000001 30
+mkps 9304 "1:00.00" >> "$WORK/ps-bar"
+_barinj=$(bar_run)
+assert_not_contains "$_barinj" "| bash=/bin/sh" \
+  "a pipe in a session name cannot open the parameter list"
+assert_contains "$_barinj" "evil ¦ bash=/bin/sh" \
+  "and the name is still shown, as the name it actually is"
+# The structural form of the same claim: the line carries exactly one
+# parameter separator, the one ccwatch put there itself.
+assert_eq "$(printf '%s\n' "$_barinj" | grep 'evil' | grep -o ' | ' | wc -l | tr -d ' ')" "1" \
+  "the row has exactly one parameter separator, ccwatch's own"
+
+# The note travels the same path and is just as attacker-shaped: `waitingFor`
+# is whatever the session put there.
+bar_sess 9305 f0000005-0000-0000-0000-000000000001 notey /fake/repo waiting cli \
+  'ok | bash="/usr/bin/open" param1=http://example.invalid terminal=false'
+bar_trans f0000005-0000-0000-0000-000000000001 30
+mkps 9305 "1:00.00" >> "$WORK/ps-bar"
+_barnote=$(bar_run)
+assert_not_contains "$_barnote" '| bash="/usr/bin/open"' \
+  "a pipe in a waitingFor note cannot open the parameter list either"
+rm -f "$BH/sessions/9304.json" "$BH/sessions/9305.json"
+
+# --- normal conditions are silent -------------------------------------------
+# ⚠️ The title with nothing wrong is the live count and nothing else. A menu
+# bar item that always has something to say is one you stop reading, and then
+# it is not saying anything when it matters. Mutation check: appending an "ok"
+# clause, or an sfimage on the quiet path, fails both of these.
+rm -f "$BH/sessions/9301.json" "$BH/sessions/9302.json"
+_barquiet=$(bar_run --title)
+assert_eq "$_barquiet" "cc 1" "with nothing wrong the title is the count alone"
+assert_not_contains "$(bar_run | head -1)" "sfimage" \
+  "and carries no icon either — absent below the threshold, not a green one"
+
+# --- the dashboard item tells the truth about the dashboard ------------------
+# A link to a server nobody is running is a failure dressed as a working
+# feature, and it stays dressed as one until somebody clicks it.
+# ⚠️ `${FAST:-0}`, not `$FAST`. This is the only part of the section that binds
+# a port and waits on real time, so it is the only part a --fast mode would
+# want to drop — but the flag is not in this file yet, and under `set -u` a
+# bare `$FAST` would make this section explode for everyone until it is. The
+# default reads as "not fast" and the gate starts working the day the flag
+# lands, with nothing to remember.
+if [ "${FAST:-0}" -eq 1 ]; then
+  t_skip "the dashboard item tells the truth about the dashboard" \
+         "--fast: binds a port and waits for it"
+elif [ -z "$BAR_DEAD_PORT" ]; then
+  t_skip "the dashboard item tells the truth about the dashboard" \
+         "no free port in 17901-17908 to probe with"
+else
+  assert_contains "$(bar_run)" "Start dashboard" \
+    "with no server listening the menu offers to start one"
+  assert_not_contains "$(bar_run)" "Open dashboard" \
+    "and does not offer a link that would fail"
+  # ⚠️ The other branch, because a check that has only ever seen one answer has
+  # not been tested. Without this, "always print Start dashboard" satisfies the
+  # assertion above and is counted as coverage it is not.
+  python3 -c "
+import socket, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', $BAR_DEAD_PORT))
+s.listen(5)
+time.sleep(20)
+" &
+  _barlistener=$!
+  # Polled inline rather than through a helper, so this section depends on
+  # nothing outside itself. 50 ticks of 100ms: a local bind that has not
+  # answered in five seconds is not going to.
+  _barticks=50
+  while [ "$_barticks" -gt 0 ]; do
+    (exec 3<>"/dev/tcp/127.0.0.1/$BAR_DEAD_PORT") 2>/dev/null && break
+    sleep 0.1
+    _barticks=$((_barticks - 1))
+  done
+  if [ "$_barticks" -gt 0 ]; then
+    _barup=$(bar_run)
+    assert_contains "$_barup" "Open dashboard" \
+      "with a server listening the menu links to it instead"
+    assert_not_contains "$_barup" "Start dashboard" \
+      "and does not offer to start a second one"
+  else
+    t_skip "the menu links to a running dashboard" "could not bind $BAR_DEAD_PORT"
+  fi
+  # Reaped here rather than left to the 20s sleep: a listener outliving its
+  # assertion holds a port the next section may probe.
+  kill "$_barlistener" 2>/dev/null
+  wait "$_barlistener" 2>/dev/null
+fi
+
+# --- usage, under the same rule as everywhere else --------------------------
+# A percentage in a menu bar is read as current even harder than one on a page:
+# it sits there between glances with nothing around it to date it.
+python3 -c "import json,time; print(json.dumps({'at':int(time.time()),'five_hour':{'used_percentage':42.0},'seven_day':{'used_percentage':3.0}}))" \
+  > "$BCH/usage.json"
+assert_contains "$(bar_run)" "5h 42%" "a fresh usage reading is shown in the dropdown"
+jq -c '.at = 1' "$BCH/usage.json" > "$BCH/u.tmp" && mv "$BCH/u.tmp" "$BCH/usage.json"
+_barstale=$(bar_run)
+assert_contains "$_barstale" "not shown" \
+  "a stale one has its numbers withheld, not annotated"
+assert_not_contains "$_barstale" "42%" "and the stale percentage reaches the menu nowhere"
+rm -f "$BCH/usage.json"
+
+# --- a failure must not look like an absence --------------------------------
+# ⚠️ The menu bar is where this is hardest to see: a quiet machine and a blind
+# tool both look equally calm up there, with no surrounding page to carry the
+# reason. The failure is injected the way the send section does it — a jq shim
+# that fails only for the final join, which is what an OOM-killed collector
+# does.
+_barjq=$(command -v jq)
+if [ -n "$_barjq" ]; then
+  mkdir -p "$WORK/bar-shim"
+  {
+    printf '#!/bin/sh\n'
+    printf 'for a in "$@"; do [ "$a" = "swap_warn" ] && exit 1; done\n'
+    printf 'exec %s "$@"\n' "$_barjq"
+  } > "$WORK/bar-shim/jq"
+  chmod +x "$WORK/bar-shim/jq"
+  _barfail=$(CLAUDE_CONFIG_DIR="$BH" CCWATCH_FAKE_PS="$WORK/ps-bar" CCWATCH_HOME="$BCH" \
+             CCWATCH_PORT="$BAR_DEAD_PORT" PATH="$WORK/bar-shim:$PATH" NO_COLOR=1 \
+             "$CCWATCH" bar 2>/dev/null)
+  assert_contains "$_barfail" "cc ?" "a snapshot that failed renders a reading nobody counts"
+  assert_not_contains "$_barfail" "cc 0" \
+    "and never the number zero, which would read as a calm machine"
+  assert_contains "$_barfail" "snapshot itself failed" \
+    "the dropdown says which of the two it is"
+  _barfailtitle=$(CLAUDE_CONFIG_DIR="$BH" CCWATCH_FAKE_PS="$WORK/ps-bar" CCWATCH_HOME="$BCH" \
+                  CCWATCH_PORT="$BAR_DEAD_PORT" PATH="$WORK/bar-shim:$PATH" NO_COLOR=1 \
+                  "$CCWATCH" bar --title 2>/dev/null)
+  assert_eq "$_barfailtitle" "cc ?" "and --title says the same thing, with no parameters on it"
+  rm -rf "$WORK/bar-shim"
+else
+  t_skip "a failed snapshot does not render as a calm menu bar" "no jq on PATH to shim"
+fi
+
+# An unreadable registry file is one row lost, and it is counted — so the menu
+# is the fifth consumer of parse_failed and must not be the one that drops it.
+#
+# ⚠️ The title claim is asserted against `--title`, not against the whole
+# document. Written the obvious way it read "1 unreadable" out of the summary
+# LINE and passed with the title clause deleted — the mutation went through
+# green, which is a test defect counted as coverage. The two surfaces make two
+# separate claims and need two separate assertions.
+printf '{"pid":9306,"cwd":' > "$BH/sessions/9306.json"   # truncated mid-write
+mkps 9306 "1:00.00" >> "$WORK/ps-bar"
+_barbad=$(bar_run)
+assert_contains "$(bar_run --title)" "1 unreadable" \
+  "an unreadable registry file reaches the menu bar title itself"
+assert_contains "$_barbad" "unreadable registry file" \
+  "and the dropdown states it as a sentence"
+assert_contains "$_barbad" "ccwatch doctor" "with where to look"
+rm -f "$BH/sessions/9306.json"
+
+# --- a crashed run, which no live session reports for itself ----------------
+# The session is honestly idle while the run it drove has crashed. Both claims
+# have to be legible, and the crashed one may not be the one behind a hover.
+BSPEC="$WORK/bar-repo/specs/002-thing/.pipeline"
+mkdir -p "$BSPEC"
+cat > "$BSPEC/state.json" <<EOF
+{"version":1,"feature_dir":"$WORK/bar-repo/specs/002-thing","branch":"002-thing",
+ "phases":{"plan":{"status":"running","session_id":"f0000006-0000-0000-0000-000000000001",
+                   "model":"opus","cost_usd":1.25,"runner_pid":9399,
+                   "started_at":"$(date -u '+%Y-%m-%dT%H:%M:%SZ')"}}}
+EOF
+bar_sess 9307 f0000006-0000-0000-0000-000000000001 runner "$WORK/bar-repo" idle cli
+bar_trans f0000006-0000-0000-0000-000000000001 30
+mkps 9307 "1:00.00" >> "$WORK/ps-bar"   # 9399, the runner, is deliberately absent
+_barcrash=$(bar_run)
+assert_contains "$_barcrash" "plan/CRASHED" "a run whose runner is gone is reported as crashed"
+assert_contains "$_barcrash" "needs a rerun" "with what to do about it"
+assert_eq "$(printf '%s\n' "$_barcrash" | grep -c '^--[^-]' || true)" "0" \
+  "and it is a visible line, not a submenu item somebody has to hover to find"
+rm -f "$BH/sessions/9307.json"
+
+# --- an empty machine says so ----------------------------------------------
+# Distinct from the failure above, and the dropdown has to read differently.
+rm -f "$BH/sessions"/*.json
+_barempty=$(bar_run)
+assert_contains "$_barempty" "No live Claude Code sessions" \
+  "an empty machine says so rather than showing an empty menu"
+assert_contains "$_barempty" "ccwatch resume" "and points at what rebuilds the list"
+
+# --- the plugin, on the path where ccwatch never gets to speak ---------------
+# ⚠️ The plugin deliberately does not `exec` into ccwatch. `need jq` exits
+# before printing anything, and the plugin host renders stdout — so an exec
+# would leave a blank menu bar item with nothing under it, which reads exactly
+# like a machine with nothing running. The stub here is the failure: it writes
+# a diagnosis to stderr and exits non-zero, the way `die` does.
+BPLUG="$ROOT/extra/swiftbar/ccwatch.10s.sh"
+printf '#!/bin/sh\nprintf "ccwatch needs jq on PATH\\n" >&2\nexit 1\n' > "$WORK/bar-dead"
+chmod +x "$WORK/bar-dead"
+_bplug=$(CCWATCH_BIN="$WORK/bar-dead" bash "$BPLUG" 2>&1)
+assert_contains "$_bplug" "produced no output" \
+  "a ccwatch that died before printing is reported, not passed through as a blank item"
+assert_contains "$_bplug" "ccwatch needs jq on PATH" \
+  "and its own diagnosis is carried into the menu"
+# The stderr text is not ccwatch's to trust either — it ends up on a menu line
+# like any other field, so it goes through the same pipe strip.
+printf '#!/bin/sh\nprintf "boom | bash=/bin/sh param1=-c\\n" >&2\nexit 1\n' > "$WORK/bar-inj"
+chmod +x "$WORK/bar-inj"
+assert_not_contains "$(CCWATCH_BIN="$WORK/bar-inj" bash "$BPLUG" 2>&1)" "| bash=/bin/sh" \
+  "a pipe in that diagnosis cannot open the parameter list either"
+# And the pass-through, so none of the above is satisfied by a plugin that
+# always reports a failure.
+printf '#!/bin/sh\nprintf "cc 2\\n---\\nfine\\n"\n' > "$WORK/bar-ok"
+chmod +x "$WORK/bar-ok"
+_bplugok=$(CCWATCH_BIN="$WORK/bar-ok" bash "$BPLUG" 2>&1)
+assert_eq "$_bplugok" "cc 2
+---
+fine" "and a ccwatch that printed is passed through verbatim, with nothing added"
 
 # =================================================================== send ====
 printf '\nsend\n'
@@ -1144,7 +1544,7 @@ assert_eq "$_tweened" "0" \
 # that compute it separately will eventually disagree, and the one you are not
 # looking at is the one that is wrong. So /api/state is asserted to be the same
 # shape the CLI produces.
-if command -v curl >/dev/null 2>&1; then
+if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
   # Find a port nothing is already listening on, and afterwards confirm the
   # server answering is the one this test started. Without that, a stale
   # `ccwatch serve` left behind by an earlier run answers instead — and since
@@ -1174,15 +1574,11 @@ if command -v curl >/dev/null 2>&1; then
   mkps 9107 "0:10.00" > "$WORK/ps-sv"
   ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-sv" CCWATCH_HOME="$DH" \
     CCWATCH_DEPLOY_TTL=999999 "$CCWATCH" serve --port "$SPORT" >"$WORK/serve.log" 2>&1 & )
-  sleep 2
+  wait_until 20 srv_up "$SPORT" || true
   assert_not_contains "$(cat "$WORK/serve.log" 2>/dev/null)" "could not bind" \
     "the test server got the port it asked for"
-  _tries=0; _w=""
-  while [ "$_tries" -lt 90 ]; do
-    _w=$(curl -s --max-time 3 "http://127.0.0.1:$SPORT/api/state" 2>/dev/null | jq -r '.warming' 2>/dev/null)
-    [ "$_w" = "false" ] && break
-    sleep 1; _tries=$((_tries + 1))
-  done
+  _w=no
+  wait_until 90 srv_warm "$SPORT" && _w=false
   _api=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT/api/state" 2>/dev/null)
   assert_contains "$_api" '"sessions"' "/api/state serves the same snapshot shape as the CLI"
   if [ "$_w" = "false" ]; then
@@ -1200,12 +1596,8 @@ if command -v curl >/dev/null 2>&1; then
   # G1, FR-034, SC-009: parse_failed is the fourth of the four consumers and
   # must equal the CLI's --json value for the same fabricated registry.
   printf '{"pid":9108,"cwd":' > "$FH/sessions/9108.json"   # truncated mid-write
-  _tries=0; _pf_api=""
-  while [ "$_tries" -lt 30 ]; do
-    _pf_api=$(curl -s --max-time 3 "http://127.0.0.1:$SPORT/api/state" 2>/dev/null | jq -r '.parse_failed // empty')
-    [ "$_pf_api" = "1" ] && break
-    sleep 1; _tries=$((_tries + 1))
-  done
+  wait_until 30 srv_field "$SPORT" '.parse_failed // empty' 1 || true
+  _pf_api=$(curl -s --max-time 3 "http://127.0.0.1:$SPORT/api/state" 2>/dev/null | jq -r '.parse_failed // empty')
   _pf_cli=$(printf '%s' "$(ccwatch_json "$WORK/ps-sv")" | jq -r '.parse_failed')
   assert_eq "$_pf_api" "$_pf_cli" \
     "/api/state's parse_failed matches ccwatch --json's for the same registry"
@@ -1242,7 +1634,7 @@ if command -v curl >/dev/null 2>&1; then
   ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-sv" CCWATCH_HOME="$DH" \
     CCWATCH_DEPLOY_TTL=999999 "$WORK/link2/ccwatch" serve --port "$SPORT4" \
     >"$WORK/serve-link.log" 2>&1 & )
-  sleep 2
+  wait_until 20 srv_up "$SPORT4" || true
   assert_not_contains "$(cat "$WORK/serve-link.log" 2>/dev/null)" "cannot find web/index.html" \
     "serve finds its web assets when installed as a symlink, as the README says to"
   assert_eq "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$SPORT4/")" "200" \
@@ -1319,11 +1711,7 @@ if command -v curl >/dev/null 2>&1; then
     ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-k4" CCWATCH_HOME="$DH" \
       CCWATCH_DEPLOY_TTL=999999 "$CCWATCH" serve --port "$SPORT4" --allow-kill \
       >"$WORK/serve-k.log" 2>&1 & )
-    _k4=0
-    while [ "$_k4" -lt 40 ]; do
-      [ "$(curl -s --max-time 3 "http://127.0.0.1:$SPORT4/api/state" 2>/dev/null | jq -r '.warming' 2>/dev/null)" = "false" ] && break
-      sleep 1; _k4=$((_k4 + 1))
-    done
+    wait_until 40 srv_warm "$SPORT4" || true
     assert_eq "$(curl -s --max-time 5 "http://127.0.0.1:$SPORT4/api/state" | jq -r '.can_kill')" "true" \
       "with --allow-kill the page is told it may kill"
     _tok4=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT4/map" \
@@ -1350,14 +1738,9 @@ if command -v curl >/dev/null 2>&1; then
   ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-sv" CCWATCH_HOME="$DH" \
     CCWATCH_DEPLOY_TTL=999999 "$CCWATCH" serve --port "$SPORT2" --read-only \
     >"$WORK/serve-ro.log" 2>&1 & )
-  sleep 2
+  wait_until 30 srv_up "$SPORT2" || true
   assert_not_contains "$(cat "$WORK/serve-ro.log" 2>/dev/null)" "could not bind" \
     "the read-only test server got the port it asked for"
-  _t2=0
-  while [ "$_t2" -lt 30 ]; do
-    curl -s --max-time 2 -o /dev/null "http://127.0.0.1:$SPORT2/" 2>/dev/null && break
-    sleep 1; _t2=$((_t2 + 1))
-  done
   _ro=$(curl -s --max-time 10 -X POST "http://127.0.0.1:$SPORT2/api/send" \
         -H 'Content-Type: application/json' -d '{"target":"x","message":"y"}')
   assert_contains "$_ro" "read-only" "--read-only refuses the send endpoint outright"
@@ -1376,15 +1759,14 @@ if command -v curl >/dev/null 2>&1; then
   if [ -n "$SPORT3" ]; then
     ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-sv" CCWATCH_HOME="$DH" \
       CCWATCH_DEPLOY_TTL=999999 "$CCWATCH" serve --port "$SPORT3" >"$WORK/serve-l.log" 2>&1 & )
-    _l=0
-    while [ "$_l" -lt 25 ]; do
-      curl -s --max-time 2 -o /dev/null "http://127.0.0.1:$SPORT3/" 2>/dev/null && break
-      sleep 1; _l=$((_l + 1))
-    done
+    wait_until 25 srv_up "$SPORT3" || true
     assert_eq "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$SPORT3/")" "200" \
       "a third server starts and answers"
     pkill -f "ccwatch serve --port $SPORT3" 2>/dev/null || true
-    sleep 3
+    # Waiting for the port to go quiet, rather than a fixed 3s: the wrapper
+    # normally takes its child down in well under a second, and the deadline
+    # is what makes a leak a failure instead of a hang.
+    wait_until 8 srv_dead "$SPORT3" || true
     # `curl -w %{http_code}` prints 000 on a refused connection AND exits
     # non-zero, so appending `|| echo gone` produced "000gone" and the
     # comparison never matched. Only the code is captured, and the branch is a
@@ -1398,6 +1780,16 @@ if command -v curl >/dev/null 2>&1; then
       t_fail "killing the wrapper takes the HTTP server with it, leaving no orphan" \
              "something is still listening on $SPORT3 (HTTP $_after)"
     fi
+    # ⚠️ And it stops QUIETLY. `srv_pid` was a `local` of cmd_serve while the
+    # EXIT trap that reaps the child read it after cmd_serve had returned, so
+    # under `set -u` the trap aborted with "srv_pid: unbound variable" on every
+    # ordinary stop: a clean Ctrl-C looked like a crash, exited non-zero, and
+    # printed the same thing a real child crash would. Reported from a real
+    # terminal, three times in a row, at a different line number each time -
+    # bash names wherever execution had reached, which is why it reads like a
+    # different bug each time.
+    assert_not_contains "$(cat "$WORK/serve-l.log" 2>/dev/null)" "unbound variable" \
+      "and stops without an error of its own, so a clean stop cannot be read as a crash"
   else
     t_skip "killing the wrapper leaves no orphan" "no free port"
   fi
@@ -1419,24 +1811,43 @@ if command -v curl >/dev/null 2>&1; then
     ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-idle" CCWATCH_HOME="$DH" \
       CCWATCH_DEPLOY_TTL=999999 CCWATCH_IDLE_GRACE=2 \
       "$CCWATCH" serve --port "$SPORT5" >"$WORK/serve-idle.log" 2>&1 & )
-    _i=0
-    while [ "$_i" -lt 40 ]; do
-      [ "$(curl -s --max-time 3 "http://127.0.0.1:$SPORT5/api/state" 2>/dev/null | jq -r '.warming' 2>/dev/null)" = "false" ] && break
-      sleep 1; _i=$((_i + 1))
-    done
-    # ⚠️ The idle span is 12s against a 2s grace, so a stopped collector leaves
-    # an age near 10s and a still-running one leaves an age at its ~2s cadence.
-    # The threshold sits between those two outcomes on purpose. It was `sleep 6`
-    # with `age > 4`, which put the pass/fail line exactly on the expected
-    # value (6s idle − 2s grace = 4.0) and made the result a coin flip: two
-    # consecutive runs on the same tree disagreed about which assertion in this
-    # pair failed. A margin, not a boundary.
-    sleep 12
+    wait_until 40 srv_warm "$SPORT5" || true
+    # ⚠️ The idle window and its threshold are DERIVED from what a collection
+    # costs on this host, not fixed. Two earlier versions were fixed and both
+    # were coin flips on a loaded machine:
+    #
+    #   `sleep 6` with `age > 4` put the pass/fail line exactly on the
+    #   expected value (6s idle − 2s grace = 4.0).
+    #
+    #   `sleep 12` with `age > 6` moved the line but kept the premise that a
+    #   collection completes quickly. It does not always: a snapshot measured
+    #   2.1s warm and 24s cold under load here. A collection still in flight
+    #   when the window opens publishes partway through it, leaving an age of
+    #   (window − however long it took) — under 6s whenever a collection takes
+    #   more than six. That is the check failing for the one reason it must
+    #   not: the feature working slowly. It failed twice in eight runs today.
+    #
+    # So a collection is timed first, and the window is sized to clear it with
+    # room: a stopped collector then leaves an age near the whole window,
+    # while a still-running one leaves an age at its ~2s cadence, and the two
+    # outcomes stay far apart however slow the host is. It remains a hard
+    # assertion rather than a skip, because a broken idle gate is exactly what
+    # a small age means once the window is known to be wide enough.
+    _t0=$(python3 -c 'import time; print(time.time())')
+    ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-idle" CCWATCH_HOME="$DH" \
+      CCWATCH_DEPLOY_TTL=999999 "$CCWATCH" --json >/dev/null 2>&1 )
+    _t1=$(python3 -c 'import time; print(time.time())')
+    _cost=$(awk -v a="$_t0" -v b="$_t1" 'BEGIN{printf "%.1f", b - a}')
+    # grace (2s) + one collection's worth of headroom + 5s of margin, and
+    # never less than 8s so a fast host still separates the two outcomes.
+    _window=$(awk -v c="$_cost" 'BEGIN{w = 2 + c * 2 + 5; print (w < 8) ? 8 : w}')
+    _floor=$(awk -v w="$_window" -v c="$_cost" 'BEGIN{printf "%.1f", w - c - 3}')
+    sleep "$_window"
     _idle=$(curl -s --max-time 10 "http://127.0.0.1:$SPORT5/api/state")
     assert_eq "$(printf '%s' "$_idle" | jq -r '.feed')" "idle" \
       "the first read after the grace period reports the feed as idle"
     _ia=$(printf '%s' "$_idle" | jq -r '.ages.snapshot')
-    assert_eq "$(awk -v a="$_ia" 'BEGIN{print (a > 6) ? "yes" : "no"}')" "yes" \
+    assert_eq "$(awk -v a="$_ia" -v f="$_floor" 'BEGIN{print (a > f) ? "yes" : "no"}')" "yes" \
       "collection stopped while nobody read /api/state (age tracks the full idle span, not the 2s cadence)"
     # ⚠️ The contract is that a read RESUMES collection — not that a collection
     # completes inside any fixed number of seconds. This assertion used to
@@ -1450,16 +1861,14 @@ if command -v curl >/dev/null 2>&1; then
     # host. It stays a hard assertion rather than a skip on a slow host,
     # because a broken resume ALSO produces no fresh snapshot, and reporting
     # that as "skipped: host too slow" would count a regression as coverage.
-    _c0=$(python3 -c 'import time; print(time.time())')
-    ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-idle" CCWATCH_HOME="$DH" \
-      CCWATCH_DEPLOY_TTL=999999 "$CCWATCH" --json >/dev/null 2>&1 )
-    _c1=$(python3 -c 'import time; print(time.time())')
     # Three collections' worth of headroom plus the cadence, so an ordinarily
     # busy machine passes and only a pathological one runs out of deadline.
-    _deadline=$(awk -v a="$_c0" -v b="$_c1" 'BEGIN{d=(b-a)*3+6; print (d<10)?10:d}')
+    # `_cost` is the collection timed above, rather than a second one: the
+    # measurement is the same and this test already paid for it.
+    _deadline=$(awk -v c="$_cost" 'BEGIN{d=c*3+6; print (d<10)?10:d}')
     _fresh=no _waited=0
     while [ "$(awk -v w="$_waited" -v d="$_deadline" 'BEGIN{print (w<d)?1:0}')" = "1" ]; do
-      sleep 2; _waited=$((_waited + 2))
+      sleep 0.5; _waited=$(awk -v w="$_waited" 'BEGIN{print w + 0.5}')
       _ra=$(curl -s --max-time 10 "http://127.0.0.1:$SPORT5/api/state" \
             | jq -r '.ages.snapshot' 2>/dev/null)
       # Younger than the idle span it replaced is the proof a new collection
@@ -1513,16 +1922,15 @@ if command -v curl >/dev/null 2>&1; then
     # the cadence was enough (false — a cadence delays the *next* publish, not
     # the first). Waiting for the premise to actually hold is what makes it
     # deterministic.
-    _e=0
-    while [ "$_e" -lt 60 ]; do
-      _ready=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT6/api/state" 2>/dev/null \
-               | jq -r '[.warming == false,
-                         (.collected_at.snapshot != null),
-                         (.collected_at.deploys  != null),
-                         (.collected_at.peers    != null)] | all' 2>/dev/null)
-      [ "$_ready" = "true" ] && break
-      sleep 1; _e=$((_e + 1))
-    done
+    _all_collected() {
+      [ "$(curl -s --max-time 5 "http://127.0.0.1:$1/api/state" 2>/dev/null \
+           | jq -r '[.warming == false,
+                     (.collected_at.snapshot != null),
+                     (.collected_at.deploys  != null),
+                     (.collected_at.peers    != null)] | all' 2>/dev/null)" = "true" ]
+    }
+    _ready=false
+    wait_until 60 _all_collected "$SPORT6" && _ready=true
     if [ "$_ready" != "true" ]; then
       # The premise could not be established, so the assertions below would be
       # measuring the host rather than the validator. Stated as a skip with the
@@ -1597,12 +2005,10 @@ if command -v curl >/dev/null 2>&1; then
     ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-sv" CCWATCH_HOME="$DH" \
       CCWATCH_DEPLOY_TTL=999999 CCWATCH_SNAPSHOT_TIMEOUT=0.001 \
       "$CCWATCH" serve --port "$SPORT7" >"$WORK/serve-to.log" 2>&1 & )
-    _t7=0
-    while [ "$_t7" -lt 30 ]; do
-      curl -s --max-time 2 -o /dev/null "http://127.0.0.1:$SPORT7/" 2>/dev/null && break
-      sleep 1; _t7=$((_t7 + 1))
-    done
-    sleep 2
+    wait_until 30 srv_up "$SPORT7" || true
+    # Waiting for the failed collection to be published, which is the state
+    # under test, rather than for a fixed two seconds.
+    wait_until 20 srv_field "$SPORT7" '.snapshot_ok' false || true
     _to=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT7/api/state")
     assert_eq "$(printf '%s' "$_to" | jq -r '.snapshot_ok')" "false" \
       "a snapshot that exceeds its ceiling is reported as a failed collection, not an empty one"
@@ -1624,11 +2030,7 @@ if command -v curl >/dev/null 2>&1; then
   if [ -n "$SPORT8" ]; then
     ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-sv" CCWATCH_HOME="$DH" \
       CCWATCH_DEPLOY_TTL=999999 "$CCWATCH" serve --port "$SPORT8" >"$WORK/serve-empty.log" 2>&1 & )
-    _e8=0
-    while [ "$_e8" -lt 30 ]; do
-      [ "$(curl -s --max-time 3 "http://127.0.0.1:$SPORT8/api/state" 2>/dev/null | jq -r '.warming' 2>/dev/null)" = "false" ] && break
-      sleep 1; _e8=$((_e8 + 1))
-    done
+    wait_until 30 srv_warm "$SPORT8" || true
     _empty=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT8/api/state")
     assert_eq "$(printf '%s' "$_empty" | jq -r '.snapshot_ok')" "true" \
       "a genuinely empty host reports a successful collection"
@@ -1663,16 +2065,18 @@ if command -v curl >/dev/null 2>&1; then
     ( CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-retain" CCWATCH_HOME="$DH" \
       CCWATCH_DEPLOY_TTL=999999 "$TC/bin/ccwatch" serve --port "$SPORT9" \
       >"$WORK/serve-retain.log" 2>&1 & )
-    _r9=0
-    while [ "$_r9" -lt 40 ]; do
-      [ "$(curl -s --max-time 3 "http://127.0.0.1:$SPORT9/api/state" 2>/dev/null | jq -r '.warming' 2>/dev/null)" = "false" ] && break
-      sleep 1; _r9=$((_r9 + 1))
-    done
+    wait_until 40 srv_warm "$SPORT9" || true
     _before9=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT9/api/state")
     _sessions_before=$(printf '%s' "$_before9" | jq -c '.sessions')
     _ca_before=$(printf '%s' "$_before9" | jq -r '.collected_at.snapshot')
     chmod -x "$TC/bin/ccwatch"
-    sleep 5
+    # ⚠️ Two waits, not one fixed sleep, because two separate things have to be
+    # true: a collection must have been attempted and failed (that is the
+    # state under test), and enough wall time must have passed for the
+    # retained snapshot's age to be visibly growing rather than near zero. The
+    # age threshold below is 3s, so 3.5s is the floor — the rest is polling.
+    wait_until 20 srv_field "$SPORT9" '.snapshot_ok' false || true
+    wait_until 40 srv_field "$SPORT9" '[.ages.snapshot > 3.5] | all' true || true
     _after9=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT9/api/state")
     assert_eq "$(printf '%s' "$_after9" | jq -r '.snapshot_ok')" "false" \
       "a subsequent collection failure is reported, not silently swallowed"
@@ -1682,7 +2086,7 @@ if command -v curl >/dev/null 2>&1; then
     assert_eq "$_ca_after" "$_ca_before" \
       "collected_at is not refreshed by a failed attempt"
     _age_after=$(printf '%s' "$_after9" | jq -r '.ages.snapshot')
-    assert_eq "$(awk -v a="$_age_after" 'BEGIN{print (a > 4) ? "yes" : "no"}')" "yes" \
+    assert_eq "$(awk -v a="$_age_after" 'BEGIN{print (a > 3) ? "yes" : "no"}')" "yes" \
       "so its age keeps growing truthfully, rather than resetting to near-zero as a fresh empty collection would"
     chmod +x "$TC/bin/ccwatch"
     pkill -f "ccwatch serve --port $SPORT9" 2>/dev/null || true
@@ -1691,7 +2095,11 @@ if command -v curl >/dev/null 2>&1; then
     t_skip "a failed collection retains the prior snapshot" "no free port"
   fi
 else
-  t_skip "serve" "curl not available"
+  if [ "$FAST" -eq 1 ]; then
+    t_skip "serve" "--fast: 11 servers and every real-time wait in the suite"
+  else
+    t_skip "serve" "curl not available"
+  fi
 fi
 
 # V1/V2 (FR-016): the rewritten map.html reconciles instead of replacing.
@@ -3823,7 +4231,14 @@ floor="$TALLY_FLOOR"
 if command -v node >/dev/null 2>&1; then
   floor=$((floor + TALLY_FLOOR_NODE))
 fi
-if [ $((pass + fail)) -lt "$floor" ]; then
+# ⚠️ The floor is a guard against assertions that run without being counted,
+# so it can only mean anything on a full run. Under --fast the count is
+# legitimately lower, and applying the floor would turn a documented choice
+# into a failure — but the run must then say what it was, or a green --fast
+# gets mistaken for a green suite.
+if [ "$FAST" -eq 1 ]; then
+  printf '    \033[33m--fast\033[0m: server and timing sections were skipped; run without it before committing.\n'
+elif [ $((pass + fail)) -lt "$floor" ]; then
   printf '\n  \033[31m✗\033[0m only %s assertions were COUNTED, expected at least %s.\n' \
     "$((pass + fail))" "$floor"
   printf '    Assertions are running but not registering.\n'

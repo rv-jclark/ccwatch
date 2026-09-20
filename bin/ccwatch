@@ -1237,6 +1237,256 @@ render() {
     }'
 }
 
+# ================================================================== bar ======
+#
+# `ccwatch bar` — the same snapshot as a macOS menu bar item, in SwiftBar's
+# (and xbar's) plugin format.
+#
+# Why this is a subcommand rather than a plugin that reads `--json` and makes
+# up its own mind: the menu bar is the reading you trust from across the room
+# without opening anything, and a second place that decides "is anything stuck"
+# from the raw fields will eventually disagree with the table — with no way to
+# tell which of them is lying. That is the argument `/api/state` settles by
+# invoking the CLI instead of reimplementing the join, and `ccwatch statusline`
+# already shows the tool emitting another program's format. The plugin under
+# extra/ is a pipe with no judgement in it.
+#
+# The format: line 1 is the menu bar title, `---` opens the dropdown, and
+# ` | ` separates an item's text from its key=value parameters (`color=`,
+# `font=`, `href=`, `bash=`, `refresh=`).
+#
+# ⚠️ Nothing here is put behind a `--` submenu, though the format offers them
+# and they would tidy the list up. A submenu is a collapsed badge: it turns a
+# crashed phase into something you have to hover to discover, which is the
+# failure-as-an-absence constitution IV forbids and the exact mistake the
+# pages' alert control was built to avoid. Sub-rows are indented with spaces
+# and stay visible.
+
+# bar_dashboard_up — is something already answering on the dashboard port.
+#
+# Asked so the menu can offer "Open dashboard" (a link that works) or "Start
+# dashboard" (which starts one), rather than one link that silently fails for
+# anyone who has not got `serve` running. A dead link is a failure dressed as a
+# working feature, and it stays dressed as one until somebody clicks it.
+#
+# /dev/tcp rather than curl: this runs every few seconds for as long as the
+# menu bar is up, and `bar` should not acquire a dependency the rest of the
+# read path does without. A loopback connect to a closed port is refused
+# immediately, so there is nothing to time out.
+bar_dashboard_up() { # bar_dashboard_up <port>
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+cmd_bar() {
+  local title_only=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --title) title_only=true; shift;;
+      *) die "bar: unrecognised argument '$1'" "usage: ccwatch bar [--title]";;
+    esac
+  done
+
+  local self port up=false snap
+  self=$(resolved_self)
+  port="${CCWATCH_PORT:-8787}"
+  bar_dashboard_up "$port" && up=true
+
+  snap=$(snapshot 2>/dev/null)
+
+  # ⚠️ A snapshot that failed must not render as `cc 0`. "Nothing is running"
+  # and "the collection broke" are different facts, and the menu bar is where
+  # that difference is hardest to see: a quiet machine and a blind tool both
+  # look equally calm up there, and there is no surrounding page to carry the
+  # reason. `?` is not a number anyone reads as a count.
+  if [ -z "$snap" ] || ! printf '%s' "$snap" | jq empty >/dev/null 2>&1; then
+    if [ "$title_only" = true ]; then say "cc ?"; return 0; fi
+    say "cc ? | sfimage=questionmark.circle"
+    say "---"
+    say "ccwatch could not read the sessions | color=red"
+    say "This is NOT \"nothing is running\" — the snapshot itself failed. | size=11"
+    say "---"
+    say "Run ccwatch doctor | bash=\"$self\" param1=doctor terminal=true"
+    say "Refresh now | refresh=true"
+    return 0
+  fi
+
+  # The menu bar is a display, so it records what was live the same way the
+  # table does. Side benefit worth having: with the menu bar running, the
+  # roster `ccwatch resume` reads after a crash is at most one refresh old,
+  # whether or not a terminal happened to be open.
+  write_roster "$snap"
+
+  printf '%s' "$snap" | jq -r \
+    --argjson title_only "$title_only" \
+    --argjson up "$up" \
+    --arg port "$port" \
+    --arg self "$self" \
+    --arg version "$CCWATCH_VERSION" \
+    --argjson unfinished_hours "$CCWATCH_UNFINISHED_HOURS" '
+    def dur(s): if s == null then "-"
+      elif s < 60    then "\(s|floor)s"
+      elif s < 3600  then "\((s/60)|floor)m"
+      elif s < 86400 then "\((s/3600)|floor)h"
+      else                "\((s/86400)|floor)d" end;
+
+    # ⚠️ A security control, not tidying. A bare pipe opens SwiftBar parameter
+    # parsing and `bash=` is one of the parameters it accepts, so a session
+    # name or a waitingFor note carrying one would put a CLICKABLE COMMAND in
+    # the menu. Applied inside this program to every interpolated field rather
+    # than at the call sites, because exactly one call site will eventually be
+    # added without it.
+    #
+    # It becomes a broken bar rather than a space: the name stays legible as
+    # the name it is, instead of being quietly reshaped into a different one.
+    def clean: (. // "") | tostring | gsub("\\|"; "¦") | gsub("[\n\r\t]"; " ");
+
+    def pad(w): . as $s
+      | $s + (if w > ($s|length) then (" " * (w - ($s|length))) else "" end);
+
+    # Every severity carries a word too, so the glyph and the colour are both
+    # additions to a reading that survives without either.
+    def glyph(s): if s == 4 then "*" elif s == 3 then "!"
+                  elif s == 2 then "+" elif s == 1 then "~" else "-" end;
+    def colour(s): if s == 4 then "purple" elif s == 3 then "red"
+                   elif s == 2 then "green" elif s == 1 then "teal" else "gray" end;
+    def money(c): (c // 0) | .*100 | round | ./100 | tostring;
+
+    ( .sessions | length )                                as $live
+    | ( [ .sessions[] | select(.sev  == 4) ] | length )   as $waiting
+    | ( [ .sessions[] | select(.psev == 4) ] | length )   as $asking
+    | ( [ .sessions[] | select(.sev  == 3) ] | length )   as $suspect
+    | ( .unfinished | length )                            as $unfin
+    | ( .parse_failed // 0 )                              as $bad
+
+    # ⚠️ The title states every condition it found, not just the worst one.
+    # Showing only the loudest would leave the others absent from the one
+    # surface visible without a click, and an absence reads as nothing wrong.
+    # Normal is the quiet case: with no condition found the title is the live
+    # count and nothing else, because a title that always says something is
+    # one you stop reading.
+    | ( [ "cc \($live)",
+          (if $waiting > 0 then "\($waiting) waiting"    else empty end),
+          (if $asking  > 0 then "\($asking) asking"      else empty end),
+          (if $suspect > 0 then "\($suspect) suspect"    else empty end),
+          (if $unfin   > 0 then "\($unfin) unfinished"   else empty end),
+          (if $bad     > 0 then "\($bad) unreadable"     else empty end) ]
+        | join(" · ") )                              as $title
+
+    | ( if   $waiting > 0 or $asking > 0 then " | sfimage=bell.badge"
+        elif $suspect > 0 or $unfin > 0 or $bad > 0 then " | sfimage=exclamationmark.triangle"
+        else "" end )                                     as $icon
+
+    | (([ .sessions[] | (.name    | clean | length) ] | max) // 4) as $w1
+    | (([ .sessions[] | (.project | clean | length) ] | max) // 7) as $w2
+    | (([ .sessions[] | (.token   | clean | length) ] | max) // 6) as $w3
+
+    | if $title_only then $title
+      else
+      ( [ "\($title)\($icon)", "---" ]
+
+        # The summary, in the words the terminal footer uses, because that is
+        # the line this tool is already read from across the room by.
+        + [ ( "\($live) live"
+              + (if $waiting > 0 then " · \($waiting) waiting on you" else "" end)
+              + (if $asking  > 0 then " · \($asking) phase(s) asking you something" else "" end)
+              + (if $suspect > 0 then " · \($suspect) suspect" else "" end)
+              + (if $unfin   > 0 then " · \($unfin) unfinished run(s)" else "" end)
+              + " | size=12" ) ]
+        + (if $bad > 0
+           then [ "\($bad) unreadable registry file(s) — run: ccwatch doctor | color=red size=12" ]
+           else [] end)
+
+        # Account-wide usage, under the rule the table and the pages follow,
+        # against the same threshold travelling in the payload beside it.
+        #
+        # ⚠️ Past that threshold the numbers are WITHHELD, not annotated. A
+        # percentage in a menu bar is read as current even harder than one on
+        # a page: it sits there between glances with nothing around it to date
+        # it, and the reader supplies "now" for free.
+        + ( if .usage == null then
+              [ "usage: not reporting — run: ccwatch install-statusline | color=gray size=11" ]
+            elif (.usage.age // 0) > (.usage.stale_after // 600) then
+              [ "usage: last reading is \(dur(.usage.age)) old — not shown | color=orange size=11" ]
+            else
+              ( [ (if .usage.five_hour != null
+                   then "5h \(.usage.five_hour.used_percentage|floor)%" else empty end),
+                  (if .usage.seven_day != null
+                   then "7d \(.usage.seven_day.used_percentage|floor)%" else empty end),
+                  (if .usage.seven_day_opus != null
+                   then "7d-opus \(.usage.seven_day_opus.used_percentage|floor)%" else empty end) ]
+                | join("  ")
+                | if . == "" then [] else [ "\(.) | font=Menlo size=12" ] end )
+            end )
+
+        # Only under pressure. A line that appears on every refresh to say
+        # things are fine is a line you learn to skip, and then it is not
+        # there when it matters.
+        + ( if (.host // null) == null or ((.host.pressure // false) | not) then []
+            else [ "! host under memory pressure — swap \(.host.swap_used_pct)% used, \(.host.ram_free_mb)MB RAM free | color=red size=12",
+                   "the OS may kill sessions, and a killed session looks exactly like a clean exit | color=red size=11" ]
+            end )
+
+        + [ "---" ]
+
+        + ( if $live == 0 then
+              [ "No live Claude Code sessions | size=12",
+                "Reboot or crash? ccwatch resume rebuilds the list from transcripts | size=11 color=gray" ]
+            else
+              ( .sessions | map(
+                  # ⚠️ The measurement travels with the verdict, and it is the
+                  # SAME expression the LAST column uses. A menu printing
+                  # HUNG? with no silence beside it would be asking to be
+                  # believed; one computing its own measurement would
+                  # eventually print a different number from the table for the
+                  # same session.
+                  ( if   .waited != null    then "\(.note|clean) \(dur(.waited))"
+                    elif .note == "quiet"   then "quiet \(dur(.quiet))"
+                    elif .note != ""        then (.note|clean)
+                    elif .quiet != null     then "\(dur(.quiet)) ago"
+                    else                         "-" end ) as $last
+                  | [ "\(glyph(.sev)) \((.name|clean)|pad($w1))  \((.project|clean)|pad($w2))  \((.token|clean)|pad($w3))  \(dur(.age)|pad(3))  \($last)"
+                      + " | font=Menlo size=12 color=\(colour(.sev))" ]
+                    # The run carries its OWN severity, kept apart from the
+                    # session: a session can be honestly idle while the run it
+                    # drove has crashed, and collapsing those two gives a row
+                    # that is not a sentence.
+                    + ( if .pipeline == null then []
+                        else [ "    \\_ \(.pipeline.feature|clean)  \(.pipeline.phase|clean)/\(if .pipeline.crashed then "CRASHED" else (.pipeline.status|clean) end)  \((.pipeline.model // "")|clean)  $\(money(.pipeline.cost))"
+                               + (if .pipeline.crashed then " — needs a rerun"
+                                  elif .pipeline.status == "needs_input" then " — stopped to ask you something"
+                                  else "" end)
+                               + " | font=Menlo size=11 color=\(colour(.psev))" ]
+                        end )
+                ) | flatten )
+            end )
+
+        # Runs that stopped with nobody left holding them. Nothing else
+        # reports these: no live session carries them, so without this block
+        # they stay invisible until the next spec-run invocation trips over
+        # them.
+        + ( if $unfin == 0 then []
+            else [ "---",
+                   "UNFINISHED RUNS — stopped in the last \($unfinished_hours)h, no live session holding them | size=11 color=gray" ]
+                 + ( .unfinished | map(
+                     "\(.phase|clean)/\(.status|clean)  \(.project|clean) \(.feature|clean)  $\(money(.cost))"
+                     + (if .age == null then "" else "  \(dur(.age)) ago" end)
+                     + " | font=Menlo size=11 color=red" ) )
+                 + ( if (.unfinished_old // 0) > 0
+                     then [ "(+\(.unfinished_old) older — see: ccwatch resume) | size=11 color=gray" ]
+                     else [] end )
+            end )
+
+        + [ "---" ]
+        + ( if $up
+            then [ "Open dashboard | href=http://127.0.0.1:\($port)" ]
+            else [ "Start dashboard | bash=\"\($self)\" param1=serve param2=--open terminal=true" ]
+            end )
+        + [ "Refresh now | refresh=true",
+            "ccwatch \($version) | size=11 color=gray" ]
+      ) | join("\n")
+      end'
+}
+
 # ============================================================== resume =======
 #
 # The registry cannot help here. It is a directory of pid-named files and every
@@ -4355,6 +4605,9 @@ USAGE
         --dry-run          print the exact frames instead of sending them
   ccwatch peers [--days N]   which sessions have been talking to each other
 
+  ccwatch bar                the same verdicts as one line for a macOS menu bar
+                           item, in SwiftBar/xbar plugin format
+        --title            just the title line, for any other status bar
   ccwatch serve              table + map in a browser (127.0.0.1 only)
         --open             open it once it is up
         --port N           default 8787
@@ -4449,6 +4702,7 @@ case "${1:-}" in
   install-hooks)   cmd_install_hooks;;
   statusline)      shift; cmd_statusline "$@";;
   install-statusline) cmd_install_statusline;;
+  bar)             shift; cmd_bar "$@";;
   send)            shift; cmd_send "$@";;
   kill)            shift; cmd_kill "$@";;
   deploys)         shift; cmd_deploys "$@";;

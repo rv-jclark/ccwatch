@@ -8,7 +8,10 @@ way it is, and most of the rules below are only sensible in light of that.
 ## Layout
 
 ```
-bin/ccwatch      the whole tool (~3900 lines of bash + embedded python3/jq)
+bin/ccwatch      the whole tool (~4700 lines of bash + embedded python3/jq)
+extra/swiftbar/  the menu bar plugin — a symlink target for SwiftBar/xbar that
+                 runs `ccwatch bar` and holds no judgement of its own beyond
+                 "did I get an answer at all"
 web/index.html   the table view, served by `ccwatch serve`
 web/map.html     the map view — a scrolling column of owner blocks, sessions
                  as figures inside them
@@ -33,10 +36,18 @@ can run it under node and assert on the HTML — including the escaping. It is
 served by the static fallback in `serve`, so it needs no route of its own.
 
 `bin/ccwatch` is organised in banner-commented sections — `collection`,
-`statusline`, `the join`, `rendering`, `resume`, `events`, `transcript`,
+`statusline`, `the join`, `rendering`, `bar`, `resume`, `events`, `transcript`,
 `pending asks`, `send`, `deploys`, `peers`, `serve`, `doctor`, `dispatch`. A new
 subcommand needs a `cmd_*` function, a line in the `case` in `dispatch`, and an
 entry in `usage()`.
+
+`bar` is the third renderer of the same snapshot, after the terminal and the
+pages, and it exists as a subcommand for the reason `/api/state` invokes the
+CLI: a menu bar plugin that read `--json` and decided severity for itself would
+be a second place that computes "is anything stuck", and the two would
+eventually disagree with no way to tell which was lying. Anything it prints is
+`snapshot`'s own classification — including the measurement in each row, which
+is the same expression the table's `LAST` column uses.
 
 ## Running things
 
@@ -78,10 +89,34 @@ tool the suite uses: with no `node` the section skips with the reason and
 nothing else is affected.
 
 The suite starts real HTTP servers on loopback and creates temp directories, so
-it needs `mktemp -d` to work. **In a restricted sandbox it will fail ~13
-assertions with empty output** (`resume`, `peers`, `serve`) — that is the
-sandbox denying `mktemp`, not a regression. Re-run with the sandbox off before
+it needs `mktemp -d` to work. **In a restricted sandbox it will fail 13
+assertions with empty output** (`resume`, `peers`, `serve`, and the `resume`
+invocations in `roster`) — not a regression. Re-run with the sandbox off before
 believing a failure.
+
+There are **two** mechanisms behind that, and neither is "the sandbox denies
+`mktemp`" — knowing which is which saves re-diagnosing it every time.
+
+1. `cmd_resume` and `cmd_peers` call **`mktemp -d` with no template**, and macOS
+   `mktemp` resolves that against `confstr(_CS_DARWIN_USER_TEMP_DIR)` — the
+   login `/var/folders/…/T` — *not* against `$TMPDIR`. A sandbox that grants
+   `$TMPDIR` and not `/var/folders` fails it with `Operation not permitted`,
+   `die` fires, and the command prints nothing, so every assertion reading its
+   output sees an empty string. `mktemp -d "${TMPDIR:-/tmp}/…"` in the same
+   shell succeeds — which is what `cmd_verify_ui` already does, and why
+   `verify-ui` is not in the list. This accounts for `resume`, `peers`, and the
+   `ccwatch resume` assertions inside the `roster` section (whose `write_roster`
+   assertions pass, because those do not shell out to `resume`).
+2. The `serve` orphan assertion reaps with **`pkill -f`**, and process
+   enumeration can be refused outright: `pgrep` reports `sysmon request failed
+   … pgrep: Cannot get process list`. The server is then never killed, the port
+   stays up, and "leaving no orphan" fails while describing the opposite of the
+   problem. `cleanup_suite` reaps the same way, so a sandboxed run also **leaks
+   every server it started** — measured 2026-09-19: 5 left listening on
+   18542/18615/18673/18734/18785 after one run, and `kill <pid>` on them is
+   refused too, so they can only be reaped from an unsandboxed shell with
+   `pkill -f 'ccwatch serve'`. That is the 1686-orphan problem again by a
+   different route, so check for them after a sandboxed run.
 
 ## The rules that are not negotiable
 
@@ -167,9 +202,12 @@ produced a specific wrong output that someone believed.
   Pass programs with `python3 -c`, never on stdin — a heredoc on stdin collides
   with the payload the program is trying to read, which cost a whole debugging
   session once.
-- `shellcheck -x -S warning` must be clean for both `bin/ccwatch` and
-  `tests/run.sh`. Suppress with a narrow `# shellcheck disable=` and a reason,
-  never by loosening the severity.
+- `shellcheck -x -S warning` must be clean for `bin/ccwatch`, `tests/run.sh`
+  and `extra/swiftbar/ccwatch.10s.sh`. Suppress with a narrow
+  `# shellcheck disable=` and a reason, never by loosening the severity. The
+  plugin is in the list because the menu bar host runs it with no terminal to
+  print a complaint to, and its shebang is `/bin/bash` — which on macOS is 3.2,
+  so it is the one file here that cannot fall back to a newer bash on PATH.
 
 ## Test discipline
 
@@ -249,8 +287,23 @@ diff, and find nothing in the diff that the subject did not promise.
 - Formatting or renames that touch a lot of lines go in their own commit, so the
   behavioural change beside them stays reviewable.
 
-Do not commit or push unless asked. `~/.claude/ccwatch/` is runtime state and is
-never committed.
+**Commit finished work without being asked.** A change that is complete — its
+implementation, its assertion, its `README.md` row, and a green `./tests/run.sh`
+— gets committed. Leaving it sitting in the working tree is not caution: it
+hands back a dirty tree for somebody else to sort out, it makes the next
+session's `git status` ambiguous about what was deliberate, and it loses the
+one-reason-per-commit grouping that only the person who made the change still
+knows. Split it as the rules above describe and commit it.
+
+Pushing is still explicit, because it is outward-facing — ask first. So is
+committing something you could not verify: if the suite is red, or red for a
+reason you have not run down, say so instead of committing over it.
+
+⚠️ Check `git status` before staging, and commit only your own hunks. This
+repository is worked on by more than one session at a time, and unrelated
+in-flight work in a file you touched is not yours to commit or to attribute.
+
+`~/.claude/ccwatch/` is runtime state and is never committed.
 
 ## Releases
 

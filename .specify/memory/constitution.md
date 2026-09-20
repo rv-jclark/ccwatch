@@ -116,12 +116,13 @@ ordered — never in a spatial arrangement, which is expected to be remembered.
 - `python3` supplies the socket client, date parsing and the HTTP server.
   Programs are passed with `python3 -c`, never on stdin — a heredoc on stdin
   collides with the payload the program is trying to read.
-- `shellcheck -x -S warning` must be clean for `bin/ccwatch` and `tests/run.sh`.
-  Suppress with a narrow `# shellcheck disable=` and a stated reason, never by
-  loosening the severity.
+- `shellcheck -x -S warning` must be clean for `bin/ccwatch`, `tests/run.sh` and
+  `extra/swiftbar/ccwatch.10s.sh`. Suppress with a narrow
+  `# shellcheck disable=` and a stated reason, never by loosening the severity.
 - **No build step and no dependencies to install.** `bin/ccwatch` is the whole
-  tool; `web/*.html` are static pages with inline CSS and JS. No package
-  manifest, no bundler, no CDN fetch at runtime.
+  tool; `web/*.html` are static pages with inline CSS and JS; `extra/` holds
+  plugins for other programs' formats, which hold no judgement of their own. No
+  package manifest, no bundler, no CDN fetch at runtime.
 - Runtime state lives in `~/.claude/ccwatch/` and is never committed.
 
 ## Development Workflow and Quality Gates
@@ -174,4 +175,4 @@ endpoint or destructive action must satisfy IX and VIII.
 Amendments are made to `CLAUDE.md` and mirrored here, with the failure that
 motivated the change named in the commit.
 
-**Version**: 1.0.0 | **Ratified**: 2026-09-07 | **Last Amended**: 2026-09-07
+**Version**: 1.0.1 | **Ratified**: 2026-09-07 | **Last Amended**: 2026-09-19

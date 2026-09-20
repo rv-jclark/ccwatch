@@ -26,6 +26,7 @@ ccwatch                  # live table, refreshed until you quit (q / Ctrl-C)
 ccwatch once             # draw it once — safe in a pipe or a status bar
 ccwatch --json           # the same data, for scripting
 ccwatch serve            # table + map in a browser, with replies
+ccwatch bar              # the same verdicts as a macOS menu bar item
 ccwatch ask              # what each blocked session is actually asking
 ccwatch convo <who>      # the recent conversation of one session
 ccwatch resume           # what to reopen after a crash or reboot
@@ -476,6 +477,82 @@ The verified pid is preferred over the declared name, because one was checked
 and the other was merely asserted by the sender. Building the graph from
 transcripts rather than by watching traffic means it works retrospectively and
 survives a reboot.
+
+## In the menu bar
+
+```bash
+ln -s "$PWD/extra/swiftbar/ccwatch.10s.sh" ~/Library/Application\ Support/SwiftBar/
+```
+
+`ccwatch bar` renders the same snapshot as a [SwiftBar](https://swiftbar.app)
+or [xbar](https://xbarapp.com) plugin: a title line for the menu bar itself,
+then the dropdown behind it.
+
+```
+cc 6 · 1 waiting · 1 suspect          ← what sits in the menu bar
+---
+6 live · 1 waiting on you · 1 suspect
+5h 42%  7d 9%
+---
+* checkout-api-d9  checkout-api  waiting  3m   permission to run rm 3m
+! web-app-fc       web-app       HUNG?    4d   quiet 41m
++ pricing-84       pricing       sdk      5m   no status published
+    \_ 011-usage-report  analyze/running  opus  $11.15
+- infra-e6         infra         idle     1d   14m ago
+---
+Open dashboard
+Refresh now
+```
+
+**With nothing wrong the title is `cc 6` and nothing else.** No tick, no
+"all clear", no icon — a menu bar item that always has something to say is one
+you stop reading, and then it is not saying anything when it matters. Every
+condition it does find goes in the title rather than only the loudest, because
+the title is the one surface visible without a click and a condition left out
+of it reads as no condition at all.
+
+Nothing is behind a submenu, though the format offers them and they would tidy
+the list up considerably. A submenu is a collapsed badge: it turns a crashed
+phase into something you have to hover to discover, which is the same
+failure-as-an-absence the header alert control exists to avoid.
+
+**The plugin contains no judgement.** It finds `ccwatch`, fixes up `PATH`, and
+runs `ccwatch bar`. Every verdict, threshold and word comes from the same jq
+program the table is rendered from, for the reason `/api/state` invokes the CLI
+rather than reimplementing the join: two renderings that decide "is anything
+stuck" separately will eventually disagree, and then there is no way to tell
+which one is lying. The measurement in each row is the table's own `LAST`
+column, not a second calculation of it.
+
+The one thing the plugin does decide is whether it got an answer at all, and
+that is why it does not `exec`. `ccwatch` can exit before printing anything —
+`need jq` does exactly that, and the plugin host's `PATH` is the reason it
+might — and the host renders stdout, so an `exec` into a tool that died would
+leave a blank item with nothing under it. That is indistinguishable from a
+machine running nothing. An empty result is reported as the failure it is,
+with `ccwatch`'s own diagnosis from stderr underneath it.
+
+A stale usage reading is **withheld here too**, and if the snapshot itself
+fails the title is `cc ?` rather than `cc 0`. The menu bar is the worst place
+for either mistake: a percentage up there is read as current with nothing
+around it to date it, and a quiet machine and a blind tool look identical.
+
+⚠️ **Session names and `waitingFor` notes are stripped of `|` before they reach
+a line.** That is a security control, not tidying: a bare pipe opens the plugin
+format's parameter list, and `bash=` is one of the parameters it accepts — so
+an unsanitised note would put a clickable command in the menu. It becomes `¦`,
+so the name still reads as the name it is.
+
+Two things worth knowing about the interval. The `10s` is in the **filename**,
+read by the plugin host rather than by anything here, so renaming the file
+changes it — and ten rather than the terminal's two because `ccwatch` walks the
+transcript tree on every snapshot, which was 1.7GB on a working machine.
+Measure your own with `CCWATCH_PROFILE=1 ccwatch --json` before going faster.
+Install the plugin as a **symlink**, both so `git pull` upgrades it and because
+that is how the script locates the checkout it came from.
+
+For any other status bar — tmux, Übersicht, a shell prompt — `ccwatch bar
+--title` prints just that first line, with no parameters on it.
 
 ## In a browser
 
@@ -1203,6 +1280,9 @@ ccwatch install-hooks         # never miss a prompt that opened between polls
 ccwatch install-statusline    # wrap your statusline to report usage + context
 ```
 
+For the menu bar item, symlink the plugin into SwiftBar's or xbar's plugin
+folder — see [In the menu bar](#in-the-menu-bar).
+
 ### Requirements
 
 | | |
@@ -1248,7 +1328,7 @@ All environment variables, all optional.
 | `CCWATCH_SEND_AS` | `ccwatch` | how sent messages identify themselves |
 | `CCWATCH_DEPLOY_PATTERN` | `deploy\|release\|rollback\|publish\|promote` | which workflows count as deploys |
 | `CCWATCH_DEPLOY_TTL` | `60` | seconds to cache `gh` results |
-| `CCWATCH_PORT` | `8787` | port for `ccwatch serve` |
+| `CCWATCH_PORT` | `8787` | port for `ccwatch serve`, and the one `ccwatch bar` probes to decide whether to link to a dashboard or offer to start one |
 | `CCWATCH_IDLE_GRACE` | `15` | seconds `/api/state` may go unread before `ccwatch serve` stops collecting |
 | `CCWATCH_SNAPSHOT_TIMEOUT` | `90` | seconds the snapshot collector may run before it is reported as a failed collection |
 | `CCWATCH_SNAPSHOT_CADENCE` | `2` | seconds between snapshot collections while the feed is being read; settable so an assertion can make the cadence longer than the exchange it measures |
@@ -1398,6 +1478,23 @@ implementation broken in the specific way it describes:
 | change `#board` to `overflow:hidden`, so nobody can scroll it with a wheel, a scrollbar or a key | 2 (verify-ui) + 2 |
 | build a figure as a `<div>` instead of a `<button>` | 2 (verify-ui) + 2 |
 | remove `scrollIntoView` from `revealSelection`, so selecting a roster row never brings the figure into view | 1 (verify-ui) |
+| let `ccwatch bar`'s title carry only the highest severity instead of every condition it found | 1 |
+| drop the pipe strip from a session name on a menu line | 3 |
+| drop the pipe strip from a `waitingFor` note on a menu line | 1 |
+| print a menu row's verdict with no measurement beside it | 1 |
+| put the pipeline sub-row behind a `--` submenu | 1 |
+| render a stale usage reading in the menu instead of withholding it | 2 |
+| let a failed snapshot fall through to `ccwatch bar`'s ordinary rendering | 3 |
+| offer "Start dashboard" whether or not one is already listening | 2 |
+| drop `parse_failed` from the menu bar title | 1 |
+| drop `parse_failed` from the menu's dropdown sentence | 2 |
+| add an all-clear clause to a menu bar title with nothing wrong | 1 |
+| drop the words that say a crashed phase needs a rerun | 1 |
+| render an empty menu for a machine with no live sessions | 2 |
+| map `sev` to a different glyph in the menu than the table's awk does | 2 |
+| `exec` into `ccwatch` from the plugin, so a tool that died leaves a blank item | 2 |
+| pass `ccwatch`'s stderr into a menu line without the pipe strip | 1 |
+| have the plugin report a failure whatever `ccwatch` printed | 1 |
 | stop toggling `.selected`, so the selected row's figure carries no mark | 1 (verify-ui) |
 | leave the wire overlay unsized, so every wire is clipped to the SVG's default 300x150 | 1 (verify-ui) |
 | drop `--force-prefers-reduced-motion` from verify-ui's Chrome, so the reveal check races a compositor that virtual time never advances | 1 (verify-ui) |
@@ -1543,6 +1640,21 @@ participate, a title short enough not to wrap, a machine whose session count
 happens to fit — and a green check in the wrong regime is indistinguishable
 from a working page. Both usage-meter checks now pose their own inputs: the
 window's percentages, the reading's staleness, and the title's own length.
+
+The menu bar added two more, and the first is the plainest example of the kind
+in the whole file:
+
+| The check | Why it could not fail, and what it is now |
+|---|---|
+| "the menu bar title is a single line" | written as `printf '%s\n' "$title" \| wc -l`, which **appends the newline it then counts** — so it reports 1 for a title that is the empty string. It stayed green through an entire run in which every other assertion in the section was failing on empty output, because the harness was pointing `$CCWATCH` at a path that did not exist. It is now `printf '%s' \| awk 'END{print NR}'`, which reports 0 for nothing at all |
+| "an unreadable registry file reaches the title" | asserted against the whole document, and matched the phrase out of the dropdown's summary *line* instead — so deleting the title clause left it green. The title and the dropdown are two surfaces making two claims, and they now have an assertion each, the first against `bar --title` |
+
+Both are the same mistake in different clothes: the check was reading a
+*superset* of what it claimed to read. The first counted a character the
+assertion itself had added, the second matched a string the document contained
+somewhere else. Neither is visible from a green run, and only the mutation
+showed them up — the second one went through green and would have been counted
+as coverage for a title that had stopped reporting.
 
 Two flakes were found and fixed the same way: a backup-file count that depended
 on whether two writes landed in the same second, and a `serve` warm-up that
