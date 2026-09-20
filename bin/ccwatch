@@ -4180,10 +4180,78 @@ function run(doc, win) {
             hits.length === 0,
             "chip " + Math.round(chipB.l) + ".." + Math.round(chipB.r) +
             " overlaps: " + (hits.join(", ") || "nothing"));
+      // The gauge uses the whole width instead of a right-aligned column, with
+      // the reset instant pushed to the far end of its first line.
+      var gg = doc.querySelector(".g-gauge");
+      if (gg) {
+        var ggB = boxOf(gg);
+        var hdrB = boxOf(doc.querySelector("header"));
+        var resetB = boxOf(gg.querySelector(".g-reset"));
+        var headB = boxOf(gg.querySelector(".g-head"));
+        check("the usage gauge spans the header width at overlay size",
+              ggB.w > hdrB.w * 0.8,
+              "gauge " + Math.round(ggB.w) + "px of header " + Math.round(hdrB.w) + "px");
+        check("and the reset instant sits to the right of the numbers, not under them",
+              resetB.w > 0 && resetB.l > headB.l &&
+                Math.abs(resetB.t - headB.t) < headB.h,
+              "reset at x=" + Math.round(resetB.l) + " y=" + Math.round(resetB.t) +
+              " vs numbers x=" + Math.round(headB.l) + " y=" + Math.round(headB.t));
+      } else {
+        skip("the usage gauge spans the header width at overlay size",
+             "no gauge rendered; this machine reports no usage");
+        skip("and the reset instant sits to the right of the numbers, not under them",
+             "no gauge rendered");
+      }
+
+      // ⚠️ Repos share a row when they fit. The base rule reserves 280px per
+      // card, so in a 470px overlay every repo took a line of its own — and a
+      // `grid-template-columns:1fr` in the dense block made it unconditional.
+      // The claim is geometric and nothing structural can see it: the cards
+      // have identical markup whether they stack or sit side by side.
+      var multi = null;
+      [].slice.call(doc.querySelectorAll(".district")).forEach(function (d) {
+        var cards = d.querySelectorAll(".building");
+        if (!multi && cards.length >= 2) { multi = cards; }
+      });
+      if (multi) {
+        var aB = boxOf(multi[0]), bB = boxOf(multi[1]);
+        check("two repos in one owner share a row rather than stacking",
+              Math.abs(aB.t - bB.t) < 2 && bB.l > aB.l,
+              "card tops " + Math.round(aB.t) + " and " + Math.round(bB.t) +
+              ", lefts " + Math.round(aB.l) + " and " + Math.round(bB.l));
+      } else {
+        skip("two repos in one owner share a row rather than stacking",
+             "no owner on this machine has two repos to place");
+      }
+
       var figW = boxOf(doc.querySelector(".agent")).w;
       check("and a figure is scaled down so more of them fit per row",
-            figW > 0 && figW < 66,
+            figW > 0 && figW < 50,
             ".agent rendered " + Math.round(figW) + "px wide (70px at the default root size)");
+      // ⚠️ The art itself, not just its container. `figure()` creates the SVG
+      // at a fixed 34x38 in JS, so before it was sized in em the labels and
+      // gaps shrank around figures that stayed exactly as big — which is most
+      // of why the board did not get denser. A check on `.agent` alone cannot
+      // see that: the container was already narrowing.
+      var artW = boxOf(doc.querySelector(".figure")).w;
+      check("and the figure art shrank with it, not just its container",
+            artW > 0 && artW < 30,
+            ".figure rendered " + Math.round(artW) + "px wide (34px at the default)");
+      // ⚠️ And the labels, which are in px and so are reached by NONE of the
+      // root-size change. An owner heading at 14px beside a 12px board was the
+      // complaint; a check on the media query would pass against a rule that
+      // applies to nothing.
+      var dl = doc.querySelector(".dlabel");
+      var dlSize = dl ? parseFloat(win.getComputedStyle(dl).fontSize) : 0;
+      check("and the owner heading is smaller than the board it labels",
+            dlSize > 0 && dlSize <= 11,
+            ".dlabel computed " + dlSize + "px (14px at wide widths)");
+      // A floor, stated as an assertion so nobody shrinks it into noise later.
+      var al = doc.querySelector(".alabel");
+      var alSize = al ? parseFloat(win.getComputedStyle(al).fontSize) : 0;
+      check("and no label is shrunk below the 8px legibility floor",
+            alSize >= 8 && dlSize >= 8,
+            ".alabel " + alSize + "px, .dlabel " + dlSize + "px");
       var fold = doc.getElementById("rosterfold");
       var fB = boxOf(fold);
       check("and the fold control is rendered and says what it does",

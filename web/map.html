@@ -43,8 +43,66 @@
      overlay width; at 12px, two. Anything sized in `px` deliberately does not
      scale with it: borders stay 1px and the smallest labels keep their
      legibility floor rather than shrinking into noise. */
-  @media (max-width:720px) { html { font-size:13px; } }
-  @media (max-width:520px) { html { font-size:12px; } }
+  @media (max-width:720px) { html { font-size:12px; } }
+  @media (max-width:520px) { html { font-size:11px; } }
+
+  /* ⚠️ The dense board, for the overlay. The root size above only reaches what
+     is written in `rem`, and every LABEL on this board is in `px` — 14px for
+     an owner, 12px for a repo, 10px for a branch — so they stayed full size
+     while the layout around them shrank, which is why an org heading looked
+     enormous next to a 12px board. These are the px ones, explicitly.
+     8px is the floor and it is deliberate: `.alabel` is a two-character
+     session suffix, and the whole reading is in the modal and the table. Going
+     below that trades a fact for a pixel. */
+  /* ⚠️ Every selector here is qualified with `#boardinner`, and that is not
+     tidiness. This block sits ABOVE the base rules it overrides, and a bare
+     `.dlabel { font-size:11px }` loses to the `.dlabel { font-size:14px }`
+     further down the sheet — same specificity, later wins. Measured: the owner
+     heading stayed at 14px with this whole block in force. The header made the
+     identical mistake once (see `header .gauges`) and was fixed the same way,
+     for the stated reason that specificity cannot be undone by moving a rule
+     whereas source order can. */
+  @media (max-width:720px) {
+    #boardinner .dlabel { font-size:11px; }
+    #boardinner .blabel { font-size:10px; }
+    #boardinner .zlabel { font-size:9px; }
+    #boardinner .alabel { font-size:8px; }
+    #boardinner .norepo-badge,
+    #boardinner .wreck-badge,
+    #boardinner .deploy-badge { font-size:9px; }
+    #boardinner .wire text { font-size:8px; }
+    /* And the space between things, which at this size is most of the board.
+       A single grid column too: `minmax(min(280px,100%), 1fr)` already gives
+       one at 470px, but saying so stops the 280px floor deciding anything. */
+    #board #boardinner { gap:.5rem; }
+    #boardinner .district { padding:.4rem .45rem; border-radius:6px; }
+    #boardinner .dhead { margin-bottom:.3rem; gap:.4rem; }
+    /* ⚠️ The track floor drops to 150px so repos SHARE a row. The base rule
+       reserves 280px per card, and two of those do not fit in a 470px overlay,
+       so every repo took a row of its own — `rv-jclark/ccwatch` and
+       `rv-jclark/speckit-pipeline` stacked when they had room to sit side by
+       side. (An earlier version of this block said `1fr`, which forced the
+       single column outright; that was mine, and it was worse.)
+       150px is what a card needs to stay useful: three figures per row at
+       3.2rem plus its padding. The slug and the branch ellipsise instead —
+       identity truncates, which is the same trade the roster rows make, and
+       the status words and measurements inside never do. */
+    #boardinner .buildings {
+      gap:.35rem;
+      grid-template-columns:repeat(auto-fit, minmax(min(150px, 100%), 1fr));
+    }
+    #boardinner .building { padding:.3rem .35rem; }
+    #boardinner .zones { gap:.25rem; }
+    #boardinner .zone { padding-left:.3rem; }
+    #boardinner .figures { gap:.1rem; }
+    #boardinner .agent { width:3.2rem; padding:.05rem .1rem .1rem; }
+    #boardinner .figure { width:1.9em; height:2.15em; }
+  }
+  @media (max-width:520px) {
+    #boardinner .dlabel { font-size:10px; }
+    #boardinner .blabel { font-size:9px; }
+    #boardinner .agent { width:3rem; }
+  }
   body { margin:0; background:var(--bg); color:var(--ink); overflow:hidden;
          display:flex; flex-direction:column;
          font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
@@ -115,6 +173,10 @@
     #alertslot { position:absolute; right:.7rem; top:.5rem;
                  max-width:min(40%, 20ch); min-width:0; z-index:2; }
     .hleft { padding-right:min(40%, 20ch); }
+    /* And the header itself is tighter. At overlay size its padding and the
+       gap between its rows were a visible fraction of the window. */
+    header { padding:.45rem .7rem; gap:.35rem; }
+    .hleft { gap:.5rem; }
     /* ⚠️ And the counts go, to make room for it. They are the one thing in
        this header that is repeated verbatim two lines down — the roster's own
        title says "agents · 19" and stays visible even when the roster is
@@ -239,6 +301,27 @@
   .gauges { display:flex; gap:1.1rem; align-items:flex-start;
             flex-wrap:wrap; justify-content:flex-end;
             min-height:4.8em; min-width:45em; }
+  /* ⚠️ Narrow, a gauge lays itself out across the FULL width instead of
+     stacking three lines in a right-aligned column: the numbers on the left of
+     the first line, when it resets pushed to the right of it, and the bars
+     spanning the second. That is one line saved out of a ~630px overlay, and
+     the reset instant stops sitting under a 78px bar with the rest of the
+     width empty beside it.
+     Grid areas rather than reordering the DOM: the source order is head, bars,
+     reset — the order it is read in — and `grid-template-areas` places them
+     without touching it, so the tab order and the reading order stay as they
+     were. */
+  @media (max-width:720px) {
+    header .gauges { width:100%; gap:.3rem; min-height:2.9em; }
+    header .g-gauge { display:grid; width:100%;
+                      grid-template-columns:1fr auto;
+                      grid-template-areas:"head reset" "bars bars";
+                      column-gap:.5rem; }
+    header .g-head   { grid-area:head; }
+    header .g-reset  { grid-area:reset; justify-self:end; align-self:baseline;
+                       white-space:nowrap; }
+    header .g-barrow { grid-area:bars; }
+  }
   .g-label { color:var(--dim); } .g-val { font-weight:600; }
   .g-reset { color:var(--dim); font-size:11px; }
   /* One gauge: the numbers, then the two bars, then when it resets. */
@@ -379,7 +462,13 @@
   /* The selection mark (contracts/page-roster.md §6): a dashed ring, so it
      reads as "picked in the roster" rather than as a status of its own. */
   .agent.selected { border-color:var(--info); border-style:dashed; }
-  .figure { display:block; overflow:visible; }
+  /* ⚠️ Sized in em so the art scales with the root size. `figure()` creates
+     the SVG with width/height attributes of 34x38, and a viewBox means a CSS
+     size overrides them — without this the labels and gaps shrank on a small
+     screen while the figures themselves stayed exactly as big, which is most
+     of why the board did not get denser. 2.125em x 2.375em is 34x38 at the
+     default 16px root, so the wide layout is unchanged to the pixel. */
+  .figure { display:block; overflow:visible; width:2.125em; height:2.375em; }
   .alabel { font-size:9px; color:var(--dim); max-width:100%; overflow:hidden;
             text-overflow:ellipsis; white-space:nowrap; }
   .agent.sev4 .alabel { color:var(--block); font-weight:600; }

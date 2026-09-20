@@ -16,3 +16,8 @@ specs/*/.pipeline/
 
 # Built by app/build.sh. A compiler output, not a source.
 app/build/
+
+# `patch` leaves these behind. A stale copy of a page beside the real one is
+# a file somebody will read by mistake.
+*.orig
+*.rej
