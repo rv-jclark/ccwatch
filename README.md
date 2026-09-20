@@ -1510,6 +1510,7 @@ implementation broken in the specific way it describes:
 | let `collect_live` believe an empty answer without checking that `ps` can run at all | 1 |
 | let `collect_live` call a working `ps` with no live pids a failure rather than an absence | 1 |
 | read the CPU cache with a per-value filter instead of slurping, so a poisoned cache stays poisoned | 3 |
+| drop the `$TMPDIR` template from `mktemp -d` in `resume`/`peers` | 1 sandboxed, 4 not (see below) |
 | stop toggling `.selected`, so the selected row's figure carries no mark | 1 (verify-ui) |
 | leave the wire overlay unsized, so every wire is clipped to the SVG's default 300x150 | 1 (verify-ui) |
 | drop `--force-prefers-reduced-motion` from verify-ui's Chrome, so the reveal check races a compositor that virtual time never advances | 1 (verify-ui) |
@@ -1655,6 +1656,23 @@ participate, a title short enough not to wrap, a machine whose session count
 happens to fit — and a green check in the wrong regime is indistinguishable
 from a working page. Both usage-meter checks now pose their own inputs: the
 window's percentages, the reading's staleness, and the title's own length.
+
+The collector fixes added a **fifth** kind, and it is the subtlest yet: a check
+that goes red on one host and stays green on another, for the same bug.
+
+Reverting the `$TMPDIR` template on `mktemp -d` is caught by four assertions
+worded "`resume` takes its temp directory from `$TMPDIR`" — on a normal
+machine. Under a sandbox that refuses `/var/folders`, bare `mktemp -d` dies
+too, so all four stay **green against the bug**, and the only thing that moves
+is the positive case at the end ("a usable `$TMPDIR` lets resume report"),
+which on a normal machine passes either way. Neither direction is a check on
+its own; between them they cover both hosts, and deleting the positive case as
+redundant would leave a sandboxed run blind to the regression. Measured by
+reverting the template and watching which went red where.
+
+The lesson generalises past this one assertion: *where* a check can fail is a
+property of the host, not just of the code, and "I watched it go red" is only
+evidence for the host you watched it on.
 
 The menu bar added two more, and the first is the plainest example of the kind
 in the whole file:
