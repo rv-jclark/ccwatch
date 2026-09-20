@@ -1471,10 +1471,23 @@ cmd_bar() {
     # percentage alone in a menu bar has nothing around it to date it, and the
     # reader supplies "now" for free. So a stale or absent reading falls back to
     # the live count, and the dropdown says which it was.
+    # ⚠️ No "5h" here, and that is the point. `5h` is the NAME of the
+    # five-hour rate-limit window, and in the terminal it earns its place as a
+    # column label beside `7d`. Alone in a menu bar it reads as a duration —
+    # "5h 59%" was asked, reasonably, what the 5h meant — and the duration
+    # that actually matters, how long until the window resets, was missing
+    # entirely. So the label goes and the reset comes in. The dropdown one
+    # click away still labels every window, which is where telling 5h from 7d
+    # matters.
+    #
+    # "resets in 2h", not "2h left": the latter reads as two hours of quota
+    # remaining, which is a different and much more expensive thing to believe.
     | ( if .usage != null
              and ((.usage.age // 0) <= (.usage.stale_after // 600))
              and (.usage.five_hour != null)
-        then "5h \(.usage.five_hour.used_percentage|floor)%"
+        then "\(.usage.five_hour.used_percentage|floor)%"
+             + ( if .usage.five_hour.resets_at == null then ""
+                 else " · resets in \(dur(.usage.five_hour.resets_at - $now))" end )
         else "cc \($live)" end )                          as $lead
 
     | ( [ $lead, (if $conditions == "" then empty else $conditions end) ]
@@ -1540,11 +1553,19 @@ cmd_bar() {
               # an hour apart and a bare time is ambiguous for half the year.
               ( def gauge(nm; x; clock):
                   if x == null then empty
-                  else "\(nm) \(x.used_percentage|floor)%"
+                  # The name of the window belongs HERE, where there is
+                  # more than one of them and telling 5h from 7d is the whole
+                  # job of a label. And "used", because a bare percentage does
+                  # not say whether it is what you have spent or what is left.
+                  #
+                  # No apostrophes in this program: it is a single-quoted jq
+                  # argument, and one closes it. That is a bash syntax error
+                  # 400 lines from the typo.
+                  else "\(nm) · \(x.used_percentage|floor)% used"
                        + ( if x.resets_at == null then ""
                            elif clock == ""
-                           then "  resets in \(dur(x.resets_at - $now))"
-                           else "  resets in \(dur(x.resets_at - $now)) · \(clock)"
+                           then " · resets in \(dur(x.resets_at - $now))"
+                           else " · resets in \(dur(x.resets_at - $now)) · \(clock)"
                            end )
                   end;
                 [ gauge("5h"; .usage.five_hour; $c5),

@@ -636,14 +636,15 @@ func selftest() -> Int32 {
     print("ccwatch-menu selftest")
 
     let doc = BarDocument.parse("""
-    5h 37% · 1 waiting | sfimage=bell.badge color=#ff6fb5
+    37% · resets in 2h · 1 waiting | sfimage=bell.badge color=#ff6fb5
     ---
     3 live · 1 waiting on you | size=12
     ---
     * asking      repo  waiting  1h   permission to run rm 4m | font=Menlo size=12 color=purple
     ! hung-one    repo  HUNG?    1h   quiet 20m | font=Menlo size=12 color=red
     """)
-    check(doc.title == "5h 37% · 1 waiting", "the title is the CLI's, parameters stripped")
+    check(doc.title == "37% · resets in 2h · 1 waiting",
+          "the title is the CLI's, parameters stripped")
     // ⚠️ The words have to survive the colour. Pink is an addition; "waiting"
     // is the carrier, and a title reading only "5h 37%" in pink would put the
     // whole claim into a hue (constitution VII).

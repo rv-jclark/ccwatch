@@ -1366,7 +1366,7 @@ fi
 # it sits there between glances with nothing around it to date it.
 python3 -c "import json,time; print(json.dumps({'at':int(time.time()),'five_hour':{'used_percentage':42.0},'seven_day':{'used_percentage':3.0}}))" \
   > "$BCH/usage.json"
-assert_contains "$(bar_run)" "5h 42%" "a fresh usage reading is shown in the dropdown"
+assert_contains "$(bar_run)" "5h · 42% used" "a fresh usage reading is shown in the dropdown"
 jq -c '.at = 1' "$BCH/usage.json" > "$BCH/u.tmp" && mv "$BCH/u.tmp" "$BCH/usage.json"
 _barstale=$(bar_run)
 assert_contains "$_barstale" "not shown" \
@@ -1389,7 +1389,22 @@ mkps 9310 "1:00.00" >> "$WORK/ps-bar"
 python3 -c "import json,time; n=int(time.time()); print(json.dumps({'at':n,'five_hour':{'used_percentage':37.0,'resets_at':n+7500},'seven_day':{'used_percentage':9.0,'resets_at':n+320000}}))" \
   > "$BCH/usage.json"
 _bartu=$(bar_run --title)
-assert_contains "$_bartu" "5h 37%" "the title leads with the usage percentage"
+assert_contains "$_bartu" "37%" "the title leads with the usage percentage"
+# ⚠️ And NOT with the window's name. `5h` is what the five-hour rate-limit
+# window is called, and beside `7d` in the terminal it earns its place — alone
+# in a menu bar it reads as a duration, which is exactly how it was read:
+# "5h 59%. What does 5h mean?" The label belongs in the dropdown, where there
+# is more than one window to tell apart.
+assert_not_contains "$_bartu" "5h" "and not with the name of the window, which reads as a duration"
+# The duration that IS worth the space: how long until it resets.
+assert_contains "$_bartu" "resets in" "but with the time left on the window, which is"
+# ⚠️ "resets in 2h", never "2h left" — the latter reads as two hours of quota
+# remaining, which is a different and far more expensive thing to believe.
+assert_not_contains "$_bartu" "left" "phrased so it cannot be read as quota remaining"
+# ⚠️ And the condition is still there IN WORDS. The title also turns pink when
+# a session is blocked on you, and a title reading only "5h 37%" in pink would
+# put the entire claim into a hue — unreadable to `grep`, to a screen reader
+# and to a screenshot (constitution VII).
 assert_contains "$_bartu" "waiting" "and still spells out the condition beside it"
 assert_contains "$(bar_run | head -1)" "color=" "with a colour asked for on the title line"
 assert_contains "$(bar_run | head -1)" "sfimage=" "and an icon"
@@ -1415,6 +1430,10 @@ python3 -c "import json,time; n=int(time.time()); print(json.dumps({'at':n,'five
 _barreset=$(bar_run)
 assert_contains "$_barreset" "resets in 2h" "the menu prints how long is left on the window"
 assert_contains "$_barreset" "EDT" "and the wall clock it resets at, with the zone"
+# A bare percentage does not say whether it is what you have spent or what is
+# left, and the dropdown has room to say which.
+assert_contains "$_barreset" "% used" "and says the percentage is what has been used"
+assert_contains "$_barreset" "5h ·" "with the window it belongs to named, here where 5h and 7d must be told apart"
 
 # ⚠️ Cross-renderer, and the reason this assertion exists rather than a
 # format check: the clock is computed by `date -r` in ONE place, and the
