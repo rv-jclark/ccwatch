@@ -79,7 +79,9 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # which is one machine's configuration written into the suite.
 # Raised again by the `collectors` section: 20, all of which always run - they
 # need no port, no server and no optional tool.
-# And by `bar --no-actions`: 7, and the usage-led title and reset clock: 11. The `app` section adds 8 more that are
+# And by `bar --no-actions`: 7, and the usage-led title and reset clock: 11.
+# And 19 on reporters that disagree about the usage figure - all of which
+# always run: they pose their own readings on disk and need nothing else. The `app` section adds 8 more that are
 # deliberately NOT in the floor: seven need a built app bundle, the eighth needs
 # a linter, and a floor counting them would fail on any machine that has never
 # run swiftc.
@@ -87,7 +89,7 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # directive and the file stops parsing.)
 # And by `setup`: 24, likewise - it installs into a temp directory, so it needs
 # nothing the host might not have.
-TALLY_FLOOR=435
+TALLY_FLOOR=454
 TALLY_FLOOR_NODE=243
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -764,7 +766,23 @@ assert_contains "$_hdr" "18%" "and the per-session context fill in its own colum
 
 # A reading with no age is the failure this whole tool exists to avoid: a
 # number presented as current when nobody knows whether it is.
-jq -c '.at = 1' "$SLH/usage.json" > "$SLH/usage.tmp" && mv "$SLH/usage.tmp" "$SLH/usage.json"
+#
+# ⚠️ BOTH copies are aged, and that is the point of the helper. `ccwatch
+# statusline` writes its reading twice — once to usage.json and once under
+# usage/<session>.json — because one file per reporter is what lets a
+# disagreement between sessions be seen instead of flickering. Ageing only
+# usage.json left the per-reporter copy fresh, so this fixture posed a 42%
+# reading and a 7% one seconds apart and got exactly what it should get: a
+# withheld figure and "3 sessions disagree". The fixture has to pose the WHOLE
+# state, not half of it.
+ua_age_all() { # ua_age_all <ccwatch-home> <epoch>
+  local f
+  for f in "$1/usage.json" "$1"/usage/*.json; do
+    [ -f "$f" ] || continue
+    jq -c --argjson at "$2" '.at = $at' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  done
+}
+ua_age_all "$SLH" 1
 _old=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-u" CCWATCH_HOME="$SLH" \
        NO_COLOR=1 "$CCWATCH" once 2>&1)
 assert_contains "$_old" "not shown" \
@@ -778,6 +796,10 @@ assert_contains "$_old" "not shown" \
 assert_not_contains "$_old" "42%" "and the stale percentage itself is not rendered anywhere"
 # A fresh reading is still shown, so the rule above cannot be satisfied by
 # simply never displaying anything.
+# ⚠️ And the per-reporter copies go, so this poses ONE reading rather than a
+# fresh 7% standing next to a fresh 42%. Leaving them is how the assertion
+# below first went red, and the reason it went red was the tool working.
+rm -f "$SLH"/usage/*.json
 python3 -c "import json,time; print(json.dumps({'at':int(time.time()),'five_hour':{'used_percentage':7.0,'resets_at':int(time.time())+16200},'seven_day':{'used_percentage':3.0}}))" \
   > "$SLH/usage.json"
 _fresh=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-u" CCWATCH_HOME="$SLH" \
@@ -792,6 +814,131 @@ jq -c '.at = 1' "$SLH/context/aaaaaaaa-0000-0000-0000-000000000001.json" > "$SLH
 _nc=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-u" CCWATCH_HOME="$SLH" \
       NO_COLOR=1 "$CCWATCH" --json 2>/dev/null | jq -r '.sessions[0].context')
 assert_eq "$_nc" "null" "a context reading that stopped being refreshed is dropped, not frozen"
+
+# --- reporters that do not agree about the same window ----------------------
+# ⚠️ This whole block exists because of a measured wrong answer, not a
+# hypothetical. `usage.json` is written by whichever statusline repainted last,
+# and the code used to say the figures are account-wide "so any session that
+# reports is as good as any other". On a real machine four sessions wrote 12%,
+# 14%, 15% and `five_hour: null` inside one minute, and the menu bar was
+# reported cycling 101% / 88% / 62% — three figures, at most one true, each
+# shown with no hedge. Picking the newest would not have fixed that; it would
+# have made the wrong number stable.
+UAH="$WORK/usage-agree"
+UAC="$WORK/usage-agree-cch"
+mkdir -p "$UAH/sessions" "$UAH/projects/-fake-repo" "$UAC/usage"
+_uanow=$(date '+%s')
+cat > "$UAH/sessions/9951.json" <<EOF
+{"pid":9951,"sessionId":"dd000001-0000-0000-0000-000000000001","cwd":"/fake/repo",
+ "startedAt":$(( (_uanow - 3600) * 1000 )),"kind":"interactive","entrypoint":"cli",
+ "name":"usage-one","version":"9.9.9","status":"idle",
+ "statusUpdatedAt":$(( (_uanow - 240) * 1000 ))}
+EOF
+touch -t "$(date -r "$((_uanow - 30))" '+%Y%m%d%H%M.%S')" \
+  "$UAH/projects/-fake-repo/dd000001-0000-0000-0000-000000000001.jsonl"
+mkps 9951 "1:00.00" > "$WORK/ps-ua"
+
+# ua_report <sid> <five_hour-pct|none> <seconds-ago>
+ua_report() {
+  python3 -c "
+import json, os, sys, time
+sid, pct, off = sys.argv[1], sys.argv[2], int(sys.argv[3])
+n = int(time.time())
+five = None if pct == 'none' else {'used_percentage': float(pct), 'resets_at': n + 7000}
+json.dump({'at': n - off, 'session': sid, 'five_hour': five},
+          open(os.path.join(sys.argv[4], sid + '.json'), 'w'))
+" "$1" "$2" "$3" "$UAC/usage"
+}
+ua_run() { CLAUDE_CONFIG_DIR="$UAH" CCWATCH_FAKE_PS="$WORK/ps-ua" CCWATCH_HOME="$UAC" \
+             NO_COLOR=1 "$CCWATCH" "$@" 2>/dev/null; }
+
+rm -f "$UAC/usage"/*.json
+ua_report aaa 101 2
+ua_report bbb 88 5
+ua_report ccc 62 8
+_uadis=$(ua_run bar)
+assert_not_contains "$(ua_run bar --title)" "%" \
+  "three reporters disagreeing means NO percentage in the menu bar title"
+assert_contains "$_uadis" "3 sessions disagree" "and the dropdown says how many disagree"
+assert_contains "$_uadis" "62%" "with the low end of the range"
+assert_contains "$_uadis" "101%" "and the high end, so the spread is visible"
+assert_contains "$_uadis" "not shown" "and states that the figure is withheld"
+_uaonce=$(ua_run once)
+assert_contains "$_uaonce" "report different figures" \
+  "the terminal header withholds it the same way"
+assert_not_contains "$_uaonce" "5h 101%" "and does not render one of the figures anyway"
+# ⚠️ doctor is where "why is there no percentage" gets answered, so it names
+# the reporters. The header can only afford a range; this is the thing that
+# tells you which session to go and look at.
+_uadoc=$(CLAUDE_CONFIG_DIR="$UAH" CCWATCH_FAKE_PS="$WORK/ps-ua" CCWATCH_HOME="$UAC" \
+         NO_COLOR=1 "$CCWATCH" doctor 2>&1)
+assert_contains "$_uadoc" "different usage figures" "doctor reports the disagreement"
+assert_contains "$_uadoc" "aaa" "and lists each reporter"
+assert_contains "$_uadoc" "101%" "with the figure each one gave"
+
+# ⚠️ And agreement still shows the number, or every assertion above is
+# satisfied by a tool that simply never reports usage again.
+rm -f "$UAC/usage"/*.json
+ua_report aaa 101 2
+ua_report bbb 100 5
+ua_report ccc 99 8
+assert_contains "$(ua_run bar --title)" "101%" \
+  "reporters within the tolerance are believed, and the newest one is shown"
+assert_not_contains "$(ua_run bar)" "disagree" "with no disagreement reported"
+
+# ⚠️ Drift is not disagreement. Usage climbs while you work, so a reading from
+# ten minutes ago being much lower is expected — only readings taken close
+# together are compared. Without that window, every long-lived machine would
+# report a permanent disagreement and never show a figure again.
+rm -f "$UAC/usage"/*.json
+ua_report aaa 101 2
+ua_report old 40 400
+assert_contains "$(ua_run bar --title)" "101%" \
+  "an old, much lower reading is drift rather than disagreement"
+
+# ⚠️ A reporter whose payload has no five_hour must not blank the reading. That
+# is the observed blip: the menu bar dropped its percentage entirely for one
+# refresh because the session that wrote last had `five_hour: null`.
+rm -f "$UAC/usage"/*.json
+ua_report aaa 101 5
+ua_report nul none 1
+assert_contains "$(ua_run bar --title)" "101%" \
+  "a reporter with no five_hour is skipped, not allowed to blank the figure"
+
+# ⚠️ One repaint is one reporter, even though it writes two files. `ccwatch
+# statusline` writes the same reading to usage.json AND to
+# usage/<session>.json, so without de-duplication a single session counts
+# twice — and the count is the whole claim in "N sessions report different
+# figures". Reporting three when two sessions disagreed would be a made-up
+# number in the middle of a message about not making numbers up.
+#
+# Nothing else here poses this: the disagreement fixture above writes only
+# per-reporter files and the legacy fixture below writes only usage.json, so
+# removing the de-duplication left every assertion green.
+rm -f "$UAC/usage"/*.json "$UAC/usage.json"
+ua_report dup 101 2
+cp "$UAC/usage/dup.json" "$UAC/usage.json"      # the same repaint, both files
+ua_report other 62 4
+_uadedup=$(ua_run bar)
+assert_contains "$_uadedup" "2 sessions disagree" \
+  "a session writing both files counts once, not twice"
+assert_not_contains "$_uadedup" "3 sessions disagree" \
+  "so the reporter count is sessions, not files"
+rm -f "$UAC/usage.json"
+
+# A mixed install: a statusline that predates the per-reporter files writes
+# only usage.json, and dropping it would report "not reporting" on a machine
+# that plainly is.
+rm -f "$UAC/usage"/*.json
+python3 -c "
+import json, time
+n = int(time.time())
+json.dump({'at': n, 'session': 'legacy',
+           'five_hour': {'used_percentage': 44.0, 'resets_at': n + 7000}},
+          open('$UAC/usage.json', 'w'))"
+assert_contains "$(ua_run bar --title)" "44%" \
+  "a legacy single-file reading is still read when no per-reporter file exists"
+rm -f "$UAC/usage.json"
 
 # With no feed at all the header says so rather than showing nothing.
 _none=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-u" CCWATCH_HOME="$WORK/empty-home" \

@@ -75,6 +75,17 @@ EVENTS="$CCWATCH_HOME/events.jsonl"
 # wins — the numbers are per-account, not per-session, so any session that
 # reports is as good as any other.
 USAGE_FILE="$CCWATCH_HOME/usage.json"
+# ⚠️ And one file PER REPORTER beside it. `usage.json` is written by whichever
+# statusline repainted last, and the comment above it used to say the numbers
+# are account-wide "so any session that reports is as good as any other". That
+# is false, and was measured false: within one minute four sessions wrote 12%,
+# 14%, 15% and a payload with `five_hour: null`, and the menu bar was reported
+# cycling 101% / 88% / 62%. Whatever the cause — sessions signed in to
+# different accounts is the obvious candidate and nothing recorded here can
+# confirm it — ccwatch cannot tell which of two disagreeing readings is right,
+# so it must stop picking one. Keeping them apart is what makes the
+# disagreement visible instead of a flicker.
+USAGE_DIR="$CCWATCH_HOME/usage"
 # Context-window fill, which IS per-session, so one file each.
 CTX_DIR="$CCWATCH_HOME/context"
 
@@ -108,6 +119,12 @@ CCWATCH_CTX_STALE="${CCWATCH_CTX_STALE:-120}"
 # the real figure was 7% — a monitoring tool showing a confidently wrong number
 # is worse than one showing none.
 CCWATCH_USAGE_STALE="${CCWATCH_USAGE_STALE:-600}"
+# How close together two usage readings must be before disagreeing about the
+# same window means anything, and how far apart they may then be. Usage climbs
+# while you work, so a reading from ten minutes ago being lower is not a
+# conflict; two taken seconds apart differing by tens of points is.
+CCWATCH_USAGE_AGREE_WINDOW="${CCWATCH_USAGE_AGREE_WINDOW:-120}"
+CCWATCH_USAGE_TOLERANCE="${CCWATCH_USAGE_TOLERANCE:-5}"
 # How long `ccwatch send` waits to OBSERVE its message in the target's
 # transcript before reporting it as merely queued. Writing to the socket is not
 # evidence of delivery — that was proven the hard way, see cmd_send.
@@ -507,7 +524,7 @@ cmd_statusline() {
   # Everything in this block is best-effort. A failure here would otherwise
   # break the status line of whichever session happened to be running.
   {
-    mkdir -p "$CCWATCH_HOME" "$CTX_DIR" 2>/dev/null
+    mkdir -p "$CCWATCH_HOME" "$CTX_DIR" "$USAGE_DIR" 2>/dev/null
 
     printf '%s' "$payload" | jq -c --arg at "$(date '+%s')" '
       select(.rate_limits != null)
@@ -519,6 +536,26 @@ cmd_statusline() {
           spend_limit: .rate_limits.spend_limit }' 2>/dev/null \
       >"$USAGE_FILE.tmp" && [ -s "$USAGE_FILE.tmp" ] && mv "$USAGE_FILE.tmp" "$USAGE_FILE"
     rm -f "$USAGE_FILE.tmp"
+
+    # The same reading, kept under the session that reported it. `usage.json`
+    # above stays for a mixed install: an older statusline still writing only
+    # that file keeps working, and collect_usage falls back to it when no
+    # per-reporter file is fresh.
+    local usid
+    usid=$(printf '%s' "$payload" | jq -r '.session_id // empty' 2>/dev/null)
+    if [ -n "$usid" ]; then
+      printf '%s' "$payload" | jq -c --arg at "$(date '+%s')" --arg sid "$usid" '
+        select(.rate_limits != null)
+        | { at: ($at|tonumber), session: $sid,
+            five_hour: .rate_limits.five_hour,
+            seven_day: .rate_limits.seven_day,
+            seven_day_opus: .rate_limits.seven_day_opus,
+            spend_limit: .rate_limits.spend_limit }' 2>/dev/null \
+        >"$USAGE_DIR/$usid.json.tmp" \
+        && [ -s "$USAGE_DIR/$usid.json.tmp" ] \
+        && mv "$USAGE_DIR/$usid.json.tmp" "$USAGE_DIR/$usid.json"
+      rm -f "$USAGE_DIR/$usid.json.tmp"
+    fi
 
     # Per-session, keyed by session id so a row can find its own. The cost
     # figure comes along because it is in the same payload and is the only
@@ -622,15 +659,81 @@ cmd_install_statusline() {
 # Both report their own age. A percentage with no timestamp is the same failure
 # this whole tool exists to avoid: a number presented as current when nobody
 # knows whether it is.
+# collect_usage — the account-wide reading, or a statement that the reporters
+# do not agree on one.
+#
+# ⚠️ This used to be `jq` on a single file, and the single file is written by
+# whichever statusline repainted last. Measured on a real machine: four
+# sessions wrote 12%, 14%, 15% and `five_hour: null` inside one minute, and the
+# menu bar was reported cycling 101% / 88% / 62% — three figures, at most one
+# of which was true, each shown with no hedge. A percentage presented that way
+# is the exact failure constitution III exists to stop, and picking the newest
+# would not fix it: it would only make the wrong number stable.
+#
+# So the readings are collected PER REPORTER and cross-checked. Readings drift
+# apart legitimately as usage accrues, so only those taken close together are
+# compared, and a spread past the tolerance is reported as a disagreement with
+# its range rather than resolved by choosing. Constitution I: a claim needs a
+# second signal agreeing with it, and here the second signal is another
+# session.
 collect_usage() {
   local out
-  [ -f "$USAGE_FILE" ] || { printf 'null'; return 0; }
-  # Captured rather than `|| printf 'null'`: jq reading a FILE can print the
-  # values it managed to parse and then fail on trailing garbage, and a
-  # fallback welded to the end of that appends instead of replacing.
-  out=$(jq -c --argjson now "$(date '+%s')" --argjson stale "$CCWATCH_USAGE_STALE" \
-    '. + { age: ($now - .at), stale_after: $stale }' "$USAGE_FILE" 2>/dev/null)
-  if [ -n "$out" ]; then printf '%s' "$out"; else printf 'null'; fi
+  mkdir -p "$USAGE_DIR" 2>/dev/null
+  # ⚠️ The legacy single file is read as ONE MORE REPORTER, not as a fallback
+  # for when the directory is empty. As a fallback it was silently outranked:
+  # any fresh per-reporter file made `usage.json` invisible, so a test — and an
+  # upgrade — that wrote only the legacy file found its reading ignored with no
+  # sign why. As a reporter it participates, and because the same statusline
+  # writes both, readings are de-duplicated by session so one repaint counts
+  # once.
+  out=$( { cat "$USAGE_DIR"/*.json 2>/dev/null; cat "$USAGE_FILE" 2>/dev/null; } \
+    | jq -sc --argjson now "$(date '+%s')" \
+          --argjson stale "$CCWATCH_USAGE_STALE" \
+          --argjson window "$CCWATCH_USAGE_AGREE_WINDOW" \
+          --argjson tol "$CCWATCH_USAGE_TOLERANCE" '
+    # ⚠️ Staleness is NOT filtered here. Dropping old readings made
+    # collect_usage return null for a statusline that stopped reporting an
+    # hour ago, which is the same answer it gives for one that was never
+    # installed — so the header said "run install-statusline" to somebody
+    # whose feed had simply died, and "is your statusline still running?" was
+    # never reached. Two different facts, one rendering (constitution IV).
+    # The renderers decide what to do with an age; this only reports it.
+    [ .[] | select(type == "object" and .at != null)
+          | . + { age: ($now - .at) } ]
+    # One reading per reporter, newest kept: the same statusline writes both
+    # files, and counting it twice would inflate the reporter count and make a
+    # single session look like a quorum.
+    | group_by(.session // "legacy")
+    | map(sort_by(-.at) | .[0])
+    | sort_by(-.at)
+    | if length == 0 then null
+      else
+        # ⚠️ The figure comes from the newest reading that HAS one. Taking the
+        # newest reading full stop meant a payload with `five_hour: null`
+        # blanked the percentage for a refresh — the observed blip where the
+        # menu bar dropped to a bare session count and came back.
+        # Fresh readings are the only ones that can corroborate or contradict
+        # each other; a dead reporter is not evidence about now. But the
+        # newest reading overall is still what gets returned, so its age can
+        # be reported rather than turned into an absence.
+        ( [ .[] | select(.age <= $stale) ] ) as $fresh
+        | ( ( [ $fresh[] | select(.five_hour.used_percentage != null) ] | .[0] )
+            // $fresh[0] // .[0] ) as $newest
+        # Only readings taken near that one can contradict it. Usage climbs
+        # while you work, so a ten-minute-old 40% beside a current 101% is
+        # drift; two readings seconds apart saying 101% and 62% are not.
+        | [ $fresh[] | select((($newest.at) - .at) <= $window)
+                     | select(.five_hour.used_percentage != null)
+                     | .five_hour.used_percentage ] as $pcts
+        | ( $pcts | if length == 0 then null else (max - min) end ) as $spread
+        | $newest
+          + { stale_after: $stale, reporters: ($pcts | length) }
+          + ( if $spread != null and $spread > $tol
+              then { disagree: { lo: ($pcts | min), hi: ($pcts | max),
+                                 count: ($pcts | length), spread: $spread } }
+              else {} end )
+      end' 2>/dev/null)
+  if [ -n "$out" ] && [ "$out" != "null" ]; then printf '%s' "$out"; else printf 'null'; fi
 }
 
 collect_context() { # collect_context <sid>...
@@ -1148,6 +1251,14 @@ render() {
       end;
     if .usage == null then
       "\($d)usage: not reporting — run: ccwatch install-statusline\($z)"
+    elif (.usage.disagree // null) != null then
+      # ⚠️ Withheld, with the range, because at most one of these figures is
+      # true and nothing here can say which. Showing the newest would only
+      # make the wrong one stable. Constitution I and III together: an
+      # uncorroborated reading is not a reading.
+      "\($y)usage: \(.usage.disagree.count) sessions report different figures"
+      + " (\(.usage.disagree.lo|floor)%–\(.usage.disagree.hi|floor)%) — not shown\($z)"
+      + " \($d)(are they signed in to the same account? ccwatch doctor)\($z)"
     elif (.usage.age // 0) > $usage_stale then
       # The numbers are withheld, not annotated. A percentage on screen is read
       # as current no matter what is printed next to it.
@@ -1483,6 +1594,7 @@ cmd_bar() {
     # "resets in 2h", not "2h left": the latter reads as two hours of quota
     # remaining, which is a different and much more expensive thing to believe.
     | ( if .usage != null
+             and ((.usage.disagree // null) == null)
              and ((.usage.age // 0) <= (.usage.stale_after // 600))
              and (.usage.five_hour != null)
         then "\(.usage.five_hour.used_percentage|floor)%"
@@ -1540,6 +1652,13 @@ cmd_bar() {
         # it, and the reader supplies "now" for free.
         + ( if .usage == null then
               [ "usage: not reporting — run: ccwatch install-statusline | color=gray size=11" ]
+            elif (.usage.disagree // null) != null then
+              # Same rule as the table. The count and the range are the useful
+              # facts here: they say it is a disagreement rather than a gap.
+              [ "usage: \(.usage.disagree.count) sessions disagree "
+                + "(\(.usage.disagree.lo|floor)%–\(.usage.disagree.hi|floor)%) — not shown"
+                + " | color=orange size=11",
+                "Same account on every session? Run ccwatch doctor. | color=gray size=11" ]
             elif (.usage.age // 0) > (.usage.stale_after // 600) then
               [ "usage: last reading is \(dur(.usage.age)) old — not shown | color=orange size=11" ]
             else
@@ -4887,6 +5006,28 @@ cmd_doctor() {
   esac
 
   say ""
+  # ⚠️ Doctor is where "why is no percentage showing" gets answered, so the
+  # disagreement has to be named HERE with the reporters in it. The header can
+  # only afford a range; this can afford the list, and the list is the thing
+  # that tells you which session to go and look at.
+  local udis
+  udis=$(collect_usage)
+  if [ -n "$udis" ] && [ "$udis" != "null" ] \
+     && [ "$(printf '%s' "$udis" | jq -r '(.disagree // null) != null')" = "true" ]; then
+    bad "$(printf '%s' "$udis" | jq -r '"\(.disagree.count) sessions report different usage figures (\(.disagree.lo|floor)%-\(.disagree.hi|floor)%) - the numbers are being withheld"')"
+    printf '      %sat most one of those is true and ccwatch cannot tell which.%s\n' \
+      "$_c_dim" "$_c_reset"
+    printf '      %sare all your sessions signed in to the same account? each reading:%s\n' \
+      "$_c_cyan" "$_c_reset"
+    local uf ufsid ufpct ufage
+    for uf in "$USAGE_DIR"/*.json; do
+      [ -f "$uf" ] || continue
+      ufsid=$(jq -r '.session // "?"' "$uf" 2>/dev/null)
+      ufpct=$(jq -r '(.five_hour.used_percentage // "none") | if type == "number" then (.|floor|tostring) + "%" else . end' "$uf" 2>/dev/null)
+      ufage=$(jq -r --argjson now "$(date '+%s')" '($now - (.at // 0))' "$uf" 2>/dev/null)
+      printf '        %s  5h %-6s %ss ago\n' "$(printf '%.8s' "$ufsid")" "$ufpct" "$ufage"
+    done
+  fi
   if [ -f "$USAGE_FILE" ]; then
     local uage
     uage=$(jq -r --argjson now "$(date '+%s')" '($now - (.at // 0))' "$USAGE_FILE" 2>/dev/null) || uage=999999
