@@ -21,8 +21,69 @@ UNFINISHED RUNS — stopped in the last 24h, and no live session is holding them
 19 live · 1 waiting on you · 1 suspect · 3 unfinished run(s)
 ```
 
+## Install
+
+macOS, and `jq` is the only dependency you may not already have.
+
 ```bash
-ccwatch setup            # put it on PATH, once, from the checkout
+brew install jq                                   # if you do not have it
+git clone https://github.com/rv-jclark/ccwatch.git
+cd ccwatch && ./bin/ccwatch setup                 # puts ccwatch on your PATH
+```
+
+`setup` picks the first writable of `~/.local/bin`, `/opt/homebrew/bin`,
+`/usr/local/bin`, **runs what it installed** to prove the link works, and tells
+you if that directory is not on your `PATH`. Never run it with `sudo` — it
+refuses an unwritable directory rather than asking you to.
+
+Then, optionally, the two things that make it see more. Each shows its exact
+change and asks first:
+
+```bash
+ccwatch install-statusline   # rate limits and context fill (see "Usage" below)
+ccwatch install-hooks        # catch a prompt that opens and closes between polls
+ccwatch doctor               # confirm it can read what it needs to read
+```
+
+### The menu bar app
+
+```bash
+./app/build.sh --run         # needs Xcode Command Line Tools
+```
+
+One app owns the menu bar item, an always-on-top overlay of the map, and the
+`ccwatch serve` behind them. Its menu opens the overlay or the dashboard, and
+`Open at Login` keeps it there. First launch on someone else's machine needs
+**right-click → Open**, because the signature is ad-hoc.
+
+## Usage
+
+Three surfaces, one set of verdicts — the app and the pages render what the CLI
+computes, so they cannot disagree with it.
+
+| | |
+|---|---|
+| `ccwatch` | the live table, refreshed until you quit (`q` / Ctrl-C) |
+| `ccwatch bar` | one line for the menu bar: usage, and anything blocked on you |
+| `ccwatch serve --open` | table + map in a browser, with per-agent detail |
+
+Day to day it is usually the menu bar item, and these three when something
+needs attention:
+
+```bash
+ccwatch ask                 # what each blocked session is actually asking
+ccwatch convo <who>         # the recent conversation of one session
+ccwatch resume              # what to reopen after a crash or reboot
+```
+
+`<who>` is a session name, a session id, or a pid. A name that matches more
+than one live session is refused with the candidates listed, never resolved by
+picking — the wrong agent has already been told.
+
+<details>
+<summary>Every command</summary>
+
+```bash
 ccwatch                  # live table, refreshed until you quit (q / Ctrl-C)
 ccwatch once             # draw it once — safe in a pipe or a status bar
 ccwatch --json           # the same data, for scripting
@@ -38,14 +99,16 @@ ccwatch peers            # which sessions have been talking to each other
 ccwatch kill <who>       # stop a session — refuses when it would cost you work
 ccwatch daemon           # watch deploys and notify subscribers while you are away
 ccwatch log              # recent hook events (needs install-hooks)
+ccwatch setup            # put it on PATH, once, from the checkout
 ccwatch doctor           # check that ccwatch's own view is trustworthy
 ```
 
 `ccwatch serve --read-only` if you would rather the browser could not send.
+</details>
 
-
-Needs `jq`, plus `git`/`gh` for the deploy panel. Everything else ships with
-macOS. One script, one HTML file.
+`git`/`gh` are optional — without them the deploy panel is absent and says so,
+and a directory with no git remote is marked `no repo` rather than guessed at.
+The CLI and the pages need no build step; only the app does.
 
 ## Why not just `claude agents`
 
@@ -110,6 +173,28 @@ checkout-api-8e       checkout-api       ● busy      2h    18%  3s ago
 ```
 
 In a browser each window is drawn as **two stacked bars** instead — see below.
+
+⚠️ **When your sessions disagree about the figure, no figure is shown.** The
+numbers arrive from the statusline of whichever sessions are running, and they
+are supposed to be account-wide — but they are not always. Measured on a real
+machine: four sessions wrote 12%, 14%, 15% and nothing at all inside one
+minute, and the menu bar cycled 101% / 88% / 62%. Three figures, at most one
+true, each shown with no hedge.
+
+So readings are kept **per reporter** and cross-checked. If two taken close
+together differ by more than a few points, you get the range and the count
+instead of a number:
+
+```
+usage: 3 sessions report different figures (62%–101%) — not shown
+       (are they signed in to the same account? ccwatch doctor)
+```
+
+`ccwatch doctor` then lists each reading with the session that gave it and how
+old it is, which is what tells you where to look. Readings that merely drift
+apart as usage accrues are not a disagreement — only ones taken within
+`CCWATCH_USAGE_AGREE_WINDOW` of each other are compared at all. Picking the
+newest would have been easy and would only have made the wrong number stable.
 
 These come from a feed Claude Code is **already pushing**: it hands its
 statusline command a JSON payload containing `rate_limits` (`five_hour`,
@@ -1339,12 +1424,9 @@ It also reports unreadable registry files, and any status value the classifier
 does not recognise — rather than letting a new one fall through to a default
 branch and be presented as though it had been read.
 
-## Install
+## Install, in detail
 
-```bash
-git clone https://github.com/rv-jclark/ccwatch.git
-cd ccwatch && ./bin/ccwatch setup
-```
+The two commands are at the top of this file; this is what they do and why.
 
 `setup` does one thing and tells you the rest. It symlinks `ccwatch` into the
 first writable of `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`
@@ -1404,11 +1486,13 @@ at.
 | `jq` | `brew install jq` — the only hard dependency not already present |
 | `python3` | ships with macOS; used for the socket client and date parsing |
 | `git`, `gh` | only for the deploy panel and repo identity; degrades with a message |
+| Xcode CLT | only to build the menu bar app (`xcode-select --install`). The CLI and the pages need no compiler, and the suite skips the app's checks with the reason when it has not been built |
 
 ### Uninstall
 
 ```bash
 rm "$(command -v ccwatch)" && rm -rf ~/.claude/ccwatch
+rm -rf /Applications/ccwatch.app      # if you installed the app
 ```
 
 That removes the symlink wherever `setup` put it, and the runtime state. The
@@ -1429,6 +1513,8 @@ All environment variables, all optional.
 | `CCWATCH_CPU_MIN_GAP` | `1.5` | minimum seconds between CPU samples for a delta to count |
 | `CCWATCH_CTX_STALE` | `120` | how old a context reading may be before it is dropped |
 | `CCWATCH_USAGE_STALE` | `600` | how old a usage reading may be before its numbers are withheld |
+| `CCWATCH_USAGE_AGREE_WINDOW` | `120` | how close together two usage readings must be before disagreeing about the same window means anything, rather than being drift as usage accrues |
+| `CCWATCH_USAGE_TOLERANCE` | `5` | how many percentage points two readings taken that close may differ by before the figure is withheld and the range reported |
 | `CCWATCH_REPO_TTL` | `21600` | how long a directory's resolved repo is cached |
 | `CCWATCH_TAIL_BYTES` | `400000` | how much of a transcript `convo` reads |
 | `CCWATCH_SWAP_WARN` | `80` | swap percentage at which the host is called out |
