@@ -36,6 +36,15 @@
      column's flow. See the top of web/alerts.js for what each banner cost the
      board, measured. */
   html, body { height:100%; }
+  /* ⚠️ The board is laid out in `rem` — `.agent` is 4.4rem wide, the gaps and
+     the card padding likewise — so the root size is the one knob that fits
+     more agents into a small window without touching a single layout rule.
+     At 13px a figure is 57px instead of 70px, which is one more per row at
+     overlay width; at 12px, two. Anything sized in `px` deliberately does not
+     scale with it: borders stay 1px and the smallest labels keep their
+     legibility floor rather than shrinking into noise. */
+  @media (max-width:720px) { html { font-size:13px; } }
+  @media (max-width:520px) { html { font-size:12px; } }
   body { margin:0; background:var(--bg); color:var(--ink); overflow:hidden;
          display:flex; flex-direction:column;
          font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
@@ -55,7 +64,7 @@
      column, the meter's column has a reserved minimum, and nothing wraps
      between the two. */
   header { display:grid; grid-template-columns:minmax(0, 1fr) auto;
-           align-items:start; gap:1rem;
+           align-items:start; gap:1rem; position:relative;
            padding:.9rem 1.1rem; border-bottom:1px solid var(--line); }
   .hleft { display:flex; align-items:baseline; gap:1rem; flex-wrap:wrap;
            min-width:0; }
@@ -78,6 +87,30 @@
        measured 603px of content in a 420px window. Specificity rather than
        source order, so moving either rule cannot bring the bug back. */
     header .gauges { min-width:0; }
+  }
+  /* ⚠️ Below the roster's breakpoint the alert slot leaves the flow entirely.
+     In a ~470px overlay there is no arrangement that keeps all three of: no
+     reserved row, the condition stated in words, and a header height that does
+     not depend on the machine. `min-width:12ch` buys the third by wrapping the
+     slot onto a line of its own IN BOTH STATES — so a quiet machine pays a row
+     out of ~630px for a control that is usually hidden. Dropping the
+     reservation instead lets the trigger ellipsise into whatever the title
+     line has left, which at this width can be nothing: an alert that shrinks
+     to invisible is the failure-as-an-absence of constitution IV.
+     Out of flow resolves it, and it is what rule 12 already asks for: the
+     chip is positioned over the header's first line, so it costs no row in
+     either state and its arrival cannot move the board. It keeps its WORDS —
+     the severity word leads the trigger's own text, ellipsised — and the whole
+     sentence stays in the popover, the `title` attribute and the accessible
+     name. Never a bare glyph, and never a hover as the only route to it. */
+  @media (max-width:720px) {
+    #alertslot { position:absolute; right:1.1rem; top:.75rem;
+                 max-width:min(46%, 28ch); min-width:0; z-index:2; }
+    /* ⚠️ And the counts go, to make room for it. They are the one thing in
+       this header that is repeated verbatim two lines down — the roster's own
+       title says "agents · 19" and stays visible even when the roster is
+       folded — so this loses no fact, where clipping the alert would. */
+    #counts { display:none; }
   }
   /* ⚠️ The alert slot's size must not depend on what is in it. A slot that
      collapsed when the machine was quiet would let the trigger's arrival
@@ -563,6 +596,15 @@
   #rostergone { display:none; font-size:12px; margin-bottom:.5rem; }
   #rostergone.on { display:block; }
   #rosterlist { display:flex; flex-direction:column; gap:.3rem; }
+  /* ⚠️ Needed because `display:flex` above is an ID selector and the UA
+     stylesheet's `[hidden] { display:none }` is not — so setting `.hidden`
+     from JS removed the list from the accessibility tree and the tab order
+     while leaving it fully laid out. Measured: the folded roster was 1512px
+     of a 470px-wide overlay against 1129px of board, worse than before the
+     fold existed, because the fold also lifts `max-height`. The assertion on
+     `.hidden` passed the whole time — it is a property check, and the property
+     was true; what was false was the layout. */
+  #rosterlist[hidden] { display:none; }
   /* ⚠️ A COLUMN. This was a row, and with six fields in a 320px panel the
      flex algorithm gave `.rname` and `.rwhere` a computed width of 0 and left
      `.rasks` 102px, so every field wrapped into a four-character ribbon:
@@ -593,10 +635,35 @@
   .agent.selected .hit { stroke:var(--info); stroke-width:1.4; stroke-dasharray:2; }
   #rdivider { flex:0 0 6px; cursor:col-resize; touch-action:none; background:var(--line); }
   #rdivider:focus-visible { outline:2px solid var(--info); outline-offset:-2px; }
+  /* Docked, the panel is always open and the control does not exist. */
+  #rosterfold { display:none; }
   @media (max-width:720px) {
     #stage { flex-direction:column; }
     #roster { flex:0 0 auto; max-height:40vh; border-right:0; border-bottom:1px solid var(--line); }
     #rdivider { display:none; }
+    /* ⚠️ The control is shown at the same breakpoint the layout stacks at, and
+       that is CCWATCH_ROSTER.STACK_BREAKPOINT — one number, not two that can
+       drift apart. applyRosterFold() asks the module rather than re-testing
+       the width itself. */
+    #rosterfold { display:inline-block; font:inherit; font-size:11px;
+                  background:none; color:var(--dim); border:1px solid var(--line);
+                  border-radius:4px; padding:.1rem .45rem; margin-bottom:.4rem;
+                  cursor:pointer; }
+    #rosterfold:hover { color:var(--ink); }
+    /* ⚠️ Removed from the layout, not shrunk. Collapsing it to its title and
+       its buttons was still ~60px of a ~500px overlay, and at that size the
+       window is for the board and the meters — nothing else. Folding it now
+       costs the board nothing at all. */
+    #stage.rosterfolded #roster { display:none; }
+    /* And open, it floats OVER the board rather than pushing it. Same
+       reasoning as the alert chip: a panel that comes and goes on its own may
+       not take the layout with it. */
+    #stage:not(.rosterfolded) #roster {
+      position:absolute; left:0; right:0; top:0; bottom:0; z-index:3;
+      max-height:none; background:var(--bg); border-bottom:0;
+      box-shadow:0 8px 24px rgba(0,0,0,.45);
+    }
+    #stage { position:relative; }
   }
   /* Same breakpoint the roster stacks at (CCWATCH_ROSTER.STACK_BREAKPOINT) —
      one number, not two that can drift apart. */
@@ -613,7 +680,7 @@
 <header>
   <div class="hleft">
   <h1>ccwatch <span id="counts"></span></h1>
-  <nav><a href="/">table</a><a href="/map" class="on">map</a></nav>
+  <nav><a href="/">table</a><a href="/map" class="on">map</a><span id="rosternav"></span></nav>
   <!-- role="status" so a condition arriving while you are reading the board is
        announced once, politely, rather than only being available to whoever
        happens to look at the header. renderAlerts writes the trigger's text
@@ -722,6 +789,23 @@ const rosterEls = (function () {
   title.id = "rostertitle";
   title.textContent = "agents · 0";
 
+  // ⚠️ A disclosure, and only once the layout has stacked. Docked beside the
+  // board the roster costs width, which the divider already lets you take
+  // back; STACKED it costs HEIGHT, and it took `max-height:40vh` plus its own
+  // title and buttons — measured over half of a 630px overlay, with the map it
+  // sits above reduced to a strip. Height is the one dimension there is no
+  // divider for.
+  //
+  // Collapsed by default when stacked, because at that size the board is what
+  // the window is for. A real <button> with aria-expanded, so it is reachable
+  // and announced rather than being a tap target only a mouse can find — the
+  // roster is operable without a mouse or without sight, and a drawer that
+  // breaks that is not an improvement.
+  const fold = document.createElement("button");
+  fold.type = "button";
+  fold.id = "rosterfold";
+  fold.setAttribute("aria-controls", "rosterlist");
+
   const note = document.createElement("p");
   note.id = "rosternote";
 
@@ -760,6 +844,11 @@ const rosterEls = (function () {
   list.setAttribute("aria-keyshortcuts", "o");
 
   roster.append(title, open, note, gone, list);
+  // ⚠️ The control lives in the HEADER, not in the panel it opens. Narrow, the
+  // panel is removed from the layout altogether — a toggle inside it would go
+  // with it and there would be no way back. aria-controls still points at the
+  // list, so the relationship survives the move.
+  $("rosternav").appendChild(fold);
 
   const divider = document.createElement("div");
   divider.id = "rdivider";
@@ -771,10 +860,48 @@ const rosterEls = (function () {
   stage.append(roster, divider, wrap);
 
   return {
-    stage, roster, title, note, open,
+    stage, roster, title, fold, note, open,
     gone, goneMsg, goneDismiss, list, divider,
   };
 })();
+
+// The fold's state. Only meaningful while the layout is stacked — docked, the
+// panel is always open and the control is not rendered.
+//
+// ⚠️ Stored per viewer and read through try/catch, like every other
+// preference here: site data can be cleared, blocked, or throw in a private
+// window, and a page that cannot remember a drawer must still draw one.
+const ROSTER_FOLD_KEY = "ccwatch.roster.folded";
+function foldedPref() {
+  try {
+    const v = localStorage.getItem(ROSTER_FOLD_KEY);
+    if (v === "0") return false;
+    if (v === "1") return true;
+  } catch (e) { /* no storage; fall through to the default */ }
+  return true;   // collapsed by default: stacked, the board is the point
+}
+let rosterFolded = foldedPref();
+
+function applyRosterFold() {
+  const stacked = !window.CCWATCH_ROSTER || CCWATCH_ROSTER.stacked(innerWidth);
+  // Docked, there is nothing to fold: the class and the control both go, so
+  // no stale collapsed state can survive a resize back to the wide layout.
+  rosterEls.stage.classList.toggle("rosterfolded", stacked && rosterFolded);
+  rosterEls.fold.setAttribute("aria-expanded", String(!(stacked && rosterFolded)));
+  rosterEls.fold.textContent = rosterFolded ? "show agents" : "hide agents";
+  // hidden, not merely invisible: a collapsed list must leave the tab order
+  // and the accessibility tree, or a keyboard user falls into rows they
+  // cannot see (the same reasoning as #alertslot.quiet).
+  rosterEls.list.hidden = stacked && rosterFolded;
+}
+rosterEls.fold.addEventListener("click", () => {
+  rosterFolded = !rosterFolded;
+  try { localStorage.setItem(ROSTER_FOLD_KEY, rosterFolded ? "1" : "0"); }
+  catch (e) { /* the fold still works for this session */ }
+  applyRosterFold();
+});
+addEventListener("resize", applyRosterFold);
+applyRosterFold();
 
 // Built once at load, never touched by a refresh (FR-020): CAN_SEND is known
 // before the first tick, so there is nothing here a snapshot could change.

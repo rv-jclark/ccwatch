@@ -4102,6 +4102,101 @@ function run(doc, win) {
           "board top " + Math.round(narrowQuiet.board.t) + " -> "
             + Math.round(narrowLoud.board.t) + ", header height "
             + Math.round(narrowQuiet.header.h) + " -> " + Math.round(narrowLoud.header.h));
+    // ⚠️ The overlay's own width, posed the same way and for the same reason.
+    // A whole-view property needs a whole-view assertion: the complaint that
+    // produced these was about PROPORTIONS, and nothing structural can see
+    // one — a docked roster and a stacked one have identical DOM, roles and
+    // handlers. Measured in the app's 470x630 panel, the stacked roster took
+    // over half the height and the board it sits above was a strip.
+    frame.style.width = "470px";
+    // ⚠️ The fold is recomputed on `resize`, and setting the iframe's style
+    // does not deliver that event synchronously — so without this the page is
+    // still in whatever state it was built in at 1180px, and the checks below
+    // measure the wide layout while claiming to measure the narrow one.
+    win.dispatchEvent(new win.Event("resize"));
+    if (win.CCWATCH_ROSTER && win.CCWATCH_ROSTER.stacked(470)) {
+      var rB = boxOf(doc.getElementById("roster"));
+      var wB = boxOf(doc.getElementById("wrap"));
+      // ⚠️ Skipped rather than asserted when the machine is quiet, and this is
+      // not caution. `verify-ui` serves the REAL ~/.claude, so the roster holds
+      // whatever happens to be running — and an empty roster is short whether
+      // it is folded or not, so the comparison passes against an unfolded
+      // panel and counts as coverage of nothing. It went green exactly that
+      // way on a machine reporting 0 sessions.
+      var rosterRows = doc.querySelectorAll("#rosterlist .rrow").length;
+      var stageB = boxOf(doc.getElementById("stage"));
+      // ⚠️ Against the STAGE, not against the roster. Comparing the two
+      // heights is a check that cannot fail once the roster leaves the layout:
+      // a `display:none` panel measures 0 and any board beats it. What is
+      // actually claimed is that the board gets essentially all of the space,
+      // so that is what is measured.
+      if (rosterRows >= 3) {
+        check("at 470px the board gets the whole stage, and the roster no layout",
+              stageB.h > 0 && wB.h >= stageB.h * 0.95 && rB.h === 0,
+              "board " + Math.round(wB.h) + "px of stage " + Math.round(stageB.h) +
+              "px, roster " + Math.round(rB.h) + "px across " + rosterRows + " rows");
+        // Opened, it must float rather than shove. Same rule as the chip.
+        var foldBtn = doc.getElementById("rosterfold");
+        foldBtn.click();
+        var openBoard = boxOf(doc.getElementById("wrap"));
+        var openRoster = boxOf(doc.getElementById("roster"));
+        check("and opening it floats over the board instead of resizing it",
+              Math.round(openBoard.h) === Math.round(wB.h) &&
+                win.getComputedStyle(doc.getElementById("roster")).position === "absolute",
+              "board " + Math.round(wB.h) + " -> " + Math.round(openBoard.h) +
+              "px, roster position " +
+              win.getComputedStyle(doc.getElementById("roster")).position +
+              " at " + Math.round(openRoster.h) + "px");
+        foldBtn.click();
+      } else {
+        skip("at 470px the board gets the whole stage, and the roster no layout",
+             "only " + rosterRows + " roster row(s) live; an empty roster is "
+             + "short whether it is folded or not");
+        skip("and opening it floats over the board instead of resizing it",
+             "needs a populated roster to be worth measuring");
+      }
+      // ⚠️ And the figures actually got smaller, which is the whole point of
+      // the root-size change: the board is laid out in rem, so a figure at
+      // 4.4rem is 70px at the default and 57px at 13px. A check on the media
+      // query would pass against a rule that no longer applies to anything.
+      var figW = boxOf(doc.querySelector(".agent")).w;
+      check("and a figure is scaled down so more of them fit per row",
+            figW > 0 && figW < 66,
+            ".agent rendered " + Math.round(figW) + "px wide (70px at the default root size)");
+      var fold = doc.getElementById("rosterfold");
+      var fB = boxOf(fold);
+      check("and the fold control is rendered and says what it does",
+            fB.w > 0 && fB.h > 0 && /agents/.test(fold.textContent),
+            "#rosterfold " + Math.round(fB.w) + "x" + Math.round(fB.h) +
+            " text=" + JSON.stringify(fold.textContent));
+      // hidden, not merely invisible: a collapsed list that keeps its rows in
+      // the tab order drops a keyboard user into rows they cannot see.
+      check("and the collapsed list leaves the tab order, not just the screen",
+            doc.getElementById("rosterlist").hidden === true,
+            "#rosterlist.hidden=" + doc.getElementById("rosterlist").hidden);
+      // ⚠️ The chip is out of flow here, so it costs no row in EITHER state.
+      // The reserved row it replaced was paid by a quiet machine too, which is
+      // what kept the header height independent of what was wrong — so the
+      // test is that the height does not move when the trigger arrives.
+      win.renderAlerts(quietModel);
+      var ovQuiet = {board: boxOf(board), header: boxOf(header)};
+      win.renderAlerts(loudModel);
+      var ovLoud = {board: boxOf(board), header: boxOf(header)};
+      check("and at 470px an arriving alert still adds no row",
+            Math.round(ovLoud.header.h) === Math.round(ovQuiet.header.h)
+              && Math.round(ovLoud.board.t) === Math.round(ovQuiet.board.t),
+            "header " + Math.round(ovQuiet.header.h) + " -> "
+              + Math.round(ovLoud.header.h) + ", board top "
+              + Math.round(ovQuiet.board.t) + " -> " + Math.round(ovLoud.board.t));
+      // And it is still WORDS. A chip narrowed to a glyph would satisfy the
+      // check above and lose the claim entirely (constitution IV and VII).
+      var chip = boxOf(doc.getElementById("alertbtn"));
+      check("and reaches the header as readable words, not a bare glyph",
+            chip.w >= 60,
+            "#alertbtn rendered " + Math.round(chip.w) + "x" + Math.round(chip.h));
+    } else {
+      skip("the overlay layout at 470px", "CCWATCH_ROSTER does not stack at 470px");
+    }
     frame.style.width = wideWidth;
 
     // Put the page back to whatever is actually true, rather than leaving a

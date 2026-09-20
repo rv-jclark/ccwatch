@@ -2783,8 +2783,19 @@ assert_not_contains "$_maphtml" 'e.key === " " || e.key === "Spacebar"' \
 _rosterbuild_js=$(awk '/const list = document.createElement\("div"\);/,/roster.append\(/' "$ROOT/web/map.html")
 assert_contains "$_rosterbuild_js" 'list.setAttribute("aria-keyshortcuts", "o");' \
   "#rosterlist carries aria-keyshortcuts"
-assert_contains "$_maphtml" 'roster.append(title, open, note, gone, list);' \
-  "and #rosteropen is a sibling of #rosterlist under #roster, not appended into the listbox"
+# ⚠️ Asserted by INTENT, not by the literal argument list. This was
+# `assert_contains "roster.append(title, open, note, gone, list);"`, which went
+# red the moment a sixth sibling — the fold control — was appended beside the
+# others. The claim was never about the order or the count: it is that #open
+# and #list are siblings and that #open is never put inside the listbox. A
+# check that fails when something correct is added beside it trains you to edit
+# the check, which is how a real one gets loosened.
+_rosterappend=$(printf '%s\n' "$_maphtml" | grep -o 'roster\.append([^)]*)' | head -1)
+assert_contains "$_rosterappend" "open" "#rosteropen is appended to #roster itself"
+assert_contains "$_rosterappend" "list" "alongside #rosterlist, as a sibling of it"
+assert_not_contains "$_maphtml" "list.append(open" \
+  "and #rosteropen is never appended into the listbox, whose rows have presentational children"
+assert_not_contains "$_maphtml" "list.appendChild(open" "by either append form"
 
 # ============================================================ repo identity ==
 printf '\nrepo identity\n'
