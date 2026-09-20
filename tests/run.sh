@@ -825,7 +825,7 @@ for _bp in 17901 17902 17903 17904 17905 17906 17907 17908; do
 done
 bar_run() { # bar_run [args...]
   CLAUDE_CONFIG_DIR="$BH" CCWATCH_FAKE_PS="$WORK/ps-bar" CCWATCH_HOME="$BCH" \
-    CCWATCH_PORT="$BAR_DEAD_PORT" CCWATCH_CPU_MIN_GAP="${CPU_GAP:-0.2}" NO_COLOR=1 \
+    CCWATCH_PORT="$BAR_DEAD_PORT" CCWATCH_CPU_MIN_GAP="$CPU_GAP" NO_COLOR=1 \
     "$CCWATCH" bar "$@" 2>/dev/null
 }
 
@@ -876,7 +876,7 @@ assert_contains "$_bar" "quiet 20m" "and the silence that produced that verdict 
 # glyph, token; the menu's are glyph first.
 bar_glyph_table() { # bar_glyph_table <name>
   CLAUDE_CONFIG_DIR="$BH" CCWATCH_FAKE_PS="$WORK/ps-bar" CCWATCH_HOME="$BCH" \
-    CCWATCH_CPU_MIN_GAP="${CPU_GAP:-0.2}" NO_COLOR=1 "$CCWATCH" once 2>/dev/null \
+    CCWATCH_CPU_MIN_GAP="$CPU_GAP" NO_COLOR=1 "$CCWATCH" once 2>/dev/null \
     | awk -v n="$1" '$1 == n { print $3 }'
 }
 for _bn in asking hung-one quiet-idle; do
@@ -943,13 +943,10 @@ assert_not_contains "$(bar_run | head -1)" "sfimage" \
 # --- the dashboard item tells the truth about the dashboard ------------------
 # A link to a server nobody is running is a failure dressed as a working
 # feature, and it stays dressed as one until somebody clicks it.
-# ⚠️ `${FAST:-0}`, not `$FAST`. This is the only part of the section that binds
-# a port and waits on real time, so it is the only part a --fast mode would
-# want to drop — but the flag is not in this file yet, and under `set -u` a
-# bare `$FAST` would make this section explode for everyone until it is. The
-# default reads as "not fast" and the gate starts working the day the flag
-# lands, with nothing to remember.
-if [ "${FAST:-0}" -eq 1 ]; then
+# The only part of this section that binds a port and waits on real time, so
+# it is the only part --fast drops. Everything else here is a snapshot and a
+# string comparison.
+if [ "$FAST" -eq 1 ]; then
   t_skip "the dashboard item tells the truth about the dashboard" \
          "--fast: binds a port and waits for it"
 elif [ -z "$BAR_DEAD_PORT" ]; then
@@ -972,16 +969,8 @@ s.listen(5)
 time.sleep(20)
 " &
   _barlistener=$!
-  # Polled inline rather than through a helper, so this section depends on
-  # nothing outside itself. 50 ticks of 100ms: a local bind that has not
-  # answered in five seconds is not going to.
-  _barticks=50
-  while [ "$_barticks" -gt 0 ]; do
-    (exec 3<>"/dev/tcp/127.0.0.1/$BAR_DEAD_PORT") 2>/dev/null && break
-    sleep 0.1
-    _barticks=$((_barticks - 1))
-  done
-  if [ "$_barticks" -gt 0 ]; then
+  bar_port_up() { (exec 3<>"/dev/tcp/127.0.0.1/$BAR_DEAD_PORT") 2>/dev/null; }
+  if wait_until 5 bar_port_up; then
     _barup=$(bar_run)
     assert_contains "$_barup" "Open dashboard" \
       "with a server listening the menu links to it instead"
