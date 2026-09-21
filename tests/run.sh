@@ -2541,7 +2541,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
     "serve finds its web assets when installed as a symlink, as the README says to"
   assert_eq "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$SPORT4/")" "200" \
     "and actually serves the dashboard through the link"
-  reap_serve "SPORT4"
+  reap_serve "$SPORT4"
 
   # --- the send endpoint, which is the part with teeth ---------------------
   #
@@ -2602,7 +2602,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
   assert_eq "$(curl -s --max-time 5 "http://127.0.0.1:$SPORT/api/state" | jq -r '.can_kill')" "false" \
     "and the page is told it cannot kill, so no button is drawn"
 
-  reap_serve "SPORT"
+  reap_serve "$SPORT"
 
   # --- killing, when explicitly enabled ------------------------------------
   SPORT4=$(free_port) || SPORT4=""
@@ -2629,7 +2629,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
     # The refusal text is passed through verbatim: it explains what would have
     # been lost, and reducing it to "failed" throws that away.
     assert_contains "$_kb4" "half-edited" "with the reason preserved verbatim"
-    reap_serve "SPORT4"
+    reap_serve "$SPORT4"
     rm -f "$FH/sessions/9501.json"
   else
     t_skip "kill over HTTP" "no free port"
@@ -2649,7 +2649,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
   _rotok=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT2/" \
            | grep -oE 'const SEND_TOKEN = "[0-9a-f]+"' | sed 's/.*"\(.*\)"/\1/')
   assert_eq "$_rotok" "" "and serves no token, so the page shows itself as read-only"
-  reap_serve "SPORT2"
+  reap_serve "$SPORT2"
 
   # Killing the wrapper must take the HTTP server with it. It did not: python
   # ran in the foreground of the shell, so Ctrl-C reached it but any other kill
@@ -2664,7 +2664,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
     wait_until 25 srv_up "$SPORT3" || true
     assert_eq "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$SPORT3/")" "200" \
       "a third server starts and answers"
-    reap_serve "SPORT3"
+    reap_serve "$SPORT3"
     # Waiting for the port to go quiet, rather than a fixed 3s: the wrapper
     # normally takes its child down in well under a second, and the deadline
     # is what makes a leak a failure instead of a hang.
@@ -2710,7 +2710,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
   else
     t_skip "killing the wrapper leaves no orphan" "no free port"
   fi
-  reap_serve "SPORT"
+  reap_serve "$SPORT"
   rm -f "$FH/sessions/9107.json"
 
   # --- idle-aware collection: no reader, no work (FR-001, FR-002, SC-001) --
@@ -2796,7 +2796,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
     done
     assert_eq "$_fresh" "yes" \
       "and a read resumes collection, which catches up on its own cadence"
-    reap_serve "SPORT5"
+    reap_serve "$SPORT5"
     rm -f "$FH/sessions/9601.json"
   else
     t_skip "idle-aware collection" "no free port"
@@ -2905,7 +2905,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
     assert_eq "$(awk -v n="$_now3" -v c="$_ca1" 'BEGIN{print (n - c > 0.2) ? "yes" : "no"}')" "yes" \
       "so the client-derived age (now - collected_at) keeps growing rather than freezing"
     fi
-    reap_serve "SPORT6"
+    reap_serve "$SPORT6"
     rm -f "$FH/sessions/9701.json"
   else
     t_skip "conditional responses" "no free port"
@@ -2935,7 +2935,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
       "warming stays true because no snapshot has ever succeeded"
     assert_eq "$(printf '%s' "$_to" | jq -r '.sessions')" "null" \
       "and sessions is null, never a fabricated empty list"
-    reap_serve "SPORT7"
+    reap_serve "$SPORT7"
   else
     t_skip "failed snapshot is distinguishable from an empty host" "no free port"
   fi
@@ -2955,7 +2955,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
       "with no error"
     assert_eq "$(printf '%s' "$_empty" | jq -r '.sessions')" "[]" \
       "and sessions is an empty array, not null — the two payloads are distinguishable by inspection alone"
-    reap_serve "SPORT8"
+    reap_serve "$SPORT8"
   else
     t_skip "empty host is distinguishable from a failed snapshot" "no free port"
   fi
@@ -3006,7 +3006,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
     assert_eq "$(awk -v a="$_age_after" 'BEGIN{print (a > 3) ? "yes" : "no"}')" "yes" \
       "so its age keeps growing truthfully, rather than resetting to near-zero as a fresh empty collection would"
     chmod +x "$TC/bin/ccwatch"
-    reap_serve "SPORT9"
+    reap_serve "$SPORT9"
     rm -f "$FH/sessions/9801.json"
   else
     t_skip "a failed collection retains the prior snapshot" "no free port"
