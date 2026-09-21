@@ -348,12 +348,27 @@ final class ServeSupervisor {
 /// happens. The overlay's "open in browser" is exactly such a link, and the
 /// whole point of it is to leave this window.
 final class OverlayUIDelegate: NSObject, WKUIDelegate {
+    /// How a link leaves the panel. Injected, and that is not ceremony.
+    ///
+    /// ⚠️ This called `NSWorkspace.shared.open` directly, and the selftest
+    /// drove the real delegate with a fixture URL — so EVERY `--selftest` run
+    /// opened `http://127.0.0.1:8787/map?sid=abc` in the default browser, and
+    /// the suite runs `--selftest` too. The reader watched that tab reappear
+    /// all night and reported it. A test that reaches outside the process is
+    /// not a test of this app, it is an action on somebody's machine.
+    private let openExternally: (URL) -> Void
+
+    init(openExternally: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }) {
+        self.openExternally = openExternally
+        super.init()
+    }
+
     func webView(_ webView: WKWebView,
                  createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction,
                  windowFeatures: WKWindowFeatures) -> WKWebView? {
         if let url = navigationAction.request.url {
-            NSWorkspace.shared.open(url)
+            openExternally(url)
         }
         // nil: no in-panel window is created. The overlay is one page, and a
         // second WKWebView stacked inside it would be a browser nobody asked
@@ -724,16 +739,26 @@ func selftest() -> Int32 {
     // UI delegate drops `target="_blank"` silently — the reader clicks "open
     // in browser" and nothing happens at all — and one that returns a new
     // WKWebView would stack a second, un-navigable page inside the panel.
-    let ui = OverlayUIDelegate()
+    // ⚠️ A RECORDER, not the real opener. Driving the live delegate here
+    // opened a browser tab every time this ran — see OverlayUIDelegate. The
+    // recorder also makes the check stronger: it asserts WHICH url would be
+    // handed out, which the old version could not see at all.
+    var opened: [URL] = []
+    let ui = OverlayUIDelegate(openExternally: { opened.append($0) })
     let cfg = WKWebViewConfiguration()
     let host = WKWebView(frame: .zero, configuration: cfg)
-    let req = URLRequest(url: URL(string: "http://127.0.0.1:8787/map?sid=abc")!)
+    let deep = URL(string: "http://127.0.0.1:8787/map?sid=abc")!
     check(host.uiDelegate == nil, "a bare WKWebView has no new-window handling of its own")
     host.uiDelegate = ui
     check(host.uiDelegate != nil, "and the overlay installs one")
     check(ui.webView(host, createWebViewWith: cfg,
-                     for: TestNavigationAction(req), windowFeatures: WKWindowFeatures()) == nil,
+                     for: TestNavigationAction(URLRequest(url: deep)),
+                     windowFeatures: WKWindowFeatures()) == nil,
           "which creates no window inside the panel, so the link leaves it")
+    check(opened == [deep],
+          "and hands exactly that url out, once, to be opened elsewhere")
+    check(opened.allSatisfy { $0.host == "127.0.0.1" },
+          "and nothing but loopback is ever handed out")
 
     print(failures == 0 ? "\nselftest: all checks passed" : "\nselftest: \(failures) FAILED")
     return failures == 0 ? 0 : 1

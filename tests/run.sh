@@ -81,6 +81,9 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # need no port, no server and no optional tool.
 # And by `bar --no-actions`: 7, and the usage-led title and reset clock: 11.
 # And 15 on reconstructing one counter from every session that samples it -
+# the serve-lifecycle and deep-link route checks are NOT counted here: they
+# need a free port and curl, and a floor counting them would fail on a host
+# that has neither.
 # always run: they pose their own readings on disk and need nothing else. The `app` section adds 8 more that are
 # deliberately NOT in the floor: seven need a built app bundle, the eighth needs
 # a linter, and a floor counting them would fail on any machine that has never
@@ -1312,6 +1315,11 @@ else
     "and it checks the overlay's window level, not merely that a panel exists"
   assert_contains "$_appst" "across Spaces" "and that the overlay follows you across Spaces"
   assert_contains "$_appst" "steal focus" "and that clicking it does not take focus"
+  # ⚠️ Asserted because the selftest used to DO this rather than record it:
+  # it drove the live delegate, which called NSWorkspace, so every run of the
+  # suite opened a browser tab on whoever ran it.
+  assert_contains "$_appst" "hands exactly that url out" \
+    "the app selftest records the url it would open rather than opening one"
   assert_contains "$_appst" "no bash= parameter is ever parsed" \
     "and that the app never parses a bash= out of a session row"
   # The app must not be able to drift from the CLI about the format they share.
@@ -3040,6 +3048,43 @@ EOF
     reap_serve "$TPORT"
   else
     t_skip "a transcript read that times out answers 504" "no free port"
+  fi
+
+  # ⚠️ The deep link, asked of the SERVER. `/map?sid=...` answered 404 for as
+  # long as it existed: the page routes were exact string comparisons against
+  # self.path, so a query string fell through to the static fallback. The page
+  # handled ?sid= correctly the whole time, and the verify-ui check posed the
+  # query INSIDE the page rather than requesting the URL — so the one link the
+  # overlay offers was broken while every check passed. Reported from a real
+  # browser.
+  DPORT=$(free_port) || DPORT=""
+  if [ -n "$DPORT" ]; then
+    DPH="$WORK/dp-home"; DPC="$WORK/dp-cch"
+    mkdir -p "$DPH/sessions" "$DPC"
+    : > "$WORK/ps-dp"
+    ( CLAUDE_CONFIG_DIR="$DPH" CCWATCH_FAKE_PS="$WORK/ps-dp" CCWATCH_HOME="$DPC" \
+      CCWATCH_SERVE_IDLE_EXIT=0 "$CCWATCH" serve --port "$DPORT" \
+      >"$WORK/dp-serve.log" 2>&1 & )
+    if wait_until 25 srv_up "$DPORT"; then
+      _dpcode() { curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+                    "http://127.0.0.1:$DPORT$1"; }
+      assert_eq "$(_dpcode '/map?sid=abc')" "200" \
+        "the map is served with a query string, which is what the deep link carries"
+      assert_eq "$(_dpcode '/map?sid=ffffffff-0000-0000-0000-000000000001&n=5')" "200" \
+        "and with more than one parameter"
+      assert_eq "$(_dpcode '/?foo=1')" "200" "and so is the table view"
+      assert_eq "$(_dpcode '/index.html?x=1')" "200" "and its explicit filename"
+      assert_eq "$(_dpcode '/map.html?sid=abc')" "200" "and the map by filename"
+      # ⚠️ And an unknown path still 404s, or "everything returns 200" would
+      # satisfy every assertion above.
+      assert_eq "$(_dpcode '/nope')" "404" "while an unknown path is still a 404"
+      assert_eq "$(_dpcode '/nope?sid=abc')" "404" "query string or not"
+    else
+      t_skip "the map is served with a query string" "server did not come up"
+    fi
+    reap_serve "$DPORT"
+  else
+    t_skip "the map is served with a query string" "no free port"
   fi
 
   # ⚠️ A forgotten serve exits on its own. This is the leak, structurally: a

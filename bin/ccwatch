@@ -3427,6 +3427,7 @@ cmd_serve() {
   CCWATCH_SNAPSHOT_CADENCE="$snapshot_cadence" \
   python3 -c '
 import hashlib, http.server, json, os, socketserver, subprocess, sys, threading, time
+from urllib.parse import urlsplit
 
 SELF = os.environ["CCWATCH_SELF"]
 WEB  = os.environ["CCWATCH_WEB"]
@@ -3714,9 +3715,17 @@ class H(http.server.SimpleHTTPRequestHandler):
             self.reply_json(504, {"state": "failed", "detail": str(e)})
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
+        # WARNING: matched on the PATH, with the query stripped. These were
+        # exact string comparisons against self.path, so /map?sid=... did not
+        # match, fell through to the static fallback and answered 404 - which
+        # is the deep link the overlay itself offers. Reported from a real
+        # browser. The page handled ?sid= correctly the whole time; nothing
+        # ever asked the SERVER for the URL, because the check posed the query
+        # inside the page instead of requesting it.
+        route = urlsplit(self.path).path
+        if route in ("/", "/index.html"):
             return self.serve_page("index.html")
-        if self.path in ("/map", "/map.html"):
+        if route in ("/map", "/map.html"):
             return self.serve_page("map.html")
         if self.path.startswith("/api/transcript"):
             from urllib.parse import urlparse, parse_qs
