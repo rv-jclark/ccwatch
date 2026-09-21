@@ -1495,6 +1495,34 @@ else
   t_skip "app/build.sh lint" "shellcheck not installed"
 fi
 
+# =============================================================== app-win ====
+printf '\napp-win\n'
+
+# Same reasoning as the macOS app section above, mirrored for the Windows
+# tray: none of this counts toward TALLY_FLOOR (constitution: "an assertion
+# must not encode one machine's configuration"), because a floor counting it
+# would fail on any machine that has never built app-win, or that is not
+# Windows at all.
+WINBIN="$ROOT/app-win/build/ccwatch-tray.exe"
+if [ ! -x "$WINBIN" ]; then
+  t_skip "the Windows tray app's own checks" "app-win not built — run ./app-win/build.ps1"
+elif [ "$(uname -s)" = Darwin ]; then
+  t_skip "the Windows tray app's own checks" "a Windows binary cannot run on macOS"
+else
+  _winst=$("$WINBIN" --selftest 2>&1; echo "rc=$?")
+  assert_contains "$_winst" "all checks passed" "the Windows app's selftest passes"
+  assert_contains "$_winst" "rc=0" "and reports success as an exit code"
+  # ⚠️ Named individually, per contracts/tray-app.md's claim table — a
+  # selftest that quietly stopped checking one property would still say
+  # "all checks passed".
+  assert_contains "$_winst" "a neutralised pipe stays in the text where the CLI put it" \
+    "and it splits a bar-document line on the first \" | \" only"
+  assert_contains "$_winst" "no bash= parameter is ever parsed" \
+    "and that the app never parses a bash= out of a session row"
+  assert_contains "$_winst" "empty CLI output is a question mark, never a count" \
+    "and that a failed snapshot renders cc ?, never cc 0"
+fi
+
 # ==================================================================== bar ====
 printf '\nbar\n'
 

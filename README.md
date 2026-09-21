@@ -1803,6 +1803,17 @@ implementation broken in the specific way it describes:
 | drop `probe_mtimes`'s control-query guard, so an unreadable root reports `ok` with an empty listing instead of `failed` | 3 |
 | report `load1: 0` in `_probe_host_windows`'s jq transform instead of `null` | 2 |
 | plant a real `date -r` call outside the platform section (FR-001) | 1 |
+| split a Windows bar-document line on the last `" | "` instead of the first | 1 (app-win, gated — see below) |
+| drop a line carrying an unknown parameter instead of retaining it | 1 (app-win, gated — see below) |
+
+The two `app-win` rows above were confirmed by tracing the C# parser against
+the mutation by hand, not by watching `tests/run.sh` turn red: there is no
+.NET SDK on the macOS machine this was authored on, so the assertions that
+exercise them (`tests/run.sh`'s `app-win` section) skip here with the reason
+stated rather than running. They are mechanically re-confirmed the first time
+`./app-win/build.ps1 -SelfTest` runs on Windows — see the `windows-latest` CI
+job (FR-032) — and this row should be updated to drop the "gated" qualifier
+once that has happened at least once.
 
 That last table is not decoration. Two of those mutations are bugs that were
 actually **in** the code and were found this way, and two entries started life
