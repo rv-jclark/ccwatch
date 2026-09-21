@@ -5095,6 +5095,23 @@ else
   t_skip "markdown renderer" "node not installed"
 fi
 
+# --- probes exercised on this host -------------------------------------------
+# D22/FR-032/SC-011: a CI job's skips must never be broad enough to hide
+# whether this host's probes actually ran, so the run log states — in words a
+# log reader can grep for — which implementation `doctor` selected for each
+# probe on the platform this suite itself just ran on (no CCWATCH_PLATFORM
+# override: the real host, so a Windows job's "exercised" lines describe
+# Windows and a macOS job's describe macOS).
+_docout=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$WORK/ccwatch-events" NO_COLOR=1 "$CCWATCH" doctor 2>/dev/null)
+for _pname in proc mtimes clock host; do
+  _pline=$(printf '%s\n' "$_docout" | grep -E "^  [+x~] $_pname " | head -1)
+  if [ -n "$_pline" ]; then
+    printf 'exercised: %s=%s\n' "$_pname" "$(printf '%s\n' "$_pline" | awk '{print $3}')"
+  else
+    printf 'exercised: %s=(not reported)\n' "$_pname"
+  fi
+done
+
 
 printf '\n%s passed, %s failed' "$pass" "$fail"
 [ "$skipped" -gt 0 ] && printf ', %s skipped' "$skipped"

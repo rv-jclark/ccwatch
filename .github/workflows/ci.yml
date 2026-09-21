@@ -57,3 +57,50 @@ jobs:
             exit 1
           fi
           echo "no orphaned servers"
+
+  test-windows:
+    # D22/FR-032/SC-011: a Windows probe implementation that no job runs is
+    # an implementation nobody has seen fail, so this job exercises the
+    # Windows probes on an actual Windows host — under the runner's Git Bash,
+    # not WSL, since WSL cannot see Windows process ids (research D1). Lint
+    # stays on the macOS job: one linter, one version, one verdict.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: |
+          command -v jq >/dev/null || choco install jq -y --no-progress
+          jq --version
+
+      # Pinned for the same reason the macOS job pins it: a skip here is
+      # quiet by design, so an image that stopped shipping node would
+      # silently drop the markdown assertions and this job would still be
+      # green.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Record the shell, python and node the suite will use
+        run: |
+          uname -s
+          bash --version | head -1
+          python3 --version || python --version || py -3 --version
+          node --version
+
+      # Hermetic, same as the macOS job: fabricates its own ~/.claude and
+      # substitutes CCWATCH_FAKE_PS, so it needs no Claude Code installation.
+      - name: Tests
+        run: bash ./tests/run.sh
+
+      # The record half of D22: a skip is quiet by design, so a run that
+      # never touched a Windows probe would look identical in the log to one
+      # that exercised every one of them. This prints which implementation
+      # `doctor` selected per probe, and the suite's own "exercised" lines,
+      # so that absence is visible instead of silent.
+      - name: Probe report
+        if: always()
+        run: bash ./bin/ccwatch doctor
