@@ -68,47 +68,47 @@ description: "Task list for: Windows support for the taskbar tray and the overla
 
 ### Implementation for User Story 1 — process facts
 
-- [ ] T016 [US1] Implement `probe_proc` for macOS in `bin/ccwatch`: wrap the existing `ps -o pid=,lstart=,time=,rss= -p <pids>` pipeline verbatim behind the probe interface, with the control query `ps -o pid= -p $$` (FR-005, contracts/probe-layer.md)
-- [ ] T017 [US1] Implement `probe_proc` for Windows in `bin/ccwatch`: one `$CCWATCH_PY -c` program using `ctypes` — `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`, `GetProcessTimes` (creation FILETIME→UTC epoch, kernel+user CPU seconds), `GetProcessMemoryInfo` (working set→MB) — for the whole pid list in one process (D12)
-- [ ] T018 [US1] In the Windows `probe_proc`, distinguish per-pid outcomes: handle opened→a record; `ERROR_INVALID_PARAMETER` (87)→measured absence for that pid; `ERROR_ACCESS_DENIED` (5)→failure to measure for that pid, counted and reasoned, never folded into "not running" (D12)
-- [ ] T019 [US1] Implement the Windows control query for `probe_proc` using the pid from `/proc/self/winpid`, never `$$` (D11); on the fallback path where `/proc/self/winpid` is absent, report the probe as `failed`("refused") rather than guessing
-- [ ] T020 [US1] Add the PowerShell `Get-CimInstance Win32_Process` fallback for `probe_proc` on Windows, selected only when `CCWATCH_PY` is empty, reported by `doctor` as the implementation in use when selected (D12)
-- [ ] T021 [US1] Rewrite `collect_live`'s process-facts call site (`bin/ccwatch` around line 168) to call `probe_proc` instead of invoking `ps` inline; keep the pid-reuse guard and CPU-delta comparison logic unchanged (FR-007, FR-008)
+- [X] T016 [US1] Implement `probe_proc` for macOS in `bin/ccwatch`: wrap the existing `ps -o pid=,lstart=,time=,rss= -p <pids>` pipeline verbatim behind the probe interface, with the control query `ps -o pid= -p $$` (FR-005, contracts/probe-layer.md)
+- [X] T017 [US1] Implement `probe_proc` for Windows in `bin/ccwatch`: one `$CCWATCH_PY -c` program using `ctypes` — `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`, `GetProcessTimes` (creation FILETIME→UTC epoch, kernel+user CPU seconds), `GetProcessMemoryInfo` (working set→MB) — for the whole pid list in one process (D12)
+- [X] T018 [US1] In the Windows `probe_proc`, distinguish per-pid outcomes: handle opened→a record; `ERROR_INVALID_PARAMETER` (87)→measured absence for that pid; `ERROR_ACCESS_DENIED` (5)→failure to measure for that pid, counted and reasoned, never folded into "not running" (D12)
+- [X] T019 [US1] Implement the Windows control query for `probe_proc` using the pid from `/proc/self/winpid`, never `$$` (D11); on the fallback path where `/proc/self/winpid` is absent, report the probe as `failed`("refused") rather than guessing
+- [X] T020 [US1] Add the PowerShell `Get-CimInstance Win32_Process` fallback for `probe_proc` on Windows, selected only when `CCWATCH_PY` is empty, reported by `doctor` as the implementation in use when selected (D12)
+- [X] T021 [US1] Rewrite `collect_live`'s process-facts call site (`bin/ccwatch` around line 168) to call `probe_proc` instead of invoking `ps` inline; keep the pid-reuse guard and CPU-delta comparison logic unchanged (FR-007, FR-008)
 
 ### Implementation for User Story 1 — transcript mtimes
 
-- [ ] T022 [US1] Implement `probe_mtimes` for macOS in `bin/ccwatch`: `find … -print0 | xargs -0 stat -f '%m %N' | sort -rn`, unchanged from today (FR-005)
-- [ ] T023 [US1] Implement `probe_mtimes` for Windows in `bin/ccwatch`: `find … -print0 | xargs -0 stat -c '%Y %n' | sort -rn` (GNU `stat`, D13), with the control query being the mtime of the listing's own root directory
-- [ ] T024 [US1] Rewrite the transcript-listing call site (`bin/ccwatch` around line 1856) to call `probe_mtimes`; an unreadable root is `failed`, not `absent` (contracts/probe-layer.md)
+- [X] T022 [US1] Implement `probe_mtimes` for macOS in `bin/ccwatch`: `find … -print0 | xargs -0 stat -f '%m %N' | sort -rn`, unchanged from today (FR-005)
+- [X] T023 [US1] Implement `probe_mtimes` for Windows in `bin/ccwatch`: `find … -print0 | xargs -0 stat -c '%Y %n' | sort -rn` (GNU `stat`, D13), with the control query being the mtime of the listing's own root directory
+- [X] T024 [US1] Rewrite the transcript-listing call site (`bin/ccwatch` around line 1856) to call `probe_mtimes`; an unreadable root is `failed`, not `absent` (contracts/probe-layer.md)
 
 ### Implementation for User Story 1 — the Eastern clock
 
-- [ ] T025 [US1] Implement `probe_clock` in `bin/ccwatch`: validate each candidate once per run against two fixed instants (one EDT, one EST) with hard-coded known-correct answers, in order — BSD `date -r` (macOS), GNU `date -d "@<epoch>"` (Windows), PowerShell `TimeZoneInfo.ConvertTimeFromUtc` with zone id `Eastern Standard Time` — and use only the first candidate that answers both correctly; never `jq` (D14)
-- [ ] T026 [US1] Implement the "clock withheld" path in `probe_clock`: when no candidate validates, return empty and record `failed` with each candidate's answer to the two fixed instants, so `doctor` can show why each was rejected
-- [ ] T027 [US1] Rewrite `reset_clock`'s call site (`bin/ccwatch` around line 1191) to call `probe_clock`; keep the existing "empty/null/non-numeric input returns empty without consulting an implementation" behaviour (contracts/probe-layer.md)
+- [X] T025 [US1] Implement `probe_clock` in `bin/ccwatch`: validate each candidate once per run against two fixed instants (one EDT, one EST) with hard-coded known-correct answers, in order — BSD `date -r` (macOS), GNU `date -d "@<epoch>"` (Windows), PowerShell `TimeZoneInfo.ConvertTimeFromUtc` with zone id `Eastern Standard Time` — and use only the first candidate that answers both correctly; never `jq` (D14)
+- [X] T026 [US1] Implement the "clock withheld" path in `probe_clock`: when no candidate validates, return empty and record `failed` with each candidate's answer to the two fixed instants, so `doctor` can show why each was rejected
+- [X] T027 [US1] Rewrite `reset_clock`'s call site (`bin/ccwatch` around line 1191) to call `probe_clock`; keep the existing "empty/null/non-numeric input returns empty without consulting an implementation" behaviour (contracts/probe-layer.md)
 
 ### Implementation for User Story 1 — host pressure
 
-- [ ] T028 [US1] Implement `probe_host` for macOS in `bin/ccwatch`: `vm_stat` + `sysctl -n vm.swapusage` + `sysctl -n vm.loadavg`, unchanged (FR-005)
-- [ ] T029 [US1] Implement `probe_host` for Windows in `bin/ccwatch`: one PowerShell invocation querying `Win32_OperatingSystem.FreePhysicalMemory` and `Win32_PageFileUsage.{AllocatedBaseSize,CurrentUsage}`; `swap_total_mb`/`swap_used_mb`/`swap_used_pct` are `null` together with reason "this host has no pagefile" when no `Win32_PageFileUsage` instance exists; `compressed_mb` is simply absent; `load1` is always `null` with reason "Windows has no load average" (D15, FR-011)
-- [ ] T030 [US1] Add the 250ms-measured cache for the Windows host probe: if `CCWATCH_PROFILE=1` measurement exceeds 250ms, cache the reading for 30s under `$CCWATCH_HOME` with its age, and withhold (not annotate) a reading past that window (D15, principle III)
-- [ ] T031 [US1] Rewrite the host-pressure call sites (`bin/ccwatch` around lines 2329/2340/2348) to call `probe_host`
-- [ ] T032 [US1] Fix `cmd_doctor`'s pressure branch (`bin/ccwatch` around line 5046) so `[ "${swp:-0}" -ge "$CCWATCH_SWAP_WARN" ]`-style arithmetic never runs on the string `null`: when `swap_used_pct` is `null`, state which figure is unavailable and why instead of computing a verdict (FR-012, D15 "Consequence to fix")
+- [X] T028 [US1] Implement `probe_host` for macOS in `bin/ccwatch`: `vm_stat` + `sysctl -n vm.swapusage` + `sysctl -n vm.loadavg`, unchanged (FR-005)
+- [X] T029 [US1] Implement `probe_host` for Windows in `bin/ccwatch`: one PowerShell invocation querying `Win32_OperatingSystem.FreePhysicalMemory` and `Win32_PageFileUsage.{AllocatedBaseSize,CurrentUsage}`; `swap_total_mb`/`swap_used_mb`/`swap_used_pct` are `null` together with reason "this host has no pagefile" when no `Win32_PageFileUsage` instance exists; `compressed_mb` is simply absent; `load1` is always `null` with reason "Windows has no load average" (D15, FR-011)
+- [X] T030 [US1] Add the 250ms-measured cache for the Windows host probe: if `CCWATCH_PROFILE=1` measurement exceeds 250ms, cache the reading for 30s under `$CCWATCH_HOME` with its age, and withhold (not annotate) a reading past that window (D15, principle III)
+- [X] T031 [US1] Rewrite the host-pressure call sites (`bin/ccwatch` around lines 2329/2340/2348) to call `probe_host`
+- [X] T032 [US1] Fix `cmd_doctor`'s pressure branch (`bin/ccwatch` around line 5046) so `[ "${swp:-0}" -ge "$CCWATCH_SWAP_WARN" ]`-style arithmetic never runs on the string `null`: when `swap_used_pct` is `null`, state which figure is unavailable and why instead of computing a verdict (FR-012, D15 "Consequence to fix")
 
 ### Implementation for User Story 1 — paths, encoding, platform edges
 
-- [ ] T033 [US1] Implement `probe_native_path`/`probe_posix_path` in `bin/ccwatch`: `cygpath -w`/`cygpath -u` on Windows, identity on macOS (D5)
-- [ ] T034 [US1] Apply `probe_native_path`/`probe_posix_path` at every bash↔native boundary: the python probe call sites, `serve`'s `CCWATCH_SELF`/`CCWATCH_WEB`, transcript paths handed to `convo`, and the path passed to the tray app — not applied to paths that stay inside the shell (D5)
-- [ ] T035 [US1] Change `serve`'s `SELF` to an argv list (`[SELF]` on macOS, `[CCWATCH_BASH, SELF]` on Windows) at all four `subprocess.run` call sites (`bin/ccwatch` around lines 3397, 3584, 3608, 3641), so CPython on Windows never tries to execute the shebang line directly (D6)
-- [ ] T036 [US1] Strip `\r` from every Windows probe's own output before it returns (D16); make registry/transcript readers tolerate `\r\n` so a stray carriage return never turns `idle` into an unrecognised status value
-- [ ] T037 [US1] Normalise Windows `cwd` values from backslashes to forward slashes at ingest in `collect_sessions`, before the `split("/") | last` project-name join sees them (`bin/ccwatch` around lines 958 and 1978) (D17)
-- [ ] T038 [US1] Update all 16 existing `python3` call sites in `bin/ccwatch` to invoke `$CCWATCH_PY` (resolved in T005) instead of the literal `python3`, preserving the `-c`-only, never-stdin invocation style (D4, constitution's stdin rule unchanged)
+- [X] T033 [US1] Implement `probe_native_path`/`probe_posix_path` in `bin/ccwatch`: `cygpath -w`/`cygpath -u` on Windows, identity on macOS (D5)
+- [X] T034 [US1] Apply `probe_native_path`/`probe_posix_path` at every bash↔native boundary: the python probe call sites, `serve`'s `CCWATCH_SELF`/`CCWATCH_WEB`, transcript paths handed to `convo`, and the path passed to the tray app — not applied to paths that stay inside the shell (D5)
+- [X] T035 [US1] Change `serve`'s `SELF` to an argv list (`[SELF]` on macOS, `[CCWATCH_BASH, SELF]` on Windows) at all four `subprocess.run` call sites (`bin/ccwatch` around lines 3397, 3584, 3608, 3641), so CPython on Windows never tries to execute the shebang line directly (D6)
+- [X] T036 [US1] Strip `\r` from every Windows probe's own output before it returns (D16); make registry/transcript readers tolerate `\r\n` so a stray carriage return never turns `idle` into an unrecognised status value
+- [X] T037 [US1] Normalise Windows `cwd` values from backslashes to forward slashes at ingest in `collect_sessions`, before the `split("/") | last` project-name join sees them (`bin/ccwatch` around lines 958 and 1978) (D17)
+- [X] T038 [US1] Update all 16 existing `python3` call sites in `bin/ccwatch` to invoke `$CCWATCH_PY` (resolved in T005) instead of the literal `python3`, preserving the `-c`-only, never-stdin invocation style (D4, constitution's stdin rule unchanged)
 
 ### Implementation for User Story 1 — reporting, write-action refusal, install
 
-- [ ] T039 [US1] Update `cmd_doctor` to print the platform/probe block from contracts/probe-layer.md "What doctor must print": platform, python, bash (Windows), then one line per probe with its implementation, outcome, and reason/detail when not `ok` — every probe listed, including healthy ones (FR-014)
-- [ ] T040 [US1] Make `ccwatch send`, `ccwatch kill` and `ccwatch peers` exit with a named refusal on Windows — "not available on Windows: this needs POSIX signals and the per-session Unix socket" — and make `ccwatch serve` on Windows read-only: no token generated, write endpoints refuse, startup banner and `doctor` both state why (D23, FR per Out of Scope)
-- [ ] T041 [US1] Update `cmd_setup` for Windows: attempt `ln -s`, check whether the result is actually a symlink (not a silent MSYS copy), fall back to a two-line `exec` shim when it is not, then verify by running the installed thing and comparing the version — refuse with the reason on any failure (D24, FR-015)
+- [X] T039 [US1] Update `cmd_doctor` to print the platform/probe block from contracts/probe-layer.md "What doctor must print": platform, python, bash (Windows), then one line per probe with its implementation, outcome, and reason/detail when not `ok` — every probe listed, including healthy ones (FR-014)
+- [X] T040 [US1] Make `ccwatch send`, `ccwatch kill` and `ccwatch peers` exit with a named refusal on Windows — "not available on Windows: this needs POSIX signals and the per-session Unix socket" — and make `ccwatch serve` on Windows read-only: no token generated, write endpoints refuse, startup banner and `doctor` both state why (D23, FR per Out of Scope)
+- [X] T041 [US1] Update `cmd_setup` for Windows: attempt `ln -s`, check whether the result is actually a symlink (not a silent MSYS copy), fall back to a two-line `exec` shim when it is not, then verify by running the installed thing and comparing the version — refuse with the reason on any failure (D24, FR-015)
 
 ### Assertions cleanup for User Story 1
 

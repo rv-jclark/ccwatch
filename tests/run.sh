@@ -1140,7 +1140,8 @@ assert_eq "$(rj 'not json')" "rejected" "and so is garbage"
 # could not fail — the pipeline would succeed and the old code would not append
 # either, so it would have passed against the bug and been counted as coverage.
 # shellcheck disable=SC2016  # literal extraction again
-eval "$(sed -n '/^ps_out()/,/^}/p;/^collect_live()/,/^}/p' "$CCWATCH")"
+eval "$(sed -n '/^ps_out()/,/^}/p;/^# ==.*platform ====/,/^# ==.*collection ===/p;/^collect_live()/,/^}/p' "$CCWATCH")"
+export CCWATCH_PLATFORM=macos CCWATCH_PY=python3
 _clive=$(CCWATCH_FAKE_PS="$WORK/no-such-ps-file" collect_live '[{"pid":9001}]')
 assert_eq "$(printf '%s' "$_clive" | jq -s 'length' 2>/dev/null)" "1" \
   "collect_live emits exactly one JSON value when its pipeline fails mid-print"
@@ -4719,8 +4720,15 @@ done
 _rcfn=$(sed -n '/^reset_clock() {/,/^}/p' "$ROOT/bin/ccwatch")
 assert_contains "$_rcfn" "''|null|*[!0-9]*) return 0;;" \
   "reset_clock returns nothing for an empty, null or non-numeric instant"
-assert_contains "$_rcfn" "TZ=America/New_York date -r" \
-  "and formats with date -r, never jq, which reported the wrong zone here"
+assert_contains "$_rcfn" "probe_clock" \
+  "and delegates to the platform section's probe_clock rather than formatting a clock itself"
+# probe_clock's macOS candidate formats with `date -r`, never jq — jq's
+# strflocaltime reported the wrong zone for an instant in September
+# (research.md D14). Checked in the platform section, since that is the one
+# place permitted to invoke `date -r` at all (FR-001).
+_clockfn=$(sed -n '/^_ccwatch_clock_select() {/,/^}/p' "$ROOT/bin/ccwatch")
+assert_contains "$_clockfn" "TZ=America/New_York date -r" \
+  "and probe_clock's macOS candidate formats with date -r, never jq, which reported the wrong zone here"
 
 
 # =============================================================== markdown ====
