@@ -88,7 +88,13 @@ is the same expression the table's `LAST` column uses.
 ./bin/ccwatch doctor            # is ccwatch's own view still trustworthy
 ./bin/ccwatch verify-ui --shots .screens   # render the pages and check them
 CCWATCH_PROFILE=1 ./bin/ccwatch --json >/dev/null   # per-stage timings
+CCWATCH_PLATFORM=windows ./bin/ccwatch doctor   # exercise Windows probe selection from macOS
 ```
+
+`CCWATCH_PLATFORM`, `CCWATCH_PY` and `CCWATCH_BASH` (Windows only) override
+`platform_detect`'s own resolution — the seam the hermetic suite uses to
+assert probe selection for both platforms from either host. See `usage()`
+and the `platform` section of `bin/ccwatch` for what each does.
 
 `verify-ui` boots its own `serve`, drives headless Chrome against a harness
 that iframes the real pages, and asserts on rendered boxes, computed styles and

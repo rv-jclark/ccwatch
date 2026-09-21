@@ -191,8 +191,150 @@ resolved_self() {
 }
 
 TMP=""
-cleanup() { [ -n "$TMP" ] && rm -rf "$TMP"; }
+cleanup() {
+  [ -n "$TMP" ] && rm -rf "$TMP"
+  [ -n "${_CCWATCH_PROBE_REPORT:-}" ] && rm -f "$_CCWATCH_PROBE_REPORT"
+}
 trap cleanup EXIT
+
+# ============================================================== platform ====
+#  platform_detect / probe_report / probe_note
+#  probe_proc / probe_mtimes / probe_clock / probe_host
+#  probe_native_path / probe_posix_path
+#
+# The only section permitted to invoke `ps`, `stat -f`/`stat -c`,
+# `date -r`/`date -d`, `vm_stat`, `sysctl`, PowerShell, `cygpath` or `uname`
+# (FR-001, contracts/probe-layer.md "Where it lives"). Everything else in
+# this script asks a probe, never a program directly — the point of this
+# section is that a caller stops knowing what platform it is on.
+
+CCWATCH_PLATFORM="${CCWATCH_PLATFORM:-}"
+CCWATCH_UNAME=""
+CCWATCH_PY="${CCWATCH_PY:-}"
+CCWATCH_BASH="${CCWATCH_BASH:-}"
+_ccwatch_platform_detected=0
+
+# platform_detect — sets CCWATCH_PLATFORM/CCWATCH_UNAME/CCWATCH_PY (and
+# CCWATCH_BASH on Windows) once per run. Idempotent: called from the top of
+# the script and safe to call again from anywhere that needs it early.
+#
+# A pre-set CCWATCH_PLATFORM overrides detection outright rather than being
+# re-detected — the seam the hermetic suite uses to assert probe selection
+# for both platforms from either host (FR-029, D2).
+platform_detect() {
+  [ "$_ccwatch_platform_detected" -eq 1 ] && return 0
+  _ccwatch_platform_detected=1
+
+  CCWATCH_UNAME=$(uname -s 2>/dev/null) || CCWATCH_UNAME=""
+
+  if [ -z "$CCWATCH_PLATFORM" ]; then
+    case "$CCWATCH_UNAME" in
+      Darwin) CCWATCH_PLATFORM=macos ;;
+      MINGW*|MSYS*|CYGWIN*) CCWATCH_PLATFORM=windows ;;
+      # unsupported is a first-class value, not an error: every probe below
+      # returns `failed` with the platform named in the reason, and the run
+      # continues rather than guessing at a shape it has never seen (D3).
+      *) CCWATCH_PLATFORM=unsupported ;;
+    esac
+  fi
+
+  _ccwatch_resolve_py
+  [ "$CCWATCH_PLATFORM" = windows ] && _ccwatch_resolve_bash
+  return 0
+}
+
+# CCWATCH_PY resolution (D4): try python3, then python (accepted only if it
+# actually answers as Python 3 — some hosts still put a Python 2 `python` on
+# PATH), then the Windows launcher's `py -3`. Empty when none answer; nothing
+# here guesses at a fallback.
+_ccwatch_resolve_py() {
+  [ -n "$CCWATCH_PY" ] && return 0
+  if command -v python3 >/dev/null 2>&1; then
+    CCWATCH_PY=python3
+    return 0
+  fi
+  if command -v python >/dev/null 2>&1 \
+     && python -c 'import sys; sys.exit(0 if sys.version_info.major == 3 else 1)' \
+        >/dev/null 2>&1; then
+    CCWATCH_PY=python
+    return 0
+  fi
+  if command -v py >/dev/null 2>&1 && py -3 -c 'import sys' >/dev/null 2>&1; then
+    CCWATCH_PY="py -3"
+    return 0
+  fi
+  CCWATCH_PY=""
+}
+
+# CCWATCH_BASH resolution (D1, D18) — Windows only, so a macOS run never pays
+# for it. Candidate order: a build-time recorded path (none yet — this
+# script has no build step of its own), HKLM\SOFTWARE\GitForWindows's
+# InstallPath, %ProgramFiles%\Git\bin\bash.exe, C:\msys64\usr\bin\bash.exe,
+# then whatever `bash` resolves to on PATH.
+#
+# %SystemRoot%\System32\bash.exe (the WSL launcher) is excluded by path
+# outright, and every remaining candidate is verified by actually running
+# it: `uname -s` must answer MINGW*/MSYS*/CYGWIN*, because a `bash` on PATH
+# that silently opens a WSL shell instead would run every probe against the
+# wrong kernel with no error to show for it.
+_ccwatch_resolve_bash() {
+  [ -n "$CCWATCH_BASH" ] && return 0
+  local candidates c reg_path on_path
+  candidates=""
+
+  reg_path=$(reg query 'HKLM\SOFTWARE\GitForWindows' -v InstallPath 2>/dev/null \
+    | awk '/InstallPath/{print $NF}')
+  [ -n "$reg_path" ] && candidates="$candidates ${reg_path}\\bin\\bash.exe"
+  candidates="$candidates ${ProgramFiles:-C:\\Program Files}\\Git\\bin\\bash.exe"
+  candidates="$candidates C:\\msys64\\usr\\bin\\bash.exe"
+  on_path=$(command -v bash 2>/dev/null) && candidates="$candidates $on_path"
+
+  for c in $candidates; do
+    case "$c" in *[Ss]ystem32*bash.exe) continue ;; esac
+    command -v "$c" >/dev/null 2>&1 || [ -x "$c" ] || continue
+    case "$("$c" -c 'uname -s' 2>/dev/null)" in
+      MINGW*|MSYS*|CYGWIN*) CCWATCH_BASH="$c"; return 0 ;;
+    esac
+  done
+  CCWATCH_BASH=""
+}
+
+# probe_note <name> <impl> <outcome> <reason> [detail] — appends one row to
+# the run-scoped report; probe_report prints it back for `doctor` (FR-014).
+#
+# The file is created lazily with a TEMPLATE, never a bare `mktemp` — bare
+# `mktemp -d` resolved against confstr(_CS_DARWIN_USER_TEMP_DIR) rather than
+# $TMPDIR and was refused outright in a sandbox granting one and not the
+# other, which cost cmd_resume and cmd_peers a silent empty output before
+# their own fix (D8). A global rather than a variable set inside `$(...)`:
+# that assignment never survives the subshell back to the caller.
+_ccwatch_probe_report=""
+probe_note() {
+  local name="$1" impl="$2" outcome="$3" reason="${4:-}" detail="${5:-}"
+  if [ -z "$_ccwatch_probe_report" ]; then
+    _ccwatch_probe_report=$(mktemp "${TMPDIR:-/tmp}/ccwatch-probes.XXXXXX") || return 0
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$impl" "$outcome" "$reason" "$detail" \
+    >>"$_ccwatch_probe_report"
+}
+
+# probe_report — the TSV rows collected this run, one per probe_note call, in
+# call order. Nothing printed if no probe has run yet.
+probe_report() {
+  [ -n "$_ccwatch_probe_report" ] && [ -f "$_ccwatch_probe_report" ] \
+    && cat "$_ccwatch_probe_report"
+  return 0
+}
+
+# probe_proc/probe_mtimes/probe_clock/probe_host/probe_native_path/
+# probe_posix_path — stubs only. Real per-platform implementations land in
+# Phase 3 (US1); nothing calls these yet.
+probe_proc() { :; }
+probe_mtimes() { :; }
+probe_clock() { :; }
+probe_host() { :; }
+probe_native_path() { printf '%s' "$1"; }
+probe_posix_path() { printf '%s' "$1"; }
 
 # ============================================================== collection ===
 
@@ -5247,6 +5389,14 @@ ENVIRONMENT
   CCWATCH_HOME         where the event log lives (default ~/.claude/ccwatch)
   CLAUDE_CONFIG_DIR  which Claude Code config directory to read
   NO_COLOR           set to disable colour
+
+  CCWATCH_PLATFORM   override platform detection (macos/windows/unsupported)
+                     — the seam the test suite uses to exercise both
+                     platforms' probes from either host
+  CCWATCH_PY         override the resolved python interpreter (python3,
+                     python, or "py -3")
+  CCWATCH_BASH       Windows only: override the verified MSYS/Git bash,
+                     passed to `serve`'s subprocess calls
 EOF
 }
 
@@ -5414,6 +5564,7 @@ cmd_setup() {
 
 # ============================================================== dispatch ====
 
+platform_detect
 need jq "install with: brew install jq"
 need awk
 
