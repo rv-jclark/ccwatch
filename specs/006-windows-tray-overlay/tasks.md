@@ -201,7 +201,7 @@ description: "Task list for: Windows support for the taskbar tray and the overla
 
 **Purpose**: the run-through and bookkeeping that spans every story.
 
-- [X] T077 Walk `quickstart.md` end to end on both a macOS host and a Windows host (or the CI Windows runner if no physical host is available) and record which of U1-U6 (research.md's "What remains unverified" table) were settled and how
+- [ ] T077 Walk `quickstart.md` end to end on both a macOS host and a Windows host (or the CI Windows runner if no physical host is available) and record which of U1-U6 (research.md's "What remains unverified" table) were settled and how — **PARTIAL: the macOS walk-through and the U1-U6 recording are done (all six are Open); the Windows walk-through has not happened, because no Windows host or CI runner has run this code. Re-ticking this requires that walk, not another reading of it.**
 - [X] T078 [P] Update `app-win/README.md` with the final requirements, install steps and what is unavailable on Windows, so SC-010's "no step the documentation does not name" holds
 - [X] T079 Final `TALLY_FLOOR` pass in `tests/run.sh`: confirm the floor reflects exactly the always-run assertions added across US1-US4 (not anything gated behind a built `app-win` binary or a Windows-only host)
 

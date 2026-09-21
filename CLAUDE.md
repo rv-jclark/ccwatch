@@ -257,6 +257,17 @@ produced a specific wrong output that someone believed.
   refusing `ps` once produced 18 sessions running, `0 live` on screen, stated
   with no hedge — a probe that cannot measure now reports `failed` with a
   reason, never an empty result standing in for zero.
+
+  ⚠️ **The Windows path has never been executed.** As of this commit no
+  Windows host and no CI runner has ever run `bin/ccwatch`, and `app-win/`
+  has never been compiled: the machine it was written on has no .NET SDK, no
+  `pwsh` and no Windows. The `windows-latest` job in
+  `.github/workflows/ci.yml` is what would first establish any of it, and
+  `specs/006-windows-tray-overlay/research.md` lists all six open unknowns
+  (U1-U6) with what settles each. Until that job has run green, "runs on
+  both" is a design intention and not a measurement — which is the same
+  distinction rule 3 draws about a stale percentage, applied to a platform
+  claim.
 - `python3` is used for the socket client, date parsing and the HTTP server.
   Pass programs with `python3 -c`, never on stdin — a heredoc on stdin collides
   with the payload the program is trying to read, which cost a whole debugging
