@@ -32,6 +32,31 @@ renders it, and adds only verbs (principle XI in `CLAUDE.md`).
 Nothing in `bin/ccwatch` or `web/` depends on this app (FR-028). It is a
 separate build step, same as `app/build.sh` is for macOS.
 
+## Installing
+
+`./app-win/build.ps1 -Install` builds and copies the published app into
+`%LOCALAPPDATA%\Programs\ccwatch`. It does not add a Start Menu shortcut or
+register the app to launch at sign-in — do both by hand if you want them,
+since a step this app took silently would be a step the documentation could
+not name (SC-010). Uninstalling is deleting that folder; the app writes no
+registry keys.
+
+At launch the tray locates `ccwatch` the same way on every run: a build-time
+path recorded at publish time, then `PATH`. If neither resolves, the tray
+title reads `cc !` and the menu states what it looked for and where — never
+an empty fleet (see `quickstart.md` §2f).
+
+## What is unavailable here
+
+The tray and overlay only ever show what `ccwatch bar`/`ccwatch --json`
+report, so anything `bin/ccwatch` cannot measure on Windows is absent from
+this app too, stated as unavailable rather than shown as zero or omitted:
+load average (`load1` is `null`, never `0`), `send`/`kill`/`peers` (these need
+POSIX signals and the per-session Unix socket; `serve` stays read-only on
+Windows), and the separate "compressed" memory figure macOS reports. See the
+"Portability constraints" section of the top-level `README.md` for the full
+list and why each is missing rather than faked.
+
 ## The overlay's stated limitation
 
 The overlay stays above other windows via `WS_EX_TOPMOST`, re-asserted with
