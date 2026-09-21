@@ -1554,9 +1554,20 @@ distinct word, so `ccwatch once | grep HUNG` works, and so does a screen reader.
 ./tests/run.sh          # shellcheck + 188 assertions
 ```
 
-CI runs the same script on macOS, and macOS only: `stat -f` and `ps -o lstart=`
-are used in their BSD forms and bash 3.2 is the floor, so a suite green on
-Linux would not be testing the thing anyone runs.
+CI runs the same script on macOS and on Windows (under the runner's Git Bash,
+not WSL — WSL cannot see Windows process ids, which is the corroborating
+signal behind every verdict). Every host-dependent measurement goes through a
+named probe in the `platform` section: macOS keeps `ps -o lstart=`, `stat -f`,
+`date -r`, `vm_stat` and `sysctl` in their BSD forms unchanged; Windows uses
+`ctypes` (`OpenProcess`/`GetProcessTimes`/`GetProcessMemoryInfo`, with a
+`Get-CimInstance Win32_Process` fallback) for process facts, GNU `stat` for
+transcript mtimes, and PowerShell for host pressure. Windows has no load
+average (`load1` is `null`, never `0`), no `send`/`kill`/`peers` (these need
+POSIX signals and the per-session Unix socket, so `serve` is read-only there),
+and no separate "compressed" memory figure — each is stated as unavailable
+with the reason rather than omitted. Bash 3.2 is still the floor on both
+platforms, because that is what macOS ships and Git-for-Windows bash tracks
+it closely enough to matter.
 
 An assertion that needs something the host cannot provide **skips with the
 reason**, rather than failing. A runner with swap disabled has no swap

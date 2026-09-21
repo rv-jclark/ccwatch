@@ -240,8 +240,23 @@ produced a specific wrong output that someone believed.
 
 - **bash 3.2**, because that is what macOS ships. No `mapfile`/`readarray`, no
   `declare -A`, no `${var,,}`/`${var^^}`. The suite greps for these.
-- **macOS `stat -f` and `ps -o lstart=`** in their BSD forms. This is a macOS
-  tool; CI runs on macOS only.
+- **macOS and Windows.** `bin/ccwatch` runs on both, under Git-for-Windows /
+  MSYS2-class bash on Windows — not WSL, which cannot see Windows process ids
+  and would cost the corroborating signal behind every verdict. Every
+  host-dependent measurement goes through the `platform` section's probe seam
+  (`platform_detect`, `probe_proc`, `probe_mtimes`, `probe_clock`,
+  `probe_host`): macOS keeps `ps -o lstart=`, `stat -f`, `date -r`, `vm_stat`
+  and `sysctl` in their BSD forms unchanged; Windows uses `ctypes` calls
+  (`OpenProcess`/`GetProcessTimes`/`GetProcessMemoryInfo`) or a
+  `Get-CimInstance Win32_Process` fallback for process facts, GNU `stat` for
+  transcript mtimes, and one PowerShell query for host pressure. Windows has
+  no load average (`load1` is always `null`, not `0`), no `send`/`kill`/
+  `peers` (these need POSIX signals and the per-session Unix socket —
+  refused with the reason, `serve` is read-only), and no separate
+  "compressed" memory figure. The probe seam exists because a sandbox
+  refusing `ps` once produced 18 sessions running, `0 live` on screen, stated
+  with no hedge — a probe that cannot measure now reports `failed` with a
+  reason, never an empty result standing in for zero.
 - `python3` is used for the socket client, date parsing and the HTTP server.
   Pass programs with `python3 -c`, never on stdin — a heredoc on stdin collides
   with the payload the program is trying to read, which cost a whole debugging
