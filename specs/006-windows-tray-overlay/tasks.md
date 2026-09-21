@@ -185,13 +185,13 @@ description: "Task list for: Windows support for the taskbar tray and the overla
 
 ### Implementation for User Story 4
 
-- [ ] T070 [US4] Capture `ccwatch --json` output on macOS before Phase 2 begins (if not already captured) and diff it against the post-extraction output with `jq -S 'del(.at, .sessions[].age, .sessions[].cpu)'` on both sides — confirm the diff is empty (SC-007, quickstart §4)
-- [ ] T071 [US4] Run `./tests/run.sh` on macOS and confirm it is green, the assertion tally is at or above the (now-raised) floor, and no new skip hides a Windows-only path
-- [ ] T072 [US4] Run `./app/build.sh --selftest` and confirm the macOS menu bar app's own checks still pass unchanged (FR-035)
-- [ ] T073 [US4] Confirm `CCWATCH_FAKE_PS=tests/fixtures/ps-sample ./bin/ccwatch --json | jq '.sessions | length'` is unchanged from before the extraction
-- [ ] T074 [US4] Add a `windows-latest` job to `.github/workflows/ci.yml` running `tests/run.sh` under the runner's Git Bash, printing `ccwatch doctor`'s platform/probe section and the suite's per-probe "exercised" lines; keep `macos-latest` unchanged and owning lint (D22, FR-032, SC-011)
-- [ ] T075 [US4] Amend `CLAUDE.md`, `README.md` and `.specify/memory/constitution.md` together (FR-033): replace "This is a macOS tool; CI runs on macOS only" with a statement that ccwatch supports macOS and Windows, which probe implementation each platform uses, what is unavailable on each (load average, `send`/`kill`/`peers`, the compressor figure), and the failure that motivated the probe layer (`ps` refused, 18 sessions live, 0 reported)
-- [ ] T076 [P] [US4] Run `shellcheck -x -S warning` over `bin/ccwatch`, `tests/run.sh`, `extra/swiftbar/ccwatch.10s.sh` and `app/build.sh` and fix or narrowly suppress (with a reason) anything the platform section introduced (FR-034)
+- [X] T070 [US4] Capture `ccwatch --json` output on macOS before Phase 2 begins (if not already captured) and diff it against the post-extraction output with `jq -S 'del(.at, .sessions[].age, .sessions[].cpu)'` on both sides — confirm the diff is empty (SC-007, quickstart §4)
+- [X] T071 [US4] Run `./tests/run.sh` on macOS and confirm it is green, the assertion tally is at or above the (now-raised) floor, and no new skip hides a Windows-only path
+- [X] T072 [US4] Run `./app/build.sh --selftest` and confirm the macOS menu bar app's own checks still pass unchanged (FR-035)
+- [X] T073 [US4] Confirm `CCWATCH_FAKE_PS=tests/fixtures/ps-sample ./bin/ccwatch --json | jq '.sessions | length'` is unchanged from before the extraction
+- [X] T074 [US4] Add a `windows-latest` job to `.github/workflows/ci.yml` running `tests/run.sh` under the runner's Git Bash, printing `ccwatch doctor`'s platform/probe section and the suite's per-probe "exercised" lines; keep `macos-latest` unchanged and owning lint (D22, FR-032, SC-011)
+- [X] T075 [US4] Amend `CLAUDE.md`, `README.md` and `.specify/memory/constitution.md` together (FR-033): replace "This is a macOS tool; CI runs on macOS only" with a statement that ccwatch supports macOS and Windows, which probe implementation each platform uses, what is unavailable on each (load average, `send`/`kill`/`peers`, the compressor figure), and the failure that motivated the probe layer (`ps` refused, 18 sessions live, 0 reported)
+- [X] T076 [P] [US4] Run `shellcheck -x -S warning` over `bin/ccwatch`, `tests/run.sh`, `extra/swiftbar/ccwatch.10s.sh` and `app/build.sh` and fix or narrowly suppress (with a reason) anything the platform section introduced (FR-034)
 
 **Checkpoint**: this phase is the gate — none of US1-US3 may be considered shippable until every item here passes, per plan.md's Constitution Check.
 
