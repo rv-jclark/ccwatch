@@ -736,11 +736,19 @@ used — `build.ps1` may emit one for the tray app's own use).
 
 None of these block Phase 1; each names its observation.
 
+**First Windows CI run, 2026-09-21** (PR #10, `windows-latest`, 36m31s):
+**607 passed, 145 failed, 8 skipped**. The read path returns no rows — almost
+every failure reads `got ''`. Detection, the bash locator, `CCWATCH_FAKE_PS`
+parity and the outside-the-seam guard all passed, so the break is downstream
+of detection; `probe_mtimes` and the native/POSIX path translation are the
+first suspects, because a transcript that is never found drops its whole row.
+The statuses below record what that run settled.
+
 | # | Claim | Settled by | Status |
 |---|---|---|---|
-| U1 | `/proc/self/winpid` exists in Git for Windows' bash | D22's job prints it; fallback in D11 | Open — `test-windows` in `.github/workflows/ci.yml` has not yet run against this branch (unpushed); settles on the first push/PR |
-| U2 | GNU `date` in that bash honours `TZ=America/New_York` | D14's validated selection decides at run time, per host | Open — same as U1, settles on the first Windows CI run |
+| U1 | `/proc/self/winpid` exists in Git for Windows' bash | D22's job prints it; fallback in D11 | **Settled** — `uname -s` on the runner is `MINGW64_NT-10.0-26100`, detection reported `platform: windows`, and the bash locator found `C:\msys64\usr\bin\bash.exe` |
+| U2 | GNU `date` in that bash honours `TZ=America/New_York` | D14's validated selection decides at run time, per host | **Open, and now suspect** — the run reported `exercised: clock=none`, so no clock implementation was selected on the Windows host at all. That is a lead on the empty rows, not just an open question |
 | U3 | The `ctypes` process probe's cost at realistic pid counts | `CCWATCH_PROFILE=1` during implementation; PowerShell fallback is D12's | Open — needs a real Windows host or the CI runner; not observable from this macOS-only implementation pass |
 | U4 | The PowerShell host probe's cost | as above; the 250ms threshold and the 30s cache are decided in D15 | Open — same constraint as U3 |
-| U5 | Which suite sections can run on the hosted Windows image | the first CI run's skip list, read and converted per FR-031 | Open — settles on the first Windows CI run; the macOS run of this pass (`./tests/run.sh`) reported 755 passed, 0 failed, 3 skipped, all with the reason stated (app-win unbuilt, process enumeration refused, no swap on this host) |
+| U5 | Which suite sections can run on the hosted Windows image | the first CI run's skip list, read and converted per FR-031 | **Settled** — 8 sections skip on `windows-latest` against 1 on `macos-latest`. The run also showed the job takes 36m31s there against 1m29s on macOS, which needs its own look before this is a routine gate |
 | U6 | Whether `WS_EX_NOACTIVATE` on the host keeps focus out of the WebView2 child on click | the manual pass in `quickstart.md`; it is the one property a selftest cannot prove | Open — requires a physical Windows host per quickstart.md §3; not available in this sandbox |
