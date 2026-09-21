@@ -507,6 +507,7 @@ collect_pipelines() {
 #     presenting a stale number as current.
 
 cmd_statusline() {
+  local dsid=""
   # This runs on every statusline repaint, in the critical path of the user's
   # prompt. It must never fail, never be slow, and never print anything to
   # stdout that is not statusline text.
@@ -520,6 +521,26 @@ cmd_statusline() {
 
   local payload
   payload=$(cat 2>/dev/null) || payload=""
+
+  # ⚠️ A diagnostic for exactly one question: when two sessions report
+  # different rate-limit figures for the same instant, which of them is
+  # describing something else? Nothing else records the WHOLE payload, so that
+  # question was unanswerable, and it got answered with "we cannot know" —
+  # which was not good enough.
+  #
+  # Opt-in by flag file rather than env var, because a statusline command is
+  # configured once in settings.json and inherits no environment you can vary
+  # per session:
+  #     touch ~/.claude/ccwatch/debug-payloads    # start
+  #     rm    ~/.claude/ccwatch/debug-payloads    # stop
+  # One file per session, overwritten, so it cannot grow without bound.
+  if [ -f "$CCWATCH_HOME/debug-payloads" ] && [ -n "$payload" ]; then
+    {
+      mkdir -p "$CCWATCH_HOME/payloads" 2>/dev/null
+      dsid=$(printf '%s' "$payload" | jq -r '.session_id // "unknown"' 2>/dev/null)
+      printf '%s' "$payload" | jq -c . >"$CCWATCH_HOME/payloads/${dsid}.json" 2>/dev/null
+    } >/dev/null 2>&1
+  fi
 
   # Everything in this block is best-effort. A failure here would otherwise
   # break the status line of whichever session happened to be running.
@@ -659,79 +680,92 @@ cmd_install_statusline() {
 # Both report their own age. A percentage with no timestamp is the same failure
 # this whole tool exists to avoid: a number presented as current when nobody
 # knows whether it is.
-# collect_usage — the account-wide reading, or a statement that the reporters
-# do not agree on one.
+# collect_usage — the account-wide reading, reconstructed from every session
+# that reports one.
 #
-# ⚠️ This used to be `jq` on a single file, and the single file is written by
-# whichever statusline repainted last. Measured on a real machine: four
-# sessions wrote 12%, 14%, 15% and `five_hour: null` inside one minute, and the
-# menu bar was reported cycling 101% / 88% / 62% — three figures, at most one
-# of which was true, each shown with no hedge. A percentage presented that way
-# is the exact failure constitution III exists to stop, and picking the newest
-# would not fix it: it would only make the wrong number stable.
+# ⚠️ Why the highest reading wins, and why this is not a guess. Captured from
+# twelve real payloads with `debug-payloads`:
 #
-# So the readings are collected PER REPORTER and cross-checked. Readings drift
-# apart legitimately as usage accrues, so only those taken close together are
-# compared, and a spread past the tolerance is reported as a disagreement with
-# its range rather than resolved by choosing. Constitution I: a claim needs a
-# second signal agreeing with it, and here the second signal is another
-# session.
+#     session   model               5h%    resets_at
+#     42591a89  claude-fable-5-1     26   1789961400
+#     319aa7d0  claude-opus-5[1m]    32   1789961400
+#     6d9d48c2  claude-sonnet-5      35   1789961400
+#     2638948e  claude-opus-5[1m]    36   1789961400
+#     921774f7  claude-opus-5[1m]    42   1789961400
+#
+# Every session reports the SAME `resets_at`, so they are all describing one
+# window of one account — they are not measuring different things, and the
+# model makes no difference either. What differs is when each session last
+# fetched the figure: Claude Code does not refetch the rate limit on every
+# statusline repaint, so each payload carries that session's last known value.
+# Eight sessions written within two seconds of each other were carrying caches
+# minutes apart.
+#
+# Within a window `used_percentage` only climbs — usage accrues and resets, it
+# does not decay — so every reading is a valid LOWER BOUND on the figure now,
+# and the largest is the freshest. Maximum per window, grouped by `resets_at`
+# so a reading left over from the previous window cannot drag the answer down.
+#
+# ⚠️ This replaced withholding the number whenever readings disagreed, which
+# was wrong and disruptive: it hid the figure on a machine where the figure was
+# perfectly knowable, and it was reported as such ("8 sessions report different
+# figures — not shown"). Constitution III withholds a reading nobody can stand
+# behind; it does not license refusing to work out which reading is right.
 collect_usage() {
   local out
   mkdir -p "$USAGE_DIR" 2>/dev/null
-  # ⚠️ The legacy single file is read as ONE MORE REPORTER, not as a fallback
-  # for when the directory is empty. As a fallback it was silently outranked:
-  # any fresh per-reporter file made `usage.json` invisible, so a test — and an
-  # upgrade — that wrote only the legacy file found its reading ignored with no
-  # sign why. As a reporter it participates, and because the same statusline
-  # writes both, readings are de-duplicated by session so one repaint counts
-  # once.
+  # The legacy single file is read as one more reporter, de-duplicated by
+  # session, because `ccwatch statusline` writes the same reading to both.
   out=$( { cat "$USAGE_DIR"/*.json 2>/dev/null; cat "$USAGE_FILE" 2>/dev/null; } \
     | jq -sc --argjson now "$(date '+%s')" \
-          --argjson stale "$CCWATCH_USAGE_STALE" \
-          --argjson window "$CCWATCH_USAGE_AGREE_WINDOW" \
-          --argjson tol "$CCWATCH_USAGE_TOLERANCE" '
-    # ⚠️ Staleness is NOT filtered here. Dropping old readings made
-    # collect_usage return null for a statusline that stopped reporting an
-    # hour ago, which is the same answer it gives for one that was never
-    # installed — so the header said "run install-statusline" to somebody
-    # whose feed had simply died, and "is your statusline still running?" was
-    # never reached. Two different facts, one rendering (constitution IV).
-    # The renderers decide what to do with an age; this only reports it.
-    [ .[] | select(type == "object" and .at != null)
-          | . + { age: ($now - .at) } ]
-    # One reading per reporter, newest kept: the same statusline writes both
-    # files, and counting it twice would inflate the reporter count and make a
-    # single session look like a quorum.
+          --argjson stale "$CCWATCH_USAGE_STALE" '
+    # Staleness is NOT filtered here: a feed that died an hour ago and one that
+    # was never installed are different facts, and dropping the old reading
+    # would render them identically (constitution IV). The age is reported and
+    # the renderers decide.
+    [ .[] | select(type == "object" and .at != null) | . + { age: ($now - .at) } ]
     | group_by(.session // "legacy")
     | map(sort_by(-.at) | .[0])
     | sort_by(-.at)
     | if length == 0 then null
       else
-        # ⚠️ The figure comes from the newest reading that HAS one. Taking the
-        # newest reading full stop meant a payload with `five_hour: null`
-        # blanked the percentage for a refresh — the observed blip where the
-        # menu bar dropped to a bare session count and came back.
-        # Fresh readings are the only ones that can corroborate or contradict
-        # each other; a dead reporter is not evidence about now. But the
-        # newest reading overall is still what gets returned, so its age can
-        # be reported rather than turned into an absence.
-        ( [ .[] | select(.age <= $stale) ] ) as $fresh
-        | ( ( [ $fresh[] | select(.five_hour.used_percentage != null) ] | .[0] )
-            // $fresh[0] // .[0] ) as $newest
-        # Only readings taken near that one can contradict it. Usage climbs
-        # while you work, so a ten-minute-old 40% beside a current 101% is
-        # drift; two readings seconds apart saying 101% and 62% are not.
-        | [ $fresh[] | select((($newest.at) - .at) <= $window)
-                     | select(.five_hour.used_percentage != null)
-                     | .five_hour.used_percentage ] as $pcts
-        | ( $pcts | if length == 0 then null else (max - min) end ) as $spread
+        . as $all
+        | [ $all[] | select(.age <= $stale) ] as $fresh
+
+        # best(window) — the freshest known figure for one window, which is the
+        # largest among the readings that agree on when it resets.
+        # ⚠️ Same window means resets_at NEAR the latest, not equal to it.
+        # Exact equality was the first version and it is a trap: two sessions
+        # reporting an instant one second apart would be treated as two
+        # different windows, and the higher — that is, fresher — reading would
+        # be silently discarded. Caught by an assertion that passed alone and
+        # failed in the full suite, because the fixture generated the
+        # resets_at of each reading from its own clock.
+        #
+        # (No apostrophes in this program. It is a single-quoted jq argument
+        # and one closes it, giving a bash syntax error hundreds of lines from
+        # the typo. That is twice now.)
+        # A window that has actually rolled moves by its whole length: five
+        # hours for five_hour, days for the others. Ten minutes of slack
+        # separates those two cases with room to spare and tolerates any
+        # plausible skew between sessions.
+        | def best(sel):
+            [ $fresh[] | sel | select(. != null) | select(.used_percentage != null) ]
+            | if length == 0 then null
+              else ( [ .[] | .resets_at ] | map(select(. != null))
+                     | if length == 0 then null else max end ) as $w
+                   | [ .[] | select(($w == null) or (.resets_at == null)
+                                    or (($w - .resets_at) <= 600)) ]
+                   | sort_by(-.used_percentage) | .[0]
+              end;
+
+        ( $fresh[0] // $all[0] ) as $newest
         | $newest
-          + { stale_after: $stale, reporters: ($pcts | length) }
-          + ( if $spread != null and $spread > $tol
-              then { disagree: { lo: ($pcts | min), hi: ($pcts | max),
-                                 count: ($pcts | length), spread: $spread } }
-              else {} end )
+          + { stale_after: $stale,
+              reporters: ($fresh | length),
+              five_hour:      best(.five_hour),
+              seven_day:      best(.seven_day),
+              seven_day_opus: best(.seven_day_opus) }
       end' 2>/dev/null)
   if [ -n "$out" ] && [ "$out" != "null" ]; then printf '%s' "$out"; else printf 'null'; fi
 }
@@ -1251,14 +1285,6 @@ render() {
       end;
     if .usage == null then
       "\($d)usage: not reporting — run: ccwatch install-statusline\($z)"
-    elif (.usage.disagree // null) != null then
-      # ⚠️ Withheld, with the range, because at most one of these figures is
-      # true and nothing here can say which. Showing the newest would only
-      # make the wrong one stable. Constitution I and III together: an
-      # uncorroborated reading is not a reading.
-      "\($y)usage: \(.usage.disagree.count) sessions report different figures"
-      + " (\(.usage.disagree.lo|floor)%–\(.usage.disagree.hi|floor)%) — not shown\($z)"
-      + " \($d)(are they signed in to the same account? ccwatch doctor)\($z)"
     elif (.usage.age // 0) > $usage_stale then
       # The numbers are withheld, not annotated. A percentage on screen is read
       # as current no matter what is printed next to it.
@@ -1594,7 +1620,6 @@ cmd_bar() {
     # "resets in 2h", not "2h left": the latter reads as two hours of quota
     # remaining, which is a different and much more expensive thing to believe.
     | ( if .usage != null
-             and ((.usage.disagree // null) == null)
              and ((.usage.age // 0) <= (.usage.stale_after // 600))
              and (.usage.five_hour != null)
         then "\(.usage.five_hour.used_percentage|floor)%"
@@ -1652,13 +1677,6 @@ cmd_bar() {
         # it, and the reader supplies "now" for free.
         + ( if .usage == null then
               [ "usage: not reporting — run: ccwatch install-statusline | color=gray size=11" ]
-            elif (.usage.disagree // null) != null then
-              # Same rule as the table. The count and the range are the useful
-              # facts here: they say it is a disagreement rather than a gap.
-              [ "usage: \(.usage.disagree.count) sessions disagree "
-                + "(\(.usage.disagree.lo|floor)%–\(.usage.disagree.hi|floor)%) — not shown"
-                + " | color=orange size=11",
-                "Same account on every session? Run ccwatch doctor. | color=gray size=11" ]
             elif (.usage.age // 0) > (.usage.stale_after // 600) then
               [ "usage: last reading is \(dur(.usage.age)) old — not shown | color=orange size=11" ]
             else
@@ -3277,6 +3295,40 @@ peers_graph() { # peers_graph <edges.jsonl> <live.json>
 #
 # Binds to loopback only. This exposes which repositories you are working in
 # and fragments of peer messages; that is not something to serve on 0.0.0.0.
+# serve_stop — reap every serve this machine recorded.
+#
+# ⚠️ By pid from the pidfiles, never by `pkill -f`. The whole reason these
+# accumulate is that the pattern reaper cannot run where the process table is
+# refused, which is exactly where they pile up.
+serve_stop() {
+  local d="$CCWATCH_HOME/serve" f pid port n=0 stale=0
+  if [ ! -d "$d" ]; then
+    say "No serve recorded as running."
+    return 0
+  fi
+  for f in "$d"/*.pid; do
+    [ -f "$f" ] || continue
+    port=$(basename "$f" .pid)
+    pid=$(cat "$f" 2>/dev/null)
+    case "$pid" in ''|*[!0-9]*) rm -f "$f"; stale=$((stale + 1)); continue;; esac
+    # A recorded pid that is gone is a crash, not a server. Said separately,
+    # because "nothing to stop" and "it died without cleaning up" are
+    # different facts.
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$f"; stale=$((stale + 1)); continue
+    fi
+    if kill "$pid" 2>/dev/null; then
+      say "${_c_green}+${_c_reset} stopped serve on $port ${_c_dim}(pid $pid)${_c_reset}"
+      rm -f "$f"; n=$((n + 1))
+    else
+      err "could not stop the serve on $port (pid $pid) — not yours to signal?"
+    fi
+  done
+  [ "$stale" -gt 0 ] && say "${_c_dim}cleared $stale stale record(s) whose process was already gone${_c_reset}"
+  [ "$n" -eq 0 ] && [ "$stale" -eq 0 ] && say "No serve recorded as running."
+  return 0
+}
+
 cmd_serve() {
   local port="${CCWATCH_PORT:-8787}" open=0 readonly=0 allowkill=0
   local idle_grace="${CCWATCH_IDLE_GRACE:-15}" snapshot_timeout="${CCWATCH_SNAPSHOT_TIMEOUT:-90}"
@@ -3287,6 +3339,7 @@ cmd_serve() {
       --open)      open=1; shift;;
       --read-only) readonly=1; shift;;
       --allow-kill) allowkill=1; shift;;
+      --stop)      serve_stop; return $?;;
       *) die "serve: unrecognised argument '$1'" \
              "usage: ccwatch serve [--port N] [--open] [--read-only] [--allow-kill]";;
     esac
@@ -3330,6 +3383,20 @@ cmd_serve() {
     fi
     say "${_c_dim}Use --read-only to disable writes entirely. Ctrl-C to stop.${_c_reset}"
   fi
+  # ⚠️ A pidfile, because the only reaper this had was `pkill -f`, and that
+  # needs a process table the host may refuse: under a sandbox here `pgrep`
+  # answers "Cannot get process list", so every server a suite run starts is
+  # leaked and neither the suite nor I could clear them. 36 were live at once
+  # and a second agent had to be asked to kill them. A recorded pid needs no
+  # enumeration, which is what `serve --stop` uses.
+  #
+  # Written before the child starts and removed by the trap, so a file whose
+  # pid is dead means a crash rather than a running server — `--stop` checks
+  # before believing it.
+  local pidfile="$CCWATCH_HOME/serve/$port.pid"
+  mkdir -p "$CCWATCH_HOME/serve" 2>/dev/null
+  printf '%s\n' "$$" > "$pidfile" 2>/dev/null || true
+
   [ "$open" -eq 1 ] && command -v open >/dev/null 2>&1 && open "http://127.0.0.1:$port" 2>/dev/null
 
   # ⚠️ NOT `local`, and the trap reads it with `${srv_pid:-}`. Both matter, and
@@ -3345,7 +3412,7 @@ cmd_serve() {
   # execution had reached, which makes it read like a different bug each time.
   srv_pid=""
   # shellcheck disable=SC2064
-  trap 'if [ -n "${srv_pid:-}" ]; then kill "${srv_pid}" 2>/dev/null; wait "${srv_pid}" 2>/dev/null; fi' \
+  trap 'if [ -n "${srv_pid:-}" ]; then kill "${srv_pid}" 2>/dev/null; wait "${srv_pid}" 2>/dev/null; fi; rm -f "'"$pidfile"'" 2>/dev/null' \
     EXIT INT TERM
 
   # ⚠️ CCWATCH_WEB is an override, not a fixed path, so `verify-ui` can serve a
@@ -3356,6 +3423,7 @@ cmd_serve() {
   CCWATCH_SELF="$root/bin/ccwatch" CCWATCH_WEB="${CCWATCH_WEB:-$root/web}" CCWATCH_BIND_PORT="$port" \
   CCWATCH_SEND_TOKEN="$send_token" CCWATCH_ALLOW_KILL="$allowkill" \
   CCWATCH_IDLE_GRACE="$idle_grace" CCWATCH_SNAPSHOT_TIMEOUT="$snapshot_timeout" \
+  CCWATCH_TRANSCRIPT_TIMEOUT="${CCWATCH_TRANSCRIPT_TIMEOUT:-30}" \
   CCWATCH_SNAPSHOT_CADENCE="$snapshot_cadence" \
   python3 -c '
 import hashlib, http.server, json, os, socketserver, subprocess, sys, threading, time
@@ -3391,6 +3459,24 @@ STATE = {}
 LOCK = threading.Lock()
 LAST_READ = time.monotonic()
 GRACE = float(os.environ.get("CCWATCH_IDLE_GRACE", "15"))
+# How long a transcript read may take before the panel is told it was given up
+# on. Settable so the suite can force the timeout it needs to assert, and so a
+# genuinely slow host can raise it rather than lose the panel.
+TRANSCRIPT_TIMEOUT = float(os.environ.get("CCWATCH_TRANSCRIPT_TIMEOUT", "30"))
+# WARNING: a forgotten serve exits on its own. Every leak of this process has
+# been somebody forgetting one, or a reaper that could not run: the suite kills
+# by `pkill -f`, which needs a process table a sandbox may refuse, so a run
+# there leaks every server it started. Measured on this machine: 36 of them
+# live at once, and a second agent was asked to clear them.
+#
+# Binding to a port is cheap; a dozen processes each walking a 1.7GB transcript
+# tree is not, and they are all computing the same answer. So a server nobody
+# has read for this long stops being one. 0 disables it.
+#
+# The gate is the SAME LAST_READ the collector uses, so a serve with a browser
+# or a menu bar app attached is never at risk: anything that reads /api/state
+# keeps it alive.
+IDLE_EXIT = float(os.environ.get("CCWATCH_SERVE_IDLE_EXIT", "1800"))
 
 def run(args, timeout):
     try:
@@ -3430,6 +3516,16 @@ def refresh_loop(key, args, timeout, every, transform=None):
         next_due = 0.0
         while True:
             now = time.monotonic()
+            # Checked in the collector loop rather than on a timer of its own,
+            # so it costs no extra thread and cannot fire while a collection
+            # is in flight.
+            if IDLE_EXIT > 0 and now - LAST_READ > IDLE_EXIT:
+                sys.stderr.write(
+                    "ccwatch serve: nothing has read /api/state for %ds; exiting so a "
+                    "forgotten server does not accumulate. Set CCWATCH_SERVE_IDLE_EXIT=0 "
+                    "to disable.\n" % int(IDLE_EXIT))
+                sys.stderr.flush()
+                os._exit(0)
             if now - LAST_READ > GRACE:
                 time.sleep(TICK)
                 continue
@@ -3638,9 +3734,34 @@ class H(http.server.SimpleHTTPRequestHandler):
                 nn = max(1, min(200, int(n)))
             except ValueError:
                 nn = 30
-            out = subprocess.run([SELF, "convo", "-n", str(nn), "--json", sid],
-                                 capture_output=True, text=True, timeout=30,
-                                 env={**os.environ, "NO_COLOR": "1"})
+            # WARNING: the timeout is CAUGHT. It was not, and a real one
+            # escaped do_GET: socketserver printed a full traceback into the
+            # serve log and the panel got a reset connection, so the reader
+            # saw an empty transcript and no reason for it. Reported from a
+            # real terminal at load average 210, where `convo` on a large
+            # transcript took longer than the 30s allowed here.
+            #
+            # /api/state has always wrapped its subprocess and turned a
+            # failure into an {"error": ...} that the page renders. This route
+            # did not, which is the same gap in the same file: a failure
+            # presenting as an absence (constitution IV).
+            #
+            # No apostrophes in this program. It is a single-quoted argument
+            # to python3 -c, and one closes it, giving a bash syntax error
+            # far from the typo. That is three times in this session.
+            try:
+                out = subprocess.run([SELF, "convo", "-n", str(nn), "--json", sid],
+                                     capture_output=True, text=True,
+                                     timeout=TRANSCRIPT_TIMEOUT,
+                                     env={**os.environ, "NO_COLOR": "1"})
+            except subprocess.TimeoutExpired:
+                self.reply_json(504, {"error": "reading the transcript took longer than "
+                                               "%gs and was given up on" % TRANSCRIPT_TIMEOUT})
+                return
+            except Exception as e:
+                self.reply_json(500, {"error": "could not read the transcript: %s"
+                                               % str(e)[:200]})
+                return
             if out.returncode != 0 or not out.stdout.strip():
                 self.reply_json(404, {"error": (out.stderr or "no transcript").strip()[:300]})
                 return
@@ -5053,27 +5174,37 @@ cmd_doctor() {
   esac
 
   say ""
-  # ⚠️ Doctor is where "why is no percentage showing" gets answered, so the
-  # disagreement has to be named HERE with the reporters in it. The header can
-  # only afford a range; this can afford the list, and the list is the thing
-  # that tells you which session to go and look at.
+  # ⚠️ Every reporter, with its figure and its age, because "why does the
+  # percentage jump" is a real question with a non-obvious answer: Claude Code
+  # does not refetch the rate limit on every statusline repaint, so each
+  # session carries its own last-known value and they can be minutes apart.
+  # ccwatch takes the HIGHEST for the current window — within a window usage
+  # only climbs, so the largest reading is the freshest — and this is where you
+  # can see that being done rather than take it on trust.
   local udis
   udis=$(collect_usage)
-  if [ -n "$udis" ] && [ "$udis" != "null" ] \
-     && [ "$(printf '%s' "$udis" | jq -r '(.disagree // null) != null')" = "true" ]; then
-    bad "$(printf '%s' "$udis" | jq -r '"\(.disagree.count) sessions report different usage figures (\(.disagree.lo|floor)%-\(.disagree.hi|floor)%) - the numbers are being withheld"')"
-    printf '      %sat most one of those is true and ccwatch cannot tell which.%s\n' \
-      "$_c_dim" "$_c_reset"
-    printf '      %sare all your sessions signed in to the same account? each reading:%s\n' \
-      "$_c_cyan" "$_c_reset"
-    local uf ufsid ufpct ufage
-    for uf in "$USAGE_DIR"/*.json; do
-      [ -f "$uf" ] || continue
-      ufsid=$(jq -r '.session // "?"' "$uf" 2>/dev/null)
-      ufpct=$(jq -r '(.five_hour.used_percentage // "none") | if type == "number" then (.|floor|tostring) + "%" else . end' "$uf" 2>/dev/null)
-      ufage=$(jq -r --argjson now "$(date '+%s')" '($now - (.at // 0))' "$uf" 2>/dev/null)
-      printf '        %s  5h %-6s %ss ago\n' "$(printf '%.8s' "$ufsid")" "$ufpct" "$ufage"
-    done
+  if [ -n "$udis" ] && [ "$udis" != "null" ] && [ -d "$USAGE_DIR" ]; then
+    local nrep
+    nrep=$(printf '%s' "$udis" | jq -r '.reporters // 0')
+    if [ "${nrep:-0}" -gt 1 ]; then
+      local usedpct
+      usedpct=$(printf '%s' "$udis" | jq -r '(.five_hour.used_percentage // "none") | if type == "number" then (.|floor|tostring) + "%" else . end')
+      ok "$nrep sessions report usage; using the freshest 5h figure ($usedpct)"
+      local uf ufsid ufpct ufage ufres
+      for uf in "$USAGE_DIR"/*.json; do
+        [ -f "$uf" ] || continue
+        ufsid=$(jq -r '.session // "?"' "$uf" 2>/dev/null)
+        ufpct=$(jq -r '(.five_hour.used_percentage // "none") | if type == "number" then (.|floor|tostring) + "%" else . end' "$uf" 2>/dev/null)
+        ufage=$(jq -r --argjson now "$(date '+%s')" '($now - (.at // 0))' "$uf" 2>/dev/null)
+        ufres=$(jq -r '.five_hour.resets_at // "-"' "$uf" 2>/dev/null)
+        printf '        %s  5h %-6s written %ss ago, window resets %s\n' \
+          "$(printf '%.8s' "$ufsid")" "$ufpct" "$ufage" "$ufres"
+      done
+      printf '      %sdifferent figures for the same resets_at are caches of one counter,%s\n' \
+        "$_c_dim" "$_c_reset"
+      printf '      %snot a conflict. A different resets_at is a window that has rolled.%s\n' \
+        "$_c_dim" "$_c_reset"
+    fi
   fi
   if [ -f "$USAGE_FILE" ]; then
     local uage
@@ -5169,6 +5300,7 @@ USAGE
         --title            just the title line, for any other status bar
         --no-actions       status only, for a host with its own menu verbs
   ccwatch serve              table + map in a browser (127.0.0.1 only)
+        --stop             stop every serve this machine recorded, by pid
         --open             open it once it is up
         --port N           default 8787
         --read-only        drop the send endpoint and serve no token
