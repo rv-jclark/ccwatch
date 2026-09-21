@@ -88,7 +88,13 @@ is the same expression the table's `LAST` column uses.
 ./bin/ccwatch doctor            # is ccwatch's own view still trustworthy
 ./bin/ccwatch verify-ui --shots .screens   # render the pages and check them
 CCWATCH_PROFILE=1 ./bin/ccwatch --json >/dev/null   # per-stage timings
+CCWATCH_PLATFORM=windows ./bin/ccwatch doctor   # exercise Windows probe selection from macOS
 ```
+
+`CCWATCH_PLATFORM`, `CCWATCH_PY` and `CCWATCH_BASH` (Windows only) override
+`platform_detect`'s own resolution — the seam the hermetic suite uses to
+assert probe selection for both platforms from either host. See `usage()`
+and the `platform` section of `bin/ccwatch` for what each does.
 
 `verify-ui` boots its own `serve`, drives headless Chrome against a harness
 that iframes the real pages, and asserts on rendered boxes, computed styles and
@@ -234,8 +240,44 @@ produced a specific wrong output that someone believed.
 
 - **bash 3.2**, because that is what macOS ships. No `mapfile`/`readarray`, no
   `declare -A`, no `${var,,}`/`${var^^}`. The suite greps for these.
-- **macOS `stat -f` and `ps -o lstart=`** in their BSD forms. This is a macOS
-  tool; CI runs on macOS only.
+- **macOS and Windows.** `bin/ccwatch` runs on both, under Git-for-Windows /
+  MSYS2-class bash on Windows — not WSL, which cannot see Windows process ids
+  and would cost the corroborating signal behind every verdict. Every
+  host-dependent measurement goes through the `platform` section's probe seam
+  (`platform_detect`, `probe_proc`, `probe_mtimes`, `probe_clock`,
+  `probe_host`): macOS keeps `ps -o lstart=`, `stat -f`, `date -r`, `vm_stat`
+  and `sysctl` in their BSD forms unchanged; Windows uses `ctypes` calls
+  (`OpenProcess`/`GetProcessTimes`/`GetProcessMemoryInfo`) or a
+  `Get-CimInstance Win32_Process` fallback for process facts, GNU `stat` for
+  transcript mtimes, and one PowerShell query for host pressure. Windows has
+  no load average (`load1` is always `null`, not `0`), no `send`/`kill`/
+  `peers` (these need POSIX signals and the per-session Unix socket —
+  refused with the reason, `serve` is read-only), and no separate
+  "compressed" memory figure. The probe seam exists because a sandbox
+  refusing `ps` once produced 18 sessions running, `0 live` on screen, stated
+  with no hedge — a probe that cannot measure now reports `failed` with a
+  reason, never an empty result standing in for zero.
+
+  ⚠️ **The Windows read path does not work yet, and this is measured, not
+  feared.** It has now run once on a real `windows-latest` host: **607
+  passed, 145 failed, 8 skipped**, in 36m31s against macOS's 1m29s. Nearly
+  every failure reads `got ''` — the read path returns no rows at all, so
+  `busy`, `waiting`, `HUNG?` and the repo column all come back empty. The
+  irony is worth keeping: this feature exists so an unmeasurable host cannot
+  read as an empty one, and its first real run reproduces that shape.
+
+  What that run did establish as working: platform detection
+  (`platform: windows (MINGW64_NT-10.0-26100)`), the bash locator
+  (`C:\msys64\usr\bin\bash.exe`), `CCWATCH_FAKE_PS` parity across both
+  platforms, and the guard that no platform tool is called outside the seam.
+  So the break is downstream of detection — `probe_mtimes` or the
+  native/POSIX path translation are the first places to look, since a
+  transcript that is never found drops its whole row.
+
+  `app-win/` has still never been compiled; no host here has the .NET SDK.
+  The `windows-latest` job is deliberately `continue-on-error` until the read
+  path reports a fleet. Treat "runs on both" as a design intention with a
+  known-failing implementation behind it, not a measurement.
 - `python3` is used for the socket client, date parsing and the HTTP server.
   Pass programs with `python3 -c`, never on stdin — a heredoc on stdin collides
   with the payload the program is trying to read, which cost a whole debugging

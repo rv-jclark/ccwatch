@@ -111,8 +111,22 @@ ordered — never in a spatial arrangement, which is expected to be remembered.
 
 - **bash 3.2**, because that is what macOS ships. No `mapfile`/`readarray`, no
   `declare -A`, no `${var,,}`/`${var^^}`. The suite greps for these.
-- **macOS `stat -f` and `ps -o lstart=`** in their BSD forms. This is a macOS
-  tool; CI runs on macOS only.
+- **macOS and Windows.** `bin/ccwatch` supports both, run under
+  Git-for-Windows / MSYS2-class bash on Windows (not WSL, which cannot see
+  Windows process ids). Every host-dependent measurement goes through a
+  named probe behind the `platform` seam: macOS keeps `ps -o lstart=`,
+  `stat -f`, `date -r`, `vm_stat` and `sysctl` in their BSD forms; Windows
+  uses `ctypes` calls to the Win32 process APIs (with a
+  `Get-CimInstance Win32_Process` fallback), GNU `stat`, and PowerShell for
+  host pressure. Windows has no load average (`null`, never `0`), no
+  `send`/`kill`/`peers` (POSIX signals and a per-session Unix socket do not
+  exist there), and no separate "compressed" memory figure — each is stated
+  as unavailable with the reason. The probe layer exists because a sandbox
+  once refused `ps` outright and the tool reported `0 live` on 18 running
+  sessions with no hedge; a probe that cannot measure now reports `failed`
+  with a reason rather than an empty result standing in for zero. CI runs
+  both platforms: `macos-latest` owns lint, `windows-latest` proves the
+  Windows probes are actually exercised.
 - `python3` supplies the socket client, date parsing and the HTTP server.
   Programs are passed with `python3 -c`, never on stdin — a heredoc on stdin
   collides with the payload the program is trying to read.
@@ -185,4 +199,4 @@ endpoint or destructive action must satisfy IX and VIII.
 Amendments are made to `CLAUDE.md` and mirrored here, with the failure that
 motivated the change named in the commit.
 
-**Version**: 1.1.0 | **Ratified**: 2026-09-07 | **Last Amended**: 2026-09-20
+**Version**: 1.1.1 | **Ratified**: 2026-09-07 | **Last Amended**: 2026-09-21

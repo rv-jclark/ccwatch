@@ -1555,9 +1555,20 @@ distinct word, so `ccwatch once | grep HUNG` works, and so does a screen reader.
 ./tests/run.sh          # shellcheck + 188 assertions
 ```
 
-CI runs the same script on macOS, and macOS only: `stat -f` and `ps -o lstart=`
-are used in their BSD forms and bash 3.2 is the floor, so a suite green on
-Linux would not be testing the thing anyone runs.
+CI runs the same script on macOS and on Windows (under the runner's Git Bash,
+not WSL — WSL cannot see Windows process ids, which is the corroborating
+signal behind every verdict). Every host-dependent measurement goes through a
+named probe in the `platform` section: macOS keeps `ps -o lstart=`, `stat -f`,
+`date -r`, `vm_stat` and `sysctl` in their BSD forms unchanged; Windows uses
+`ctypes` (`OpenProcess`/`GetProcessTimes`/`GetProcessMemoryInfo`, with a
+`Get-CimInstance Win32_Process` fallback) for process facts, GNU `stat` for
+transcript mtimes, and PowerShell for host pressure. Windows has no load
+average (`load1` is `null`, never `0`), no `send`/`kill`/`peers` (these need
+POSIX signals and the per-session Unix socket, so `serve` is read-only there),
+and no separate "compressed" memory figure — each is stated as unavailable
+with the reason rather than omitted. Bash 3.2 is still the floor on both
+platforms, because that is what macOS ships and Git-for-Windows bash tracks
+it closely enough to matter.
 
 An assertion that needs something the host cannot provide **skips with the
 reason**, rather than failing. A runner with swap disabled has no swap
@@ -1799,6 +1810,24 @@ implementation broken in the specific way it describes:
 | drop the meter column's reserved width, so a withheld reading narrows it and the title beside it re-wraps | 1 (verify-ui) |
 | keep that reservation at phone width, making the header wider than the window | 1 (verify-ui) |
 | write the narrow-width override as `.gauges` rather than `header .gauges`, so it loses to a later rule | 1 (verify-ui) |
+| turn `_probe_proc_windows`'s "winpid missing → fail" branch into "winpid missing → absent, print `[]`" | 3 |
+| collapse `_probe_proc_bsd_parse`'s `absent`/`ok` branches into a single unconditional `ok` | 1 |
+| drop `probe_mtimes`'s control-query guard, so an unreadable root reports `ok` with an empty listing instead of `failed` | 3 |
+| report `load1: 0` in `_probe_host_windows`'s jq transform instead of `null` | 2 |
+| plant a real `date -r` call outside the platform section (FR-001) | 1 |
+| split a Windows bar-document line on the last `" | "` instead of the first | 1 (app-win, gated — see below) |
+| drop a line carrying an unknown parameter instead of retaining it | 1 (app-win, gated — see below) |
+| remove `WS_EX_NOACTIVATE` from the overlay's extended window style | 1 (app-win, gated — see below) |
+| remove the `%SystemRoot%\System32\bash.exe` exclusion from `BashLocator` | 1 (app-win, gated — see below) |
+
+The four `app-win` rows above were confirmed by tracing the C# against the
+mutation by hand, not by watching `tests/run.sh` turn red: there is no .NET
+SDK on the macOS machine this was authored on, so the assertions that
+exercise them (`tests/run.sh`'s `app-win` section) skip here with the reason
+stated rather than running. They are mechanically re-confirmed the first time
+`./app-win/build.ps1 -SelfTest` runs on Windows — see the `windows-latest` CI
+job (FR-032) — and this row should be updated to drop the "gated" qualifier
+once that has happened at least once.
 
 That last table is not decoration. Two of those mutations are bugs that were
 actually **in** the code and were found this way, and two entries started life

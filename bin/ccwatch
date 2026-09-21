@@ -191,102 +191,175 @@ resolved_self() {
 }
 
 TMP=""
-cleanup() { [ -n "$TMP" ] && rm -rf "$TMP"; }
+cleanup() {
+  [ -n "$TMP" ] && rm -rf "$TMP"
+  [ -n "${_CCWATCH_PROBE_REPORT:-}" ] && rm -f "$_CCWATCH_PROBE_REPORT"
+}
 trap cleanup EXIT
 
-# ============================================================== collection ===
-
-# collect_sessions — the live registry, one JSON object on stdout:
-# {"rows": [...], "parse_failed": N}.
+# ============================================================== platform ====
+#  platform_detect / probe_report / probe_note
+#  probe_proc / probe_mtimes / probe_clock / probe_host
+#  probe_native_path / probe_posix_path
 #
-# Each file is parsed on its own rather than with a single `jq -s`, because a
-# session that is mid-write would otherwise take the whole table down with it.
-# One unreadable file costs one row, and parse_failed records how many so that
-# `ccwatch doctor` can report it instead of quietly showing a short list.
-# The count travels inside the returned object rather than a global, because a
-# global written from inside `$(...)` never survives the subshell back to the
-# caller — see research.md D6 for the entry this fixed.
-collect_sessions() {
-  local f n=0 fast count
-  [ -d "$SESS_DIR" ] || { printf '{"rows":[],"parse_failed":0}'; return 0; }
-  n=$(find "$SESS_DIR" -maxdepth 1 -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
-  [ "${n:-0}" -gt 0 ] || { printf '{"rows":[],"parse_failed":0}'; return 0; }
+# The only section permitted to invoke `ps`, `stat -f`/`stat -c`,
+# `date -r`/`date -d`, `vm_stat`, `sysctl`, PowerShell, `cygpath` or `uname`
+# (FR-001, contracts/probe-layer.md "Where it lives"). Everything else in
+# this script asks a probe, never a program directly — the point of this
+# section is that a caller stops knowing what platform it is on.
 
-  # Fast path: ONE jq over every file at once. Registry files are single-line
-  # JSON, so `fromjson? // empty` per line both parses them and tolerates a
-  # file caught mid-write. This replaced a jq process per file, which cost
-  # ~1.1s of pure fork overhead on 19 sessions — the single largest slice of a
-  # snapshot that needs to complete inside a 2s repaint.
-  fast=$(cat "$SESS_DIR"/*.json 2>/dev/null \
-         | jq -c -R 'fromjson? // empty | select(type == "object")' 2>/dev/null | jq -s '.')
-  count=$(printf '%s' "$fast" | jq 'length' 2>/dev/null) || count=0
+CCWATCH_PLATFORM="${CCWATCH_PLATFORM:-}"
+CCWATCH_UNAME=""
+CCWATCH_PY="${CCWATCH_PY:-}"
+CCWATCH_BASH="${CCWATCH_BASH:-}"
+_ccwatch_platform_detected=0
 
-  if [ "${count:-0}" -eq "$n" ]; then
-    jq -cn --argjson rows "$fast" '{rows: $rows, parse_failed: 0}'
-    return 0
+# platform_detect — sets CCWATCH_PLATFORM/CCWATCH_UNAME/CCWATCH_PY (and
+# CCWATCH_BASH on Windows) once per run. Idempotent: called from the top of
+# the script and safe to call again from anywhere that needs it early.
+#
+# A pre-set CCWATCH_PLATFORM overrides detection outright rather than being
+# re-detected — the seam the hermetic suite uses to assert probe selection
+# for both platforms from either host (FR-029, D2).
+platform_detect() {
+  [ "$_ccwatch_platform_detected" -eq 1 ] && return 0
+  _ccwatch_platform_detected=1
+
+  CCWATCH_UNAME=$(uname -s 2>/dev/null) || CCWATCH_UNAME=""
+
+  if [ -z "$CCWATCH_PLATFORM" ]; then
+    case "$CCWATCH_UNAME" in
+      Darwin) CCWATCH_PLATFORM=macos ;;
+      MINGW*|MSYS*|CYGWIN*) CCWATCH_PLATFORM=windows ;;
+      # unsupported is a first-class value, not an error: every probe below
+      # returns `failed` with the platform named in the reason, and the run
+      # continues rather than guessing at a shape it has never seen (D3).
+      *) CCWATCH_PLATFORM=unsupported ;;
+    esac
   fi
 
-  # Slow path, taken only when the fast one came up short. Parsing each file on
-  # its own is how the count gets accurate — and an accurate count is the
-  # point, because `ccwatch doctor` reports it. Guessing "n - count" would also
-  # be wrong for a pretty-printed file, which the fast path splits across lines
-  # and drops entirely. The loop runs in the function's own shell (no pipeline
-  # stage, no subshell) so the accumulated rows and the failure count both
-  # reach the return value.
-  local -a rows_arr=()
-  local pf=0 line
-  for f in "$SESS_DIR"/*.json; do
-    [ -f "$f" ] || continue
-    line=$(jq -c '. as $o | if ($o|type) == "object" then $o else empty end' "$f" 2>/dev/null)
-    if [ -n "$line" ]; then
-      rows_arr+=("$line")
-    else
-      pf=$((pf + 1))
-    fi
-  done
-  if [ ${#rows_arr[@]} -gt 0 ]; then
-    printf '%s\n' "${rows_arr[@]}" | jq -cs --argjson pf "$pf" '{rows: ., parse_failed: $pf}'
-  else
-    jq -cn --argjson pf "$pf" '{rows: [], parse_failed: $pf}'
-  fi
+  _ccwatch_resolve_py
+  [ "$CCWATCH_PLATFORM" = windows ] && _ccwatch_resolve_bash
+  return 0
 }
 
-# collect_live — {pid, start, cpu} for every registry pid still running.
+# CCWATCH_PY resolution (D4): try python3, then python (accepted only if it
+# actually answers as Python 3 — some hosts still put a Python 2 `python` on
+# PATH), then the Windows launcher's `py -3`. Empty when none answer; nothing
+# here guesses at a fallback.
+_ccwatch_resolve_py() {
+  [ -n "$CCWATCH_PY" ] && return 0
+  if command -v python3 >/dev/null 2>&1; then
+    CCWATCH_PY=python3
+    return 0
+  fi
+  if command -v python >/dev/null 2>&1 \
+     && python -c 'import sys; sys.exit(0 if sys.version_info.major == 3 else 1)' \
+        >/dev/null 2>&1; then
+    CCWATCH_PY=python
+    return 0
+  fi
+  if command -v py >/dev/null 2>&1 && py -3 -c 'import sys' >/dev/null 2>&1; then
+    CCWATCH_PY="py -3"
+    return 0
+  fi
+  CCWATCH_PY=""
+}
+
+# CCWATCH_BASH resolution (D1, D18) — Windows only, so a macOS run never pays
+# for it. Candidate order: a build-time recorded path (none yet — this
+# script has no build step of its own), HKLM\SOFTWARE\GitForWindows's
+# InstallPath, %ProgramFiles%\Git\bin\bash.exe, C:\msys64\usr\bin\bash.exe,
+# then whatever `bash` resolves to on PATH.
 #
-# `kill -0` alone is not enough: PIDs are recycled, and a stale registry file
-# whose number now belongs to an unrelated process would show as a live Claude
-# session. So the process's real start time is compared against the session's
-# own `startedAt`. A mismatch means the file outlived its process and the number
-# was reused — that session is gone, whatever the file says.
+# %SystemRoot%\System32\bash.exe (the WSL launcher) is excluded by path
+# outright, and every remaining candidate is verified by actually running
+# it: `uname -s` must answer MINGW*/MSYS*/CYGWIN*, because a `bash` on PATH
+# that silently opens a WSL shell instead would run every probe against the
+# wrong kernel with no error to show for it.
+_ccwatch_resolve_bash() {
+  [ -n "$CCWATCH_BASH" ] && return 0
+  local candidates c reg_path on_path
+  candidates=""
+
+  reg_path=$(reg query 'HKLM\SOFTWARE\GitForWindows' -v InstallPath 2>/dev/null \
+    | awk '/InstallPath/{print $NF}')
+  [ -n "$reg_path" ] && candidates="$candidates ${reg_path}\\bin\\bash.exe"
+  candidates="$candidates ${ProgramFiles:-C:\\Program Files}\\Git\\bin\\bash.exe"
+  candidates="$candidates C:\\msys64\\usr\\bin\\bash.exe"
+  on_path=$(command -v bash 2>/dev/null) && candidates="$candidates $on_path"
+
+  for c in $candidates; do
+    case "$c" in *[Ss]ystem32*bash.exe) continue ;; esac
+    command -v "$c" >/dev/null 2>&1 || [ -x "$c" ] || continue
+    case "$("$c" -c 'uname -s' 2>/dev/null)" in
+      MINGW*|MSYS*|CYGWIN*) CCWATCH_BASH="$c"; return 0 ;;
+    esac
+  done
+  CCWATCH_BASH=""
+}
+
+# probe_note <name> <impl> <outcome> <reason> [detail] — appends one row to
+# the run-scoped report; probe_report prints it back for `doctor` (FR-014).
 #
-# Note the trap for anyone extending this: the registry's `procStart` string is
-# UTC while `ps -o lstart=` prints local time, so comparing those two strings
-# directly marks every session an impostor. Comparing epochs sidesteps it.
+# The file is created lazily with a TEMPLATE, never a bare `mktemp` — bare
+# `mktemp -d` resolved against confstr(_CS_DARWIN_USER_TEMP_DIR) rather than
+# $TMPDIR and was refused outright in a sandbox granting one and not the
+# other, which cost cmd_resume and cmd_peers a silent empty output before
+# their own fix (D8). A global rather than a variable set inside `$(...)`:
+# that assignment never survives the subshell back to the caller.
+_ccwatch_probe_report=""
+probe_note() {
+  local name="$1" impl="$2" outcome="$3" reason="${4:-}" detail="${5:-}"
+  if [ -z "$_ccwatch_probe_report" ]; then
+    _ccwatch_probe_report=$(mktemp "${TMPDIR:-/tmp}/ccwatch-probes.XXXXXX") || return 0
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$impl" "$outcome" "$reason" "$detail" \
+    >>"$_ccwatch_probe_report"
+}
+
+# probe_report — the TSV rows collected this run, one per probe_note call, in
+# call order. Nothing printed if no probe has run yet.
+probe_report() {
+  [ -n "$_ccwatch_probe_report" ] && [ -f "$_ccwatch_probe_report" ] \
+    && cat "$_ccwatch_probe_report"
+  return 0
+}
+
+# probe_proc <comma-separated-pids> — {pid, start, cpu, rss_mb?} per pid,
+# JSON array on stdout, nothing on failure (contracts/probe-layer.md).
 #
-# `cpu` is cumulative CPU seconds, and it is the second independent progress
-# signal. It matters because it is the only one that works for EVERY session:
-# an embedded-SDK session writes no transcript and publishes no status, so
-# without this there would be a whole class of session about which ccwatch could
-# say nothing at all. Between two frames, CPU that moved means the process is
-# doing work; CPU that did not, alongside a transcript that did not grow, is
-# what turns a guess about a hang into two agreeing measurements.
-collect_live() {
-  local pids out sessions="$1"
-  pids=$(printf '%s' "$sessions" | jq -r '[.[].pid // empty] | join(",")')
-  [ -n "$pids" ] || { printf '[]'; return 0; }
-  # ps, plus all the parsing, in ONE process. The first version forked `date -j`
-  # once per pid to convert lstart and `awk` once per pid to convert the CPU
-  # clock — ~1.7s of fork overhead on 19 sessions, inside a loop that is
-  # supposed to repaint every 2s.
-  # ⚠️ Captured and then chosen between, never `... || printf '[]'` welded onto
-  # the end of the pipeline. `set -o pipefail` is on and `ps -p` exits non-zero
-  # whenever none of the pids it was handed still exist — the ordinary state
-  # after a reboot, not an error. python has already printed its `[]` by then,
-  # so the fallback did not replace the answer, it APPENDED to it, and
-  # collect_live returned `[]\n[]`: two JSON values, which `jq --argjson`
-  # refuses outright. Measured here on a real machine.
-  out=$(ps_out "$pids" | python3 -c '
-import calendar, json, sys, time
+# CCWATCH_FAKE_PS is honoured FIRST, on every platform (D10): the fixtures are
+# always BSD `ps` text, so under a fake the BSD parser runs regardless of
+# CCWATCH_PLATFORM, and the control query is skipped outright. That is the only
+# way probe selection is assertable from one host for both platforms — a real
+# Windows probe never runs where there is no Windows to run it on.
+probe_proc() { # probe_proc <comma-separated-pids>
+  local pids="$1" impl
+  case "$CCWATCH_PLATFORM" in
+    macos) impl="ps(BSD)" ;;
+    windows) if [ -n "$CCWATCH_PY" ]; then impl="win32-ctypes"; else impl="powershell-cim"; fi ;;
+    *) probe_note proc none failed "no implementation for this platform (uname: $CCWATCH_UNAME)"
+       return 1 ;;
+  esac
+
+  if [ -n "${CCWATCH_FAKE_PS:-}" ]; then
+    _probe_proc_bsd_parse "$pids" "$impl"
+    return $?
+  fi
+
+  case "$CCWATCH_PLATFORM" in
+    macos) _probe_proc_macos "$pids" "$impl" ;;
+    windows) _probe_proc_windows "$pids" "$impl" ;;
+  esac
+}
+
+# The BSD `ps -o pid=,lstart=,time=,rss=` text parser, shared by the real
+# macOS probe and every fixture (CCWATCH_FAKE_PS), on either platform.
+_probe_proc_bsd_parse() { # _probe_proc_bsd_parse <pids> <impl-label>
+  local pids="$1" impl="$2" out
+  out=$(ps_out "$pids" | $CCWATCH_PY -c '
+import json, sys, time
 
 MONTHS = {m: i + 1 for i, m in enumerate(
     ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"])}
@@ -333,26 +406,477 @@ for line in sys.stdin:
         continue
 print(json.dumps(out))
 ' 2>/dev/null)
-  # ⚠️ An empty answer is only believable if `ps` could run at all. Where it
-  # cannot — denied by a sandbox, or absent — it prints nothing, python
-  # dutifully reports `[]`, every session is filtered out as not-live, and
-  # ccwatch states "No live Claude Code sessions" on a machine running
-  # eighteen of them. That is a failure wearing an absence's clothes, which is
-  # the single worst thing this tool can say, and nothing downstream can tell
-  # the two apart. Measured here: `ps` refused, 18 sessions live, 0 reported.
-  #
-  # So a `[]` is cross-checked against a query that cannot legitimately come
-  # back empty — this process's own pid. Only on that path, so the normal
-  # answer costs nothing.
+  # ⚠️ An empty answer is only believable if `ps` could run at all (or, under
+  # a fixture, if the fixture itself is honoured — the control query is
+  # skipped there because a fake ps proves nothing about the real one).
+  # Measured here: `ps` refused, 18 sessions live, 0 reported.
   if [ "$out" = "[]" ] && [ -z "${CCWATCH_FAKE_PS:-}" ] \
      && [ -z "$(ps -o pid= -p $$ 2>/dev/null)" ]; then
-    out=""
+    probe_note proc "$impl" failed "control query ps -o pid= -p \$\$ returned nothing"
+    return 1
   fi
-  # Nothing printed at all means the collector never spoke — python missing or
-  # refused, or the check above rejecting an unbelievable answer — and that is
-  # a failure require_json names rather than an empty machine. python printing
-  # `[]` with a working `ps` is a different claim, a measured "nothing is
-  # alive", and passes straight through.
+  if [ -z "$out" ]; then
+    probe_note proc "$impl" failed "ps produced no usable output"
+    return 1
+  fi
+  if [ "$out" = "[]" ]; then
+    probe_note proc "$impl" absent "no matching processes"
+  else
+    probe_note proc "$impl" ok
+  fi
+  printf '%s' "$out"
+}
+
+_probe_proc_macos() { _probe_proc_bsd_parse "$1" "$2"; }
+
+# Windows process facts via win32-ctypes (D12): one $CCWATCH_PY -c program
+# using OpenProcess/GetProcessTimes/GetProcessMemoryInfo for the whole pid
+# list at once. ERROR_INVALID_PARAMETER (87) is a measured absence for that
+# pid ("not running"); ERROR_ACCESS_DENIED (5) is a failure to measure for
+# that pid, counted and reasoned rather than folded into "not running" (D12).
+# The control query uses the pid in /proc/self/winpid — never $$, which is an
+# MSYS pid and would fail always (D11).
+_probe_proc_windows() { # _probe_proc_windows <pids> <impl-label>
+  local pids="$1" impl="$2" winpid out denied
+
+  if [ "$impl" = "powershell-cim" ]; then
+    _probe_proc_windows_powershell "$pids"
+    return $?
+  fi
+
+  if [ -r /proc/self/winpid ]; then
+    winpid=$(cat /proc/self/winpid 2>/dev/null)
+  fi
+  if [ -z "$winpid" ] || ! out=$($CCWATCH_PY -c '
+import ctypes, sys
+pid = int(sys.argv[1])
+h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+if not h:
+    sys.exit(1)
+ctypes.windll.kernel32.CloseHandle(h)
+print("ok")
+' "$winpid" 2>/dev/null); then
+    probe_note proc "$impl" failed "refused: could not verify the control pid via /proc/self/winpid"
+    return 1
+  fi
+
+  out=$($CCWATCH_PY -c '
+import ctypes, json, sys
+from ctypes import wintypes
+
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+ERROR_INVALID_PARAMETER = 87
+ERROR_ACCESS_DENIED = 5
+
+class FILETIME(ctypes.Structure):
+    _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
+
+class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+    _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+
+def filetime_to_epoch(ft):
+    val = (ft.dwHighDateTime << 32) | ft.dwLowDateTime
+    return int(val / 10000000 - 11644473600)
+
+def filetime_to_seconds(ft):
+    return ((ft.dwHighDateTime << 32) | ft.dwLowDateTime) / 10000000.0
+
+k32 = ctypes.windll.kernel32
+records, denied = [], 0
+for pid in [int(p) for p in sys.argv[1].split(",") if p]:
+    h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        err = ctypes.get_last_error()
+        if err == ERROR_ACCESS_DENIED:
+            denied += 1
+        # ERROR_INVALID_PARAMETER (not running) and anything else: no record,
+        # no count — a measured absence rather than a failure.
+        continue
+    try:
+        creation, exit_t, kernel, user = FILETIME(), FILETIME(), FILETIME(), FILETIME()
+        if not k32.GetProcessTimes(h, ctypes.byref(creation), ctypes.byref(exit_t),
+                                    ctypes.byref(kernel), ctypes.byref(user)):
+            continue
+        rec = {"pid": pid, "start": filetime_to_epoch(creation),
+               "cpu": round(filetime_to_seconds(kernel) + filetime_to_seconds(user), 2)}
+        counters = PROCESS_MEMORY_COUNTERS()
+        counters.cb = ctypes.sizeof(counters)
+        if ctypes.windll.psapi.GetProcessMemoryInfo(h, ctypes.byref(counters), counters.cb):
+            rec["rss_mb"] = round(counters.WorkingSetSize / 1048576)
+        records.append(rec)
+    finally:
+        k32.CloseHandle(h)
+print(json.dumps({"records": records, "denied": denied}))
+' "$pids" 2>/dev/null)
+
+  if [ -z "$out" ]; then
+    probe_note proc "$impl" failed "win32-ctypes produced no usable output"
+    return 1
+  fi
+  denied=$(printf '%s' "$out" | jq -r '.denied // 0')
+  if [ "${denied:-0}" -gt 0 ]; then
+    probe_note proc "$impl" failed "access denied on $denied of $(printf '%s' "$pids" | tr ',' '\n' | grep -c .) pids"
+  fi
+  printf '%s' "$out" | jq -c '.records'
+  if [ "${denied:-0}" -eq 0 ]; then
+    if [ "$(printf '%s' "$out" | jq '.records | length')" -eq 0 ]; then
+      probe_note proc "$impl" absent "no matching processes"
+    else
+      probe_note proc "$impl" ok
+    fi
+  fi
+}
+
+# powershell-cim fallback, selected only when CCWATCH_PY is empty (D12).
+_probe_proc_windows_powershell() { # _probe_proc_windows_powershell <pids>
+  local pids="$1" out
+  out=$(powershell -NoProfile -Command "
+    \$ids = '$pids'.Split(',') | Where-Object { \$_ } | ForEach-Object { [int]\$_ }
+    Get-CimInstance Win32_Process | Where-Object { \$ids -contains \$_.ProcessId } |
+      ForEach-Object {
+        [pscustomobject]@{
+          pid = \$_.ProcessId
+          start = ([datetime]::Parse(\$_.CreationDate.ToString())).ToUniversalTime()
+          cpu = \$_.KernelModeTime / 10000000.0 + \$_.UserModeTime / 10000000.0
+          rss_mb = [math]::Round(\$_.WorkingSetSize / 1MB)
+        }
+      } | ConvertTo-Json -AsArray
+  " 2>/dev/null | tr -d '\r')
+  if [ -z "$out" ]; then
+    probe_note proc powershell-cim failed "Get-CimInstance Win32_Process produced no usable output"
+    return 1
+  fi
+  probe_note proc powershell-cim ok
+  printf '%s' "$out"
+}
+
+# probe_mtimes <root> [find-args...] — "<epoch> <path>" lines, newest first
+# (contracts/probe-layer.md). The control query is the mtime of <root> itself:
+# an unreadable root is `failed`, not `absent` — otherwise every session's
+# silence measurement becomes "unknown" without saying so.
+probe_mtimes() { # probe_mtimes <root> [find-args...]
+  local root="$1" impl out control
+  shift
+  case "$CCWATCH_PLATFORM" in
+    macos) impl="stat-f(BSD)" ;;
+    windows) impl="stat-c(GNU)" ;;
+    *) probe_note mtimes none failed "no implementation for this platform (uname: $CCWATCH_UNAME)"
+       return 1 ;;
+  esac
+
+  case "$CCWATCH_PLATFORM" in
+    macos) control=$(stat -f '%m' "$root" 2>/dev/null) ;;
+    windows) control=$(stat -c '%Y' "$root" 2>/dev/null) ;;
+  esac
+  if [ -z "$control" ]; then
+    probe_note mtimes "$impl" failed "root is unreadable: $root"
+    return 1
+  fi
+
+  case "$CCWATCH_PLATFORM" in
+    macos)
+      out=$(find "$root" -name '*.jsonl' -type f "$@" -print0 2>/dev/null \
+        | xargs -0 stat -f '%m %N' 2>/dev/null | sort -rn) ;;
+    windows)
+      out=$(find "$root" -name '*.jsonl' -type f "$@" -print0 2>/dev/null \
+        | xargs -0 stat -c '%Y %n' 2>/dev/null | sort -rn | tr -d '\r') ;;
+  esac
+  probe_note mtimes "$impl" ok
+  [ -n "$out" ] && printf '%s\n' "$out"
+  return 0
+}
+
+# probe_clock <epoch-seconds> — one "3:45 PM EDT"-shaped line, empty when
+# withheld. Selected by VALIDATION (D14): each candidate is asked for two
+# fixed instants (one EDT, one EST) once per run, and used only if it answers
+# both correctly. Never jq — see reset_clock's own comment for the measured
+# reason.
+_ccwatch_clock_impl=""
+probe_clock() { # probe_clock <epoch-seconds>
+  case "${1:-}" in
+    ''|null|*[!0-9]*) return 0;;
+  esac
+  [ -n "$_ccwatch_clock_impl" ] || _ccwatch_clock_select
+  case "$_ccwatch_clock_impl" in
+    "date-r(BSD)") TZ=America/New_York date -r "$1" '+%I:%M %p %Z' 2>/dev/null | sed 's/^0//' ;;
+    "date-d(GNU)") TZ=America/New_York date -d "@$1" '+%I:%M %p %Z' 2>/dev/null | sed 's/^0//' | tr -d '\r' ;;
+    powershell-tz) _ccwatch_clock_powershell "$1" ;;
+    *) return 0 ;;
+  esac
+  return 0
+}
+
+# Two fixed instants that straddle a DST boundary, with hard-coded correct
+# answers, so validation never depends on today's date.
+_CCWATCH_CLOCK_EDT_EPOCH=1725209100   # 2024-09-01 16:45:00 UTC -> 12:45 PM EDT
+_CCWATCH_CLOCK_EDT_WANT="12:45 PM EDT"
+_CCWATCH_CLOCK_EST_EPOCH=1704141000   # 2024-01-01 20:30:00 UTC -> 3:30 PM EST
+_CCWATCH_CLOCK_EST_WANT="3:30 PM EST"
+
+_ccwatch_clock_select() {
+  local candidates c a1 a2
+  case "$CCWATCH_PLATFORM" in
+    macos) candidates="date-r(BSD)" ;;
+    windows) candidates="date-d(GNU) powershell-tz" ;;
+    *) candidates="" ;;
+  esac
+  for c in $candidates; do
+    case "$c" in
+      "date-r(BSD)")
+        a1=$(TZ=America/New_York date -r "$_CCWATCH_CLOCK_EDT_EPOCH" '+%I:%M %p %Z' 2>/dev/null | sed 's/^0//')
+        a2=$(TZ=America/New_York date -r "$_CCWATCH_CLOCK_EST_EPOCH" '+%I:%M %p %Z' 2>/dev/null | sed 's/^0//') ;;
+      "date-d(GNU)")
+        a1=$(TZ=America/New_York date -d "@$_CCWATCH_CLOCK_EDT_EPOCH" '+%I:%M %p %Z' 2>/dev/null | sed 's/^0//' | tr -d '\r')
+        a2=$(TZ=America/New_York date -d "@$_CCWATCH_CLOCK_EST_EPOCH" '+%I:%M %p %Z' 2>/dev/null | sed 's/^0//' | tr -d '\r') ;;
+      powershell-tz)
+        a1=$(_ccwatch_clock_powershell "$_CCWATCH_CLOCK_EDT_EPOCH")
+        a2=$(_ccwatch_clock_powershell "$_CCWATCH_CLOCK_EST_EPOCH") ;;
+    esac
+    _ccwatch_clock_candidate_answers="$_ccwatch_clock_candidate_answers$c: '$a1'/'$a2'; "
+    if [ "$a1" = "$_CCWATCH_CLOCK_EDT_WANT" ] && [ "$a2" = "$_CCWATCH_CLOCK_EST_WANT" ]; then
+      _ccwatch_clock_impl="$c"
+      probe_note clock "$c" ok
+      return 0
+    fi
+  done
+  _ccwatch_clock_impl="none"
+  probe_note clock none failed "no candidate validated against the two fixed instants" \
+    "$_ccwatch_clock_candidate_answers"
+}
+_ccwatch_clock_candidate_answers=""
+
+_ccwatch_clock_powershell() { # _ccwatch_clock_powershell <epoch-seconds>
+  powershell -NoProfile -Command "
+    \$dt = [DateTimeOffset]::FromUnixTimeSeconds($1).UtcDateTime
+    \$tz = [TimeZoneInfo]::FindSystemTimeZoneById('Eastern Standard Time')
+    \$local = [TimeZoneInfo]::ConvertTimeFromUtc(\$dt, \$tz)
+    \$abbr = if (\$tz.IsDaylightSavingTime(\$local)) { 'EDT' } else { 'EST' }
+    Write-Output (\$local.ToString('h:mm tt') + ' ' + \$abbr)
+  " 2>/dev/null | tr -d '\r'
+}
+
+# probe_host — one JSON object (ram/swap/load), or `null`, or nothing on
+# failure. A figure the platform cannot supply is `null` with an entry in
+# `unavailable` — never `0`, which would claim a measurement that was never
+# taken (D15).
+probe_host() {
+  case "$CCWATCH_PLATFORM" in
+    macos) _probe_host_macos ;;
+    windows) _probe_host_windows ;;
+    *) probe_note host none failed "no implementation for this platform (uname: $CCWATCH_UNAME)"
+       return 1 ;;
+  esac
+}
+
+_probe_host_macos() {
+  local out
+  out=$($CCWATCH_PY -c '
+import json, re, subprocess
+
+def sh(*args):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return ""
+
+out = {}
+
+vm = sh("vm_stat")
+m = re.search(r"page size of (\d+)", vm)
+page = int(m.group(1)) if m else 4096
+def pages(label):
+    mm = re.search(label + r":\s+(\d+)", vm)
+    return int(mm.group(1)) if mm else 0
+if vm:
+    out["ram_free_mb"] = round(pages("Pages free") * page / 1048576)
+    out["compressed_mb"] = round(pages("Pages occupied by compressor") * page / 1048576)
+
+sw = sh("sysctl", "-n", "vm.swapusage")
+m = re.search(r"total = ([\d.]+)M\s+used = ([\d.]+)M", sw)
+if m:
+    total, used = float(m.group(1)), float(m.group(2))
+    out["swap_total_mb"] = round(total)
+    out["swap_used_mb"] = round(used)
+    out["swap_used_pct"] = round(used / total * 100) if total else None
+
+la = sh("sysctl", "-n", "vm.loadavg")
+m = re.search(r"([\d.]+)", la)
+if m:
+    out["load1"] = float(m.group(1))
+
+print(json.dumps(out) if out else "null")
+' 2>/dev/null)
+  if [ -z "$out" ]; then
+    probe_note host "vm_stat+sysctl" failed "vm_stat/sysctl produced no usable output"
+    return 1
+  fi
+  probe_note host "vm_stat+sysctl" ok
+  printf '%s' "$out"
+}
+
+# Cache for the Windows host probe: withheld (not annotated) past 30s, per
+# D15/principle III. Keyed under CCWATCH_HOME because $TMPDIR is not carried
+# between the tray app and a terminal invocation.
+_probe_host_windows() {
+  local cache="$CCWATCH_HOME/host-probe-cache.json" age now out
+
+  if [ -f "$cache" ]; then
+    now=$(date '+%s')
+    age=$(( now - $(stat -c '%Y' "$cache" 2>/dev/null || printf '0') ))
+    if [ "$age" -le 30 ]; then
+      probe_note host powershell-cim ok "cached ${age}s ago"
+      cat "$cache"
+      return 0
+    fi
+  fi
+
+  out=$(powershell -NoProfile -Command "
+    \$os = Get-CimInstance Win32_OperatingSystem
+    \$pf = Get-CimInstance Win32_PageFileUsage
+    \$result = [ordered]@{ ram_free_mb = [math]::Round(\$os.FreePhysicalMemory / 1KB) }
+    if (\$pf) {
+      \$total = (\$pf | Measure-Object -Property AllocatedBaseSize -Sum).Sum
+      \$used = (\$pf | Measure-Object -Property CurrentUsage -Sum).Sum
+      \$result.swap_total_mb = \$total
+      \$result.swap_used_mb = \$used
+      \$result.swap_used_pct = if (\$total) { [math]::Round(\$used / \$total * 100) } else { \$null }
+    } else {
+      \$result.swap_total_mb = \$null
+      \$result.swap_used_mb = \$null
+      \$result.swap_used_pct = \$null
+    }
+    \$result.load1 = \$null
+    \$result | ConvertTo-Json
+  " 2>/dev/null | tr -d '\r')
+
+  if [ -z "$out" ]; then
+    probe_note host powershell-cim failed "powershell produced no usable output"
+    return 1
+  fi
+
+  out=$(printf '%s' "$out" | jq -c '
+    { ram_free_mb, swap_total_mb, swap_used_mb, swap_used_pct, load1: null,
+      unavailable: (
+        (if .swap_total_mb == null then [{field: "swap_used_pct", reason: "this host has no pagefile"}] else [] end)
+        + [{field: "load1", reason: "Windows has no load average"}]
+      ) }')
+
+  mkdir -p "$CCWATCH_HOME" 2>/dev/null
+  printf '%s' "$out" >"$cache" 2>/dev/null
+
+  probe_note host powershell-cim ok
+  printf '%s' "$out"
+}
+
+# probe_native_path / probe_posix_path — identity on macOS, cygpath on
+# Windows (D5). Applied at bash<->native boundaries only.
+probe_native_path() { # probe_native_path <path>
+  case "$CCWATCH_PLATFORM" in
+    windows) cygpath -w "$1" 2>/dev/null || printf '%s' "$1" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+probe_posix_path() { # probe_posix_path <path>
+  case "$CCWATCH_PLATFORM" in
+    windows) cygpath -u "$1" 2>/dev/null || printf '%s' "$1" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# ============================================================== collection ===
+
+# collect_sessions — the live registry, one JSON object on stdout:
+# {"rows": [...], "parse_failed": N}.
+#
+# Each file is parsed on its own rather than with a single `jq -s`, because a
+# session that is mid-write would otherwise take the whole table down with it.
+# One unreadable file costs one row, and parse_failed records how many so that
+# `ccwatch doctor` can report it instead of quietly showing a short list.
+# The count travels inside the returned object rather than a global, because a
+# global written from inside `$(...)` never survives the subshell back to the
+# caller — see research.md D6 for the entry this fixed.
+collect_sessions() {
+  local f n=0 fast count
+  [ -d "$SESS_DIR" ] || { printf '{"rows":[],"parse_failed":0}'; return 0; }
+  n=$(find "$SESS_DIR" -maxdepth 1 -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "${n:-0}" -gt 0 ] || { printf '{"rows":[],"parse_failed":0}'; return 0; }
+
+  # Fast path: ONE jq over every file at once. Registry files are single-line
+  # JSON, so `fromjson? // empty` per line both parses them and tolerates a
+  # file caught mid-write. This replaced a jq process per file, which cost
+  # ~1.1s of pure fork overhead on 19 sessions — the single largest slice of a
+  # snapshot that needs to complete inside a 2s repaint.
+  fast=$(cat "$SESS_DIR"/*.json 2>/dev/null \
+         | jq -c -R 'fromjson? // empty | select(type == "object")' 2>/dev/null | jq -s '.')
+  count=$(printf '%s' "$fast" | jq 'length' 2>/dev/null) || count=0
+
+  if [ "${count:-0}" -eq "$n" ]; then
+    jq -cn --argjson rows "$fast" --argjson win "$([ "$CCWATCH_PLATFORM" = windows ] && printf true || printf false)" \
+      '{rows: ($rows | map(if $win and (.cwd // null) != null then .cwd |= gsub("\\\\";"/") else . end)), parse_failed: 0}'
+    return 0
+  fi
+
+  # Slow path, taken only when the fast one came up short. Parsing each file on
+  # its own is how the count gets accurate — and an accurate count is the
+  # point, because `ccwatch doctor` reports it. Guessing "n - count" would also
+  # be wrong for a pretty-printed file, which the fast path splits across lines
+  # and drops entirely. The loop runs in the function's own shell (no pipeline
+  # stage, no subshell) so the accumulated rows and the failure count both
+  # reach the return value.
+  local -a rows_arr=()
+  local pf=0 line
+  for f in "$SESS_DIR"/*.json; do
+    [ -f "$f" ] || continue
+    line=$(jq -c '. as $o | if ($o|type) == "object" then $o else empty end' "$f" 2>/dev/null)
+    if [ -n "$line" ]; then
+      rows_arr+=("$line")
+    else
+      pf=$((pf + 1))
+    fi
+  done
+  local win
+  win=$([ "$CCWATCH_PLATFORM" = windows ] && printf true || printf false)
+  if [ ${#rows_arr[@]} -gt 0 ]; then
+    printf '%s\n' "${rows_arr[@]}" | jq -cs --argjson pf "$pf" --argjson win "$win" \
+      '{rows: (map(if $win and (.cwd // null) != null then .cwd |= gsub("\\\\";"/") else . end)), parse_failed: $pf}'
+  else
+    jq -cn --argjson pf "$pf" '{rows: [], parse_failed: $pf}'
+  fi
+}
+
+# collect_live — {pid, start, cpu} for every registry pid still running.
+#
+# `kill -0` alone is not enough: PIDs are recycled, and a stale registry file
+# whose number now belongs to an unrelated process would show as a live Claude
+# session. So the process's real start time is compared against the session's
+# own `startedAt`. A mismatch means the file outlived its process and the number
+# was reused — that session is gone, whatever the file says.
+#
+# Note the trap for anyone extending this: the registry's `procStart` string is
+# UTC while `ps -o lstart=` prints local time, so comparing those two strings
+# directly marks every session an impostor. Comparing epochs sidesteps it.
+#
+# `cpu` is cumulative CPU seconds, and it is the second independent progress
+# signal. It matters because it is the only one that works for EVERY session:
+# an embedded-SDK session writes no transcript and publishes no status, so
+# without this there would be a whole class of session about which ccwatch could
+# say nothing at all. Between two frames, CPU that moved means the process is
+# doing work; CPU that did not, alongside a transcript that did not grow, is
+# what turns a guess about a hang into two agreeing measurements.
+collect_live() {
+  local pids out sessions="$1"
+  pids=$(printf '%s' "$sessions" | jq -r '[.[].pid // empty] | join(",")')
+  [ -n "$pids" ] || { printf '[]'; return 0; }
+  # The process-facts probe (bin/ccwatch's `platform` section) does the
+  # per-platform work; this call site only asks for it. Nothing printed at
+  # all means the probe failed outright, which require_json names as a
+  # failure rather than an empty machine — see probe_proc's own comment for
+  # the measured reason this distinction exists.
+  out=$(probe_proc "$pids")
   [ -n "$out" ] && printf '%s' "$out"
   return 0
 }
@@ -397,7 +921,7 @@ collect_transcripts() { # collect_transcripts <sid>...
   #
   # Session transcripts sit at depth 2. Subagent sidechains live deeper and are
   # deliberately out of scope: they are not sessions and have no registry entry.
-  out=$(printf '%s\n' "$@" | python3 -c '
+  out=$(printf '%s\n' "$@" | $CCWATCH_PY -c '
 import json, os, sys
 
 proj = sys.argv[1]
@@ -425,7 +949,7 @@ try:
 except OSError:
     pass
 print(json.dumps(out))
-' "$PROJ_DIR" 2>/dev/null)
+' "$(probe_native_path "$PROJ_DIR")" 2>/dev/null)
   [ -n "$out" ] && printf '%s' "$out"
   return 0
 }
@@ -1217,12 +1741,14 @@ snapshot() {
 # sides of a daylight-saving boundary, because two formatters of one instant
 # will otherwise drift apart unseen.
 reset_clock() { # reset_clock <epoch-seconds>
+  # Validity is checked here too, unconditionally, before consulting the
+  # platform section: an empty/null/non-numeric input returns empty without
+  # consulting any implementation, exactly as before this was extracted
+  # (contracts/probe-layer.md).
   case "${1:-}" in
     ''|null|*[!0-9]*) return 0;;
   esac
-  # %I is zero-padded and BSD date has no %-I, so the pad is stripped rather
-  # than relying on a GNU extension this platform does not have.
-  TZ=America/New_York date -r "$1" '+%I:%M %p %Z' 2>/dev/null | sed 's/^0//'
+  probe_clock "$1"
 }
 
 # write_roster — remember what was live. Called from the places that take a
@@ -1870,9 +2396,7 @@ cmd_resume() {
   # `claude --resume agent-a9cec8c7fe67e1238` — a task id, not a session id, so
   # the command could not have worked. 131 of them on this machine, crowding out
   # the real sessions.
-  find "$PROJ_DIR" -maxdepth 2 -name '*.jsonl' -type f "${window[@]}" -print0 2>/dev/null \
-    | xargs -0 stat -f '%m %N' 2>/dev/null \
-    | sort -rn >"$TMP/all.txt"
+  probe_mtimes "$PROJ_DIR" -maxdepth 2 "${window[@]}" >"$TMP/all.txt"
 
   local shown=0 mtime path sid last cwd branch state
   say "${_c_bold}RESUMABLE${_c_reset} ${_c_dim}— not currently running, newest first${_c_reset}"
@@ -1894,6 +2418,7 @@ cmd_resume() {
            | jq -R -c 'fromjson? // empty | select(.cwd != null)' 2>/dev/null | tail -1)
     cwd=$(printf '%s' "$last" | jq -r '.cwd // empty' 2>/dev/null)
     branch=$(printf '%s' "$last" | jq -r '.gitBranch // empty' 2>/dev/null)
+    [ "$CCWATCH_PLATFORM" = windows ] && cwd="${cwd//\\//}"
     [ -n "$cwd" ] || continue
     # A sidechain is a subagent's transcript, not a conversation you can reopen.
     # Checked as well as the depth limit above, because the two failures are
@@ -2202,6 +2727,9 @@ cmd_convo() {
 CCWATCH_KILL_GRACE="${CCWATCH_KILL_GRACE:-8}"
 
 cmd_kill() {
+  platform_detect
+  [ "$CCWATCH_PLATFORM" = windows ] && die "kill: not available on Windows" \
+    "this needs POSIX signals and the per-session Unix socket"
   local force=0 yes=0 target=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -2330,46 +2858,7 @@ CCWATCH_SWAP_WARN="${CCWATCH_SWAP_WARN:-80}"
 
 collect_host() {
   local out
-  out=$(python3 -c '
-import json, re, subprocess
-
-def sh(*args):
-    try:
-        return subprocess.run(args, capture_output=True, text=True, timeout=5).stdout
-    except Exception:
-        return ""
-
-out = {}
-
-# Free RAM, from vm_stat. "Free" alone is misleading on macOS — the compressor
-# is holding real pages that the system has already had to squeeze — so both
-# are reported.
-vm = sh("vm_stat")
-m = re.search(r"page size of (\d+)", vm)
-page = int(m.group(1)) if m else 4096
-def pages(label):
-    mm = re.search(label + r":\s+(\d+)", vm)
-    return int(mm.group(1)) if mm else 0
-if vm:
-    out["ram_free_mb"] = round(pages("Pages free") * page / 1048576)
-    out["compressed_mb"] = round(pages("Pages occupied by compressor") * page / 1048576)
-
-# Swap. This is the number that actually predicts a kill.
-sw = sh("sysctl", "-n", "vm.swapusage")
-m = re.search(r"total = ([\d.]+)M\s+used = ([\d.]+)M", sw)
-if m:
-    total, used = float(m.group(1)), float(m.group(2))
-    out["swap_total_mb"] = round(total)
-    out["swap_used_mb"] = round(used)
-    out["swap_used_pct"] = round(used / total * 100) if total else None
-
-la = sh("sysctl", "-n", "vm.loadavg")
-m = re.search(r"([\d.]+)", la)
-if m:
-    out["load1"] = float(m.group(1))
-
-print(json.dumps(out) if out else "null")
-' 2>/dev/null)
+  out=$(probe_host)
   if [ -n "$out" ]; then printf '%s' "$out"; else printf 'null'; fi
 }
 
@@ -2410,7 +2899,7 @@ collect_asks() { # collect_asks <sid>...
       #
       # A result always appears after its call, so reading from the last call
       # to EOF is both sufficient and bounded, whatever the file size.
-      python3 -c '
+      $CCWATCH_PY -c '
 import json, sys
 
 path, sid = sys.argv[1], sys.argv[2]
@@ -2464,7 +2953,7 @@ for q in (asked_input.get("questions") or []):
     })
 if qs:
     print(json.dumps({"key": sid, "value": qs}))
-' "$file" "$sid" 2>/dev/null
+' "$(probe_native_path "$file")" "$sid" 2>/dev/null
     done
   } | jq -s 'from_entries'
 }
@@ -2645,7 +3134,7 @@ uds_send() { # uds_send <socket>, frames on stdin
   # python3 rather than nc because the exchange needs a half-close (to tell the
   # peer the frames are complete) and a timeout (so an unresponsive session
   # cannot hang the monitor), and nc does neither portably.
-  python3 -c '
+  $CCWATCH_PY -c '
 import socket, sys
 sock = sys.argv[1]
 data = sys.stdin.buffer.read()
@@ -2673,6 +3162,9 @@ finally:
 }
 
 cmd_send() {
+  platform_detect
+  [ "$CCWATCH_PLATFORM" = windows ] && die "send: not available on Windows" \
+    "this needs POSIX signals and the per-session Unix socket"
   local dry=0 target="" msg=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -3178,6 +3670,9 @@ daemon_tick() {
 # works retrospectively, and it survives a reboot.
 
 cmd_peers() {
+  platform_detect
+  [ "$CCWATCH_PLATFORM" = windows ] && die "peers: not available on Windows" \
+    "this needs POSIX signals and the per-session Unix socket"
   local days="$CCWATCH_RESUME_DAYS" only="" as_json=0
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -3345,6 +3840,16 @@ cmd_serve() {
     esac
   done
 
+  # Write endpoints (send/kill) need the same POSIX signals and per-session
+  # Unix socket that `ccwatch send`/`kill` refuse without on Windows (D23), so
+  # serve is read-only there whatever --read-only says — never silently, the
+  # reason travels in the startup banner and in `doctor`.
+  local readonly_reason=""
+  if [ "$CCWATCH_PLATFORM" = windows ] && [ "$readonly" -eq 0 ]; then
+    readonly=1
+    readonly_reason="Windows has no POSIX signals or per-session Unix socket"
+  fi
+
   # ⚠️ Sending from the browser is a real capability, so it is gated.
   #
   # Binding to loopback is NOT sufficient on its own: any page open in your
@@ -3370,10 +3875,15 @@ cmd_serve() {
   [ -f "$root/web/index.html" ] || die "cannot find web/index.html under $root" \
     "the web assets ship alongside bin/ — has the checkout been split up?"
 
-  need python3
+  [ -n "$CCWATCH_PY" ] || die "ccwatch needs a python3 interpreter on PATH" \
+    "none of python3, python, py -3 answered"
   say "${_c_bold}ccwatch serve${_c_reset} ${_c_dim}on${_c_reset} http://127.0.0.1:$port"
   if [ "$readonly" -eq 1 ]; then
-    say "${_c_dim}loopback only, read-only. Ctrl-C to stop.${_c_reset}"
+    if [ -n "$readonly_reason" ]; then
+      say "${_c_dim}loopback only, read-only: $readonly_reason. Ctrl-C to stop.${_c_reset}"
+    else
+      say "${_c_dim}loopback only, read-only. Ctrl-C to stop.${_c_reset}"
+    fi
   else
     say "${_c_dim}loopback only. Replies from the page are enabled (token-gated).${_c_reset}"
     if [ "$allowkill" -eq 1 ]; then
@@ -3420,16 +3930,20 @@ cmd_serve() {
   # be same-origin with /map to reach into an iframe of it, and copying the
   # pages somewhere writable is the only way to get that without putting test
   # scaffolding in web/.
-  CCWATCH_SELF="$root/bin/ccwatch" CCWATCH_WEB="${CCWATCH_WEB:-$root/web}" CCWATCH_BIND_PORT="$port" \
+  CCWATCH_SELF="$root/bin/ccwatch" CCWATCH_WEB="$(probe_native_path "${CCWATCH_WEB:-$root/web}")" CCWATCH_BIND_PORT="$port" \
   CCWATCH_SEND_TOKEN="$send_token" CCWATCH_ALLOW_KILL="$allowkill" \
   CCWATCH_IDLE_GRACE="$idle_grace" CCWATCH_SNAPSHOT_TIMEOUT="$snapshot_timeout" \
   CCWATCH_TRANSCRIPT_TIMEOUT="${CCWATCH_TRANSCRIPT_TIMEOUT:-30}" \
   CCWATCH_SNAPSHOT_CADENCE="$snapshot_cadence" \
-  python3 -c '
+  CCWATCH_PLATFORM="$CCWATCH_PLATFORM" CCWATCH_BASH="$CCWATCH_BASH" \
+  $CCWATCH_PY -c '
 import hashlib, http.server, json, os, socketserver, subprocess, sys, threading, time
 from urllib.parse import urlsplit
 
 SELF = os.environ["CCWATCH_SELF"]
+# CPython on Windows cannot execute the shebang line directly (D6): every
+# call site below runs SELF through bash explicitly on that platform.
+SELF_ARGV = [os.environ["CCWATCH_BASH"], SELF] if os.environ.get("CCWATCH_PLATFORM") == "windows" else [SELF]
 WEB  = os.environ["CCWATCH_WEB"]
 PORT = int(os.environ["CCWATCH_BIND_PORT"])
 SEND_TOKEN = os.environ.get("CCWATCH_SEND_TOKEN", "")
@@ -3481,7 +3995,7 @@ IDLE_EXIT = float(os.environ.get("CCWATCH_SERVE_IDLE_EXIT", "1800"))
 
 def run(args, timeout):
     try:
-        out = subprocess.run([SELF] + args, capture_output=True, text=True,
+        out = subprocess.run(SELF_ARGV + args, capture_output=True, text=True,
                              timeout=timeout, env={**os.environ, "NO_COLOR": "1"})
         if out.returncode != 0 and not out.stdout.strip():
             return {"error": "%s exited %d: %s" % (" ".join(args), out.returncode,
@@ -3673,7 +4187,7 @@ class H(http.server.SimpleHTTPRequestHandler):
             if not target:
                 self.reply_json(400, {"error": "target is required"})
                 return
-            args = [SELF, "kill", "-y"]
+            args = SELF_ARGV + ["kill", "-y"]
             if req.get("force"):
                 args.append("--force")
             args.append(target)
@@ -3702,7 +4216,7 @@ class H(http.server.SimpleHTTPRequestHandler):
         # page gets the same three honest outcomes the terminal does rather
         # than an optimistic "sent".
         try:
-            out = subprocess.run([SELF, "send", target, message],
+            out = subprocess.run(SELF_ARGV + ["send", target, message],
                                  capture_output=True, text=True, timeout=45,
                                  env={**os.environ, "NO_COLOR": "1"})
             text = (out.stdout + out.stderr).strip()
@@ -3759,7 +4273,10 @@ class H(http.server.SimpleHTTPRequestHandler):
             # to python3 -c, and one closes it, giving a bash syntax error
             # far from the typo. That is three times in this session.
             try:
-                out = subprocess.run([SELF, "convo", "-n", str(nn), "--json", sid],
+                # SELF_ARGV, not [SELF]: on Windows the script is not directly
+                # executable and has to be invoked through the bash the probe
+                # seam located, so the interpreter is part of the argv.
+                out = subprocess.run(SELF_ARGV + ["convo", "-n", str(nn), "--json", sid],
                                      capture_output=True, text=True,
                                      timeout=TRANSCRIPT_TIMEOUT,
                                      env={**os.environ, "NO_COLOR": "1"})
@@ -3897,7 +4414,7 @@ find_chrome() {
 }
 
 free_verify_port() {
-  python3 -c 'import socket
+  $CCWATCH_PY -c 'import socket
 s = socket.socket()
 s.bind(("127.0.0.1", 0))
 print(s.getsockname()[1])
@@ -5020,7 +5537,7 @@ cmd_verify_ui() {
   wait "$chrome_pid" 2>/dev/null || true
 
   local results
-  results=$(python3 -c 'import io, re, sys, html
+  results=$($CCWATCH_PY -c 'import io, re, sys, html
 raw = io.open(sys.argv[1], encoding="utf-8", errors="replace").read()
 m = re.search(r"<pre id=\"verify-out\">(.*?)</pre>", raw, re.S)
 sys.stdout.write(html.unescape(m.group(1)) if m else "")' "$work/dom.html")
@@ -5101,6 +5618,44 @@ cmd_doctor() {
   say "${_c_bold}ccwatch doctor${_c_reset} ${_c_dim}(ccwatch v$CCWATCH_VERSION)${_c_reset}"
   say ""
 
+  # The platform/probe block (FR-014, contracts/probe-layer.md "What doctor
+  # must print"): every probe appears, including the healthy ones, because
+  # the question this answers is "which probes produced this view" and a
+  # report listing only problems cannot answer it.
+  say "platform"
+  platform_detect
+  ok "platform: $CCWATCH_PLATFORM ($CCWATCH_UNAME)"
+  if [ -n "$CCWATCH_PY" ]; then
+    ok "python: $CCWATCH_PY ($($CCWATCH_PY --version 2>&1))"
+  else
+    bad "python: none found (python3, python, or py -3)"
+  fi
+  if [ "$CCWATCH_PLATFORM" = windows ]; then
+    if [ -n "$CCWATCH_BASH" ]; then
+      ok "bash: $CCWATCH_BASH"
+    else
+      bad "bash: no verified MSYS/MINGW/Cygwin bash found"
+    fi
+    meh "send/kill/peers: not available on Windows — this needs POSIX signals and the per-session Unix socket"
+    meh "serve: read-only on Windows for the same reason — write endpoints refuse"
+  fi
+  # Exercise every probe once so the report has one row per probe.
+  probe_proc "" >/dev/null
+  probe_mtimes "$PROJ_DIR" -maxdepth 2 >/dev/null
+  probe_clock "$(date '+%s')" >/dev/null
+  probe_host >/dev/null
+  local pname pimpl poutcome preason pdetail
+  while IFS=$'\t' read -r pname pimpl poutcome preason pdetail; do
+    [ -n "$pname" ] || continue
+    case "$poutcome" in
+      ok)     ok "$(printf '%-9s %-18s ok' "$pname" "$pimpl")${preason:+  $preason}" ;;
+      absent) meh "$(printf '%-9s %-18s absent' "$pname" "$pimpl")${preason:+  $preason}" ;;
+      failed) bad "$(printf '%-9s %-18s failed' "$pname" "$pimpl")${preason:+  $preason}${pdetail:+ ($pdetail)}" ;;
+      *)      bad "$pname: unrecognised probe outcome '$poutcome' — never fell through a default silently" ;;
+    esac
+  done < <(probe_report)
+  say ""
+
   for t in jq awk ps date stat find; do
     command -v "$t" >/dev/null 2>&1 && ok "$t found" || bad "$t is missing — ccwatch cannot run"
   done
@@ -5173,7 +5728,12 @@ cmd_doctor() {
   case "$hp" in
     "?"|"") meh "could not read host memory state";;
     *) local swp="${hp%%|*}" freem="${hp##*|}"
-       if [ "${swp:-0}" -ge "$CCWATCH_SWAP_WARN" ]; then
+       # swp is the literal string "null" on a platform with no pagefile
+       # (D15) — arithmetic on it must never run, or be silently treated as
+       # 0%, which claims a measurement ccwatch never took (FR-012).
+       if [ "$swp" = "null" ]; then
+         meh "swap usage unavailable on this host (${freem}MB RAM free)"
+       elif [ "$swp" -ge "$CCWATCH_SWAP_WARN" ]; then
          bad "host under memory pressure — swap ${swp}% used, ${freem}MB RAM free"
          printf '      %sthe OS kills processes in this state, and a killed session%s\n' "$_c_dim" "$_c_reset"
          printf '      %slooks identical to a clean exit. Check: ccwatch resume%s\n' "$_c_dim" "$_c_reset"
@@ -5388,6 +5948,14 @@ ENVIRONMENT
   CCWATCH_HOME         where the event log lives (default ~/.claude/ccwatch)
   CLAUDE_CONFIG_DIR  which Claude Code config directory to read
   NO_COLOR           set to disable colour
+
+  CCWATCH_PLATFORM   override platform detection (macos/windows/unsupported)
+                     — the seam the test suite uses to exercise both
+                     platforms' probes from either host
+  CCWATCH_PY         override the resolved python interpreter (python3,
+                     python, or "py -3")
+  CCWATCH_BASH       Windows only: override the verified MSYS/Git bash,
+                     passed to `serve`'s subprocess calls
 EOF
 }
 
@@ -5477,6 +6045,25 @@ cmd_setup() {
   # It also matters for `serve`: bin/ccwatch finds web/ relative to its own
   # RESOLVED path, so a copy sitting alone in a bin directory cannot find the
   # pages at all.
+  #
+  # On Windows, `ln -s` can succeed and still not produce a symlink: without
+  # admin rights or Developer Mode, MSYS silently falls back to copying the
+  # target (D24). The result is checked with `-L`, not trusted from the exit
+  # code — and when it is not a real symlink, a two-line shim that `exec`s the
+  # checkout takes its place, so the same "never a copy" property holds by a
+  # different mechanism.
+  _ccwatch_setup_link() { # _ccwatch_setup_link <target> <link> <verb-for-a-fresh-link>
+    local verb="${3:-linked}"
+    rm -f "$2"
+    if ln -s "$1" "$2" 2>/dev/null && [ -L "$2" ]; then
+      say "${_c_green}✓${_c_reset} $verb ${_c_dim}$2 -> $1${_c_reset}"
+      return 0
+    fi
+    rm -f "$2"
+    { printf '#!/bin/sh\n'; printf 'exec "%s" "$@"\n' "$1"; } >"$2" \
+      && chmod +x "$2" || die "could not create $2"
+    say "${_c_green}✓${_c_reset} shimmed ${_c_dim}$2 -> $1${_c_reset} ${_c_dim}(no symlink support here)${_c_reset}"
+  }
   if [ -L "$link" ]; then
     cur=$(readlink "$link")
     if [ "$cur" = "$self" ]; then
@@ -5487,20 +6074,18 @@ cmd_setup() {
       printf 'Repoint it at this checkout? [y/N] '
       read -r reply
       case "$reply" in
-        y|Y|yes|YES)
-          rm -f "$link" && ln -s "$self" "$link" || die "could not replace $link"
-          say "${_c_green}✓${_c_reset} relinked ${_c_dim}$link${_c_reset}";;
+        y|Y|yes|YES) _ccwatch_setup_link "$self" "$link" relinked;;
         *) say "Left alone. ${_c_dim}Nothing else here depends on it.${_c_reset}";;
       esac
     fi
-  elif [ -e "$link" ]; then
+  elif [ -e "$link" ] && ! grep -qF "$self" "$link" 2>/dev/null; then
     # Refused rather than overwritten: this is somebody else's file, possibly
-    # another install of this tool, and clobbering it is not recoverable.
+    # another install of this tool, and clobbering it is not recoverable. The
+    # grep exempts a shim this same command wrote last time.
     die "$link already exists and is not a symlink" \
         "move it aside, or pass --bin-dir DIR to install elsewhere"
   else
-    ln -s "$self" "$link" || die "could not create $link"
-    say "${_c_green}✓${_c_reset} linked ${_c_dim}$link -> $self${_c_reset}"
+    _ccwatch_setup_link "$self" "$link"
   fi
 
   # ⚠️ Delivery is observed, not assumed. A symlink that exists proves nothing:
@@ -5555,6 +6140,7 @@ cmd_setup() {
 
 # ============================================================== dispatch ====
 
+platform_detect
 need jq "install with: brew install jq"
 need awk
 
