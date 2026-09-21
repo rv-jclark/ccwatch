@@ -89,7 +89,10 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # directive and the file stops parsing.)
 # And by `setup`: 24, likewise - it installs into a temp directory, so it needs
 # nothing the host might not have.
-TALLY_FLOOR=454
+# Raised by the platform probe layer (US1): 35, all of which always run - they
+# override CCWATCH_PLATFORM in the environment (D2) or exercise a probe
+# directly, so none of them needs a second machine.
+TALLY_FLOOR=489
 TALLY_FLOOR_NODE=243
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -1082,6 +1085,211 @@ fi
 assert_contains "$_su" "extra/swiftbar/ccwatch.10s.sh" \
   "setup prints the plugin path rather than symlinking into SwiftBar itself"
 assert_contains "$_su" "install-statusline" "and names the optional steps it does not take"
+
+# =============================================================== platform ====
+printf '\nplatform\n'
+
+# CCWATCH_PLATFORM overridden in the environment is the seam this whole section
+# depends on (D2, FR-029): it is the only way to assert Windows probe selection
+# from a macOS runner and vice versa, since the real Windows probes need a real
+# Windows to run against.
+_pdoc_mac=$(CCWATCH_PLATFORM=macos CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$WORK/ccwatch-events" \
+            NO_COLOR=1 "$CCWATCH" doctor 2>&1)
+assert_contains "$_pdoc_mac" "platform: macos" "doctor names the macos platform when overridden"
+assert_contains "$_pdoc_mac" "proc      ps(BSD)" \
+  "and selects the BSD ps implementation for proc on macos"
+assert_contains "$_pdoc_mac" "mtimes    stat-f(BSD)" \
+  "and the BSD stat implementation for mtimes on macos"
+
+_pdoc_win=$(CCWATCH_PLATFORM=windows CCWATCH_PY=python3 CLAUDE_CONFIG_DIR="$FH" \
+            CCWATCH_HOME="$WORK/ccwatch-events" NO_COLOR=1 "$CCWATCH" doctor 2>&1)
+assert_contains "$_pdoc_win" "platform: windows" "and names windows when overridden from a macOS host"
+assert_contains "$_pdoc_win" "proc      win32-ctypes" \
+  "and selects win32-ctypes for proc on windows when CCWATCH_PY answers"
+assert_contains "$_pdoc_win" "mtimes    stat-c(GNU)" \
+  "and the GNU stat implementation for mtimes on windows"
+assert_contains "$_pdoc_win" "host      powershell-cim" \
+  "and powershell-cim for host on windows"
+
+# --- the three outcomes never collapse into two (data-model.md §3) ----------
+# Exercised directly against probe_proc/probe_mtimes rather than through the
+# whole snapshot: the outcome shape is what is under test, not the join.
+eval "$(sed -n '/^ps_out()/,/^}/p;/^probe_note()/,/^}/p;/^probe_report()/,/^}/p;/^probe_proc()/,/^}/p;/^_probe_proc_bsd_parse()/,/^}/p;/^_probe_proc_windows()/,/^}/p;/^_probe_proc_windows_powershell()/,/^}/p;/^probe_mtimes()/,/^}/p' "$CCWATCH")"
+# _probe_proc_macos is a one-line function (calls straight through to the BSD
+# parser), extracted by hand: sed's range address for a one-liner never finds
+# its own closing "}" at column 0 and instead swallows everything up to the
+# NEXT bare "}" — which is _probe_proc_windows's, silently doubling that whole
+# function into the eval. Caught by bash -n failing on a stray "fi".
+_probe_proc_macos() { _probe_proc_bsd_parse "$1" "$2"; }
+CCWATCH_PLATFORM=macos
+CCWATCH_PY=python3
+
+# ⚠️ Every probe_proc call below runs OUTSIDE a $(...) capture, on its own
+# line with output redirected to a file: probe_note's mktemp assignment to
+# _ccwatch_probe_report is exactly the "a global set inside $(...) never
+# survives the subshell back to the caller" case the source comment above
+# probe_note warns about, and wrapping the call itself in $(...) to grab its
+# stdout hits precisely that — probe_report reads back empty every time.
+
+# CCWATCH_PY empty selects the powershell-cim fallback for proc specifically —
+# the one probe with a second implementation to fall back to (D12). Run
+# against the dispatcher directly rather than through a subprocess: doctor
+# re-resolves CCWATCH_PY from PATH when the env var is merely empty (D4), so
+# an empty override cannot be forced past a live python3 through `ccwatch`
+# itself — only the dispatch logic inside probe_proc is under test here.
+_ccwatch_probe_report=""
+CCWATCH_PLATFORM=windows
+CCWATCH_PY=""
+probe_proc "1,2,3" >/dev/null 2>&1
+assert_contains "$(probe_report)" "$(printf 'proc\tpowershell-cim')" \
+  "probe_proc selects the powershell-cim impl for proc when CCWATCH_PY is empty"
+CCWATCH_PY=python3
+CCWATCH_PLATFORM=macos
+_ccwatch_probe_report=""
+
+# forced ok: CCWATCH_FAKE_PS is honoured first on every platform (D10), so the
+# BSD text parser runs and the control query is skipped outright.
+mkps 9101 "0:05.00" > "$WORK/ps-plat-ok"
+CCWATCH_FAKE_PS="$WORK/ps-plat-ok" probe_proc "9101" > "$WORK/pp-ok.out"
+_pp_ok_rc=$?
+_pp_ok=$(cat "$WORK/pp-ok.out")
+assert_eq "$_pp_ok_rc" "0" "a measurement (proc, fake ps, matching pid) exits 0"
+assert_contains "$_pp_ok" '"pid": 9101' "and prints the declared payload"
+assert_contains "$(probe_report)" "$(printf 'proc\tps(BSD)\tok')" \
+  "and the report row says ok"
+
+# forced absent: a fake ps with no rows at all — the empty payload, exit 0,
+# "absent" in the report, never "failed".
+_ccwatch_probe_report=""
+: > "$WORK/ps-plat-empty"
+CCWATCH_FAKE_PS="$WORK/ps-plat-empty" probe_proc "9101" > "$WORK/pp-absent.out"
+_pp_absent_rc=$?
+_pp_absent=$(cat "$WORK/pp-absent.out")
+assert_eq "$_pp_absent_rc" "0" "a measured absence (no rows at all) still exits 0"
+assert_eq "$_pp_absent" "[]" "with the empty payload"
+assert_contains "$(probe_report)" "$(printf 'proc\tps(BSD)\tabsent')" \
+  "and the report says absent, distinct from ok and from failed"
+
+# forced failed: probe_mtimes's control query is the mtime of the root
+# itself, so an unreadable root fails the control query hermetically, with
+# no real `ps` involved at all — the same shape FR-004 requires of every probe.
+_ccwatch_probe_report=""
+probe_mtimes "$WORK/no-such-platform-root-xyz" > "$WORK/pm-failed.out"
+_pm_failed_rc=$?
+assert_eq "$_pm_failed_rc" "1" "an unreadable root fails rather than returning an empty listing"
+assert_eq "$(cat "$WORK/pm-failed.out")" "" "and prints nothing on that failure"
+assert_contains "$(probe_report)" "$(printf 'mtimes\tstat-f(BSD)\tfailed')" \
+  "and the report says failed, not absent, when the control query itself could not run"
+
+# --- the control query, generalised: a failing control query says nothing,
+# never an empty result (FR-004). On a host with no /proc/self/winpid (this
+# macOS runner, standing in for the seam — D11's actual "use $$ instead"
+# defect needs a real Windows, since ctypes.windll fails identically here
+# whatever pid it is handed), the Windows path must refuse rather than
+# reporting the pid list as a measured absence. Mutation-checked: turning the
+# "winpid missing -> fail" branch into "winpid missing -> absent, print []"
+# flips rc from 1 to 0 and the payload from nothing to "[]" — exactly what
+# these three assertions catch.
+_ccwatch_probe_report=""
+CCWATCH_PLATFORM=windows
+probe_proc "1,2,3" > "$WORK/pp-win.out"
+_pp_win_noproc_rc=$?
+assert_eq "$_pp_win_noproc_rc" "1" \
+  "the Windows proc probe refuses when it cannot verify the control pid via /proc/self/winpid"
+assert_eq "$(cat "$WORK/pp-win.out")" "" "and prints nothing rather than an empty machine"
+assert_contains "$(probe_report)" "/proc/self/winpid" \
+  "and says why, rather than reporting the pid list as an empty machine"
+CCWATCH_PLATFORM=macos
+unset -f ps_out probe_note probe_report probe_proc _probe_proc_bsd_parse _probe_proc_macos \
+  _probe_proc_windows _probe_proc_windows_powershell probe_mtimes 2>/dev/null
+_ccwatch_probe_report=""
+
+# --- unavailable, never zero (FR-011, D15) -----------------------------------
+# probe_host itself needs a real Windows (a real powershell) to answer for
+# real, so this runs the ACTUAL jq transform _probe_host_windows applies,
+# lifted out of bin/ccwatch by its own literal syntax, rather than a copy that
+# could drift from it silently.
+_phwfn=$(sed -n '/^_probe_host_windows() {/,/^}/p' "$CCWATCH")
+_phw_jq=$(printf '%s\n' "$_phwfn" | sed -n "/jq -c '/,/^      ) }')\$/p" \
+  | sed "1s/.*jq -c '//; \$s/) }')\$/) }/")
+_ph_nopf=$(printf '{"ram_free_mb":1000,"swap_total_mb":null,"swap_used_mb":null,"swap_used_pct":null}' \
+  | jq -c "$_phw_jq")
+assert_contains "$_ph_nopf" '"load1":null' "load1 is null on a host with no load average, never 0"
+assert_contains "$_ph_nopf" '"swap_used_pct":null' "and a pagefile figure is null when there is no pagefile"
+assert_contains "$_ph_nopf" '"reason":"this host has no pagefile"' \
+  "and the reason names why, rather than a bare null with no explanation"
+assert_not_contains "$_ph_nopf" '"load1":0' "mutation target: load1 must never read 0"
+
+# --- doctor's probe report names every probe, healthy ones included (FR-014) -
+assert_contains "$_pdoc_win" "proc" "doctor's report names proc"
+assert_contains "$_pdoc_win" "mtimes" "and mtimes"
+assert_contains "$_pdoc_win" "clock" "and clock"
+assert_contains "$_pdoc_win" "host" "and host — every probe listed, not only the failing ones"
+# An unrecognised outcome from a probe must be surfaced by name, never fall
+# through a default branch as though it had been understood (principle V).
+# Exercised for real: a fabricated report row with an outcome none of the
+# three probes ever produce, read by doctor's own rendering loop.
+_docfn=$(sed -n '/^cmd_doctor() {/,/^}/p' "$CCWATCH")
+assert_contains "$_docfn" 'unrecognised probe outcome' \
+  "doctor's rendering loop names an outcome it does not recognise rather than falling through a default branch"
+# The loop's own case statement has no catch-all *) that renders as ok/absent/failed —
+# only these three literal outcomes plus the named-mystery arm above.
+assert_contains "$_docfn" 'ok)     ok "$(printf' "and the three literal outcomes are matched by name, not by a default branch"
+
+# --- CCWATCH_FAKE_PS is the single liveness seam on both platforms (D10) ----
+_fps_mac=$(CCWATCH_PLATFORM=macos CCWATCH_FAKE_PS="$WORK/ps-plat-ok" \
+           CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$WORK/ccwatch-events" NO_COLOR=1 \
+           "$CCWATCH" --json 2>/dev/null | jq '.sessions | length')
+_fps_win=$(CCWATCH_PLATFORM=windows CCWATCH_PY=python3 CCWATCH_FAKE_PS="$WORK/ps-plat-ok" \
+           CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$WORK/ccwatch-events" NO_COLOR=1 \
+           "$CCWATCH" --json 2>/dev/null | jq '.sessions | length')
+assert_eq "$_fps_mac" "$_fps_win" \
+  "CCWATCH_FAKE_PS parses with the same BSD text parser and answers identically on both platforms"
+
+# --- the unsupported platform path invents nothing (D3) ---------------------
+_undoc=$(CCWATCH_PLATFORM=unsupported CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$WORK/ccwatch-events" \
+         NO_COLOR=1 "$CCWATCH" doctor 2>&1; echo "rc=$?")
+assert_contains "$_undoc" "no implementation for this platform" \
+  "every probe reports failed with the platform named, rather than guessing at a shape it has never seen"
+assert_not_contains "$_undoc" "rc=0" "and doctor exits non-zero when every probe has failed"
+
+# --- FR-001: the platform section is the ONLY place permitted to invoke ----
+# ps, stat -f/-c, date -r/-d, vm_stat, sysctl, powershell, cygpath or uname -s.
+# Comment lines are excluded from the match — and the guard is written so the
+# comment explaining the guard cannot itself satisfy it (`grep -c 'calc(100vh
+# -'` matching its own explanatory comment is the exact prior mistake this is
+# worded to avoid): the excluded program names below never appear as this
+# assertion's own OWN invocation syntax, only inside a character class.
+#
+# ps_out() is folded into the exempted zone by name (rather than by the
+# banner alone): it is the CCWATCH_FAKE_PS testing seam _probe_proc_bsd_parse
+# depends on, defined a few lines above the platform banner, and predates
+# this feature.
+_fr001_leak=$(awk '
+  /^ps_out\(\) \{/ { inplat = 1 }
+  /^# ==+ *platform ====/ { inplat = 1 }
+  /^# ==+ *collection ===/ { inplat = 0 }
+  !inplat { print }
+' "$CCWATCH" | grep -vE '^[[:space:]]*#' \
+  | grep -E '(^|[^A-Za-z0-9_."-])(ps -o|ps -p|stat -f|stat -c|date -r|date -d|vm_stat|sysctl|powershell |cygpath|uname -s)')
+assert_eq "$_fr001_leak" "" \
+  "no ps/stat -f/stat -c/date -r/date -d/vm_stat/sysctl/powershell/cygpath/uname invocation exists outside the platform section"
+
+# Mutation check, run for real rather than asserted from memory: plant one of
+# the excluded program names as a real inline call outside the section, on a
+# scratch copy, and confirm the guard above goes red against it.
+_fr001_mut="$WORK/ccwatch-fr001-mutant"
+awk '{print} /^pids_alive\(\) \{/ { print "  date -r 0 \x27+%s\x27 >/dev/null # mutation-check plant" }' \
+  "$CCWATCH" > "$_fr001_mut"
+_fr001_mutleak=$(awk '
+  /^ps_out\(\) \{/ { inplat = 1 }
+  /^# ==+ *platform ====/ { inplat = 1 }
+  /^# ==+ *collection ===/ { inplat = 0 }
+  !inplat { print }
+' "$_fr001_mut" | grep -vE '^[[:space:]]*#' \
+  | grep -E '(^|[^A-Za-z0-9_."-])(ps -o|ps -p|stat -f|stat -c|date -r|date -d|vm_stat|sysctl|powershell |cygpath|uname -s)')
+assert_contains "$_fr001_mutleak" "date -r" \
+  "and the guard actually goes red against a real inline call planted outside the seam"
 
 # ============================================================== collectors ===
 printf '\ncollectors\n'

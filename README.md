@@ -1798,6 +1798,11 @@ implementation broken in the specific way it describes:
 | drop the meter column's reserved width, so a withheld reading narrows it and the title beside it re-wraps | 1 (verify-ui) |
 | keep that reservation at phone width, making the header wider than the window | 1 (verify-ui) |
 | write the narrow-width override as `.gauges` rather than `header .gauges`, so it loses to a later rule | 1 (verify-ui) |
+| turn `_probe_proc_windows`'s "winpid missing → fail" branch into "winpid missing → absent, print `[]`" | 3 |
+| collapse `_probe_proc_bsd_parse`'s `absent`/`ok` branches into a single unconditional `ok` | 1 |
+| drop `probe_mtimes`'s control-query guard, so an unreadable root reports `ok` with an empty listing instead of `failed` | 3 |
+| report `load1: 0` in `_probe_host_windows`'s jq transform instead of `null` | 2 |
+| plant a real `date -r` call outside the platform section (FR-001) | 1 |
 
 That last table is not decoration. Two of those mutations are bugs that were
 actually **in** the code and were found this way, and two entries started life
