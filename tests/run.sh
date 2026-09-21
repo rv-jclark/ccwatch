@@ -97,7 +97,9 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # directly, so none of them needs a second machine.
 # 485 = main's 450 after the usage/serve fix lowered the floor by 4, plus those
 # 35. Not 489, which was 454 + 35 and would now over-count by the same 4.
-TALLY_FLOOR=485
+# Raised by 3 source-shape guards on the reaper, whose own recursion crashed
+# the run - they need nothing at all, being greps over this file.
+TALLY_FLOOR=488
 TALLY_FLOOR_NODE=243
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -139,18 +141,16 @@ reap_serve() { # reap_serve <port>
     kill "$pid" 2>/dev/null && found=1
     rm -f "$f" 2>/dev/null
   done
-  # ⚠️ This was `reap_serve "port"` - a recursive call, passing the literal
-  # string "port" rather than "$port", with no base case. A port whose pidfile
-  # had already gone left found=0, so it recursed until bash overflowed its
-  # stack and died of SIGSEGV: exit 139, and NOT ONE LINE of output, so the
-  # suite read as never having run rather than as having failed. It fires
-  # whenever a stale ccwatch-tests.* directory names a port with no pidfile
-  # beside it, which is the state every killed run leaves behind - measured
-  # twice here before the cause was found. The comment above always said pkill
-  # was the fallback; this is that pkill.
-  if [ "$found" -eq 0 ]; then
-    pkill -f "ccwatch serve --port $port" 2>/dev/null || true
-  fi
+  # ⚠️ The fallback is `pkill`, and it must never be this function again. The
+  # rewrite that introduced reap_serve turned every `pkill -f "ccwatch serve
+  # --port $port"` into a call of it, and did the same to this line — dropping
+  # the `$` in the process, so it recursed on the literal string "port", which
+  # matches no pidfile, so `found` stayed 0 forever. Unbounded recursion in
+  # bash is not a hang: the suite died with SIGSEGV, exit 139, having printed
+  # nothing at all on a second run because the stale-directory sweep reaches
+  # this line before the first assertion. A crash with no output reads as a
+  # broken machine rather than as a broken reaper.
+  [ "$found" -eq 1 ] || pkill -f "ccwatch serve --port $port" 2>/dev/null || true
   return 0
 }
 
@@ -283,6 +283,25 @@ _fp=$(sed -n '/free_port() {/,/^  }/p' "$ROOT/tests/run.sh" | grep -c 'SERVE_POR
 # A run stopped with Ctrl-C or SIGTERM must reap too; only EXIT was trapped.
 _tr=$(grep -cE "^trap cleanup_suite .*INT.*TERM" "$ROOT/tests/run.sh" || true)
 assert_eq "$_tr" "1" "the cleanup trap covers interruption, not just a clean exit"
+# ⚠️ And the reaper's own two failure shapes, both of which were live at once:
+# a fallback that called reap_serve instead of `pkill` recursed until bash
+# segfaulted (exit 139, no output), and eleven callers passed the NAME of a
+# port variable rather than its value, so every one of them skipped the pidfile
+# and went to that fallback. Cheap greps, because the cost of the pair was the
+# whole serve section of the suite crashing where it looked like a bad machine.
+# ⚠️ The signature line and every comment go first, and both exclusions were
+# paid for. Stripping only whole comment lines left the function's own
+# `reap_serve() { # reap_serve <port>` header, whose trailing comment names the
+# function — so the guard was red against correct code on its first run, which
+# is the same shape as the `grep -c 'calc(100vh -'` that matched the comment
+# explaining itself. `sed '1d'` drops the header, `s/#.*//` drops the rest, and
+# what is left is body code only: any mention of the name there is a call.
+_rs=$(sed -n '/^reap_serve() {/,/^}/p' "$ROOT/tests/run.sh" | sed '1d;s/#.*//')
+assert_eq "$(printf '%s' "$_rs" | grep -c 'reap_serve' || true)" "0" \
+  "reap_serve's fallback is pkill, not itself — unbounded recursion here crashes the run"
+assert_contains "$_rs" "pkill -f" "and the fallback it does have is the one the comment claims"
+assert_eq "$(grep -c 'reap_serve "[A-Z]' "$ROOT/tests/run.sh" || true)" "0" \
+  "and every caller passes a port, not the name of the variable holding one"
 
 # ================================================================== ccwatch ===
 printf '\nclassification\n'

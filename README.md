@@ -1788,6 +1788,8 @@ implementation broken in the specific way it describes:
 | report the pace from consumption alone, from `>=` instead of `>`, or never | 4 |
 | claim a pace for a window whose elapsed fraction is unknown | 1 |
 | print a reset time for a window whose reset has passed | 1 |
+| return `reap_serve`'s fallback to a call of itself, as the rewrite that introduced it did | 2 |
+| pass `reap_serve` the name of a port variable rather than its value | 1 |
 | produce a gauge for a window carrying no percentage | 1 |
 | drop the relative time, leaving only the wall clock | 1 |
 | order the gauges by the payload instead of the header's own order | 1 |
@@ -1886,6 +1888,16 @@ The last is the case the rule's own wording covers: make a check report the
 failure you are looking for, **or establish that it can**. Two mutations that
 should have broken it did not, and the reason they did not is a fact about the
 platform that the next person to touch this will want.
+
+The reaper guard added a fifth kind, and the cheapest one to fix: a check that
+was **red against correct code**. "`reap_serve`'s fallback is not itself"
+greps the function body with comment lines stripped, and the body's first line
+is `reap_serve() { # reap_serve <port>` — a trailing comment naming the
+function, which whole-line stripping leaves behind. It is the same shape as the
+`grep -c 'calc(100vh -'` that matched the comment explaining why it existed,
+and it is worth stating that this direction of failure is the lucky one: a
+guard that fires on correct code gets fixed within the minute, where a guard
+that cannot fire is counted as coverage for as long as nobody checks.
 
 The third is the one worth generalising. A geometric check is only as good as
 the *regime* it measures in — a width where the thing under test does not
