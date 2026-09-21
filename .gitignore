@@ -17,6 +17,11 @@ specs/*/.pipeline/
 # Built by app/build.sh. A compiler output, not a source.
 app/build/
 
+# Built by app-win/build.ps1. A compiler output, not a source.
+app-win/build/
+app-win/bin/
+app-win/obj/
+
 # `patch` leaves these behind. A stale copy of a page beside the real one is
 # a file somebody will read by mistake.
 *.orig
