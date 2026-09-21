@@ -1431,6 +1431,35 @@ It also reports unreadable registry files, and any status value the classifier
 does not recognise — rather than letting a new one fall through to a default
 branch and be presented as though it had been read.
 
+### A syntax error naming a line that is not wrong
+
+A long-running `ccwatch` — `serve`, `watch`, `daemon` — used to die like this
+when the script was edited while it ran:
+
+```
+ccwatch: line 5582: syntax error near unexpected token `)'
+ccwatch: line 5582: `bscribe)       shift; cmd_subscribe "$@";;'
+```
+
+Nothing is wrong with the file. Bash reads a script incrementally and remembers
+a byte offset into it; when it wants the next command it seeks back to that
+offset and reads the bytes that are there **now**. A `serve` blocks for hours,
+so an edit in between means the read after it lands in rewritten bytes. In the
+case above the offset was 281701 — the start of line 5582 as that process had
+counted the lines — which in the newer file is four characters into the
+`subscribe)` line. Hence a token (`bscribe)`) that exists in no revision, and a
+line number that is correct in both.
+
+The dispatch is now one `{ … }` block ending in `exit`, so bash must parse to
+the end of the file before it runs any command, and never returns to the file
+afterwards. Two notes for anyone who meets this elsewhere:
+
+- It needs an **in-place** rewrite, the same inode. An editor that writes a temp
+  file and renames it leaves the running shell reading the old inode, where this
+  cannot happen — which is why it looks intermittent.
+- `git commit` does not do it, but a session editing the working tree does, and
+  this repository is worked on by several at once.
+
 ## Install, in detail
 
 The two commands are at the top of this file; this is what they do and why.
@@ -1788,6 +1817,7 @@ implementation broken in the specific way it describes:
 | report the pace from consumption alone, from `>=` instead of `>`, or never | 4 |
 | claim a pace for a window whose elapsed fraction is unknown | 1 |
 | print a reset time for a window whose reset has passed | 1 |
+| unwrap the dispatch block, so bash re-reads the script after a long command and parses whatever is at the offset it left | 1 |
 | return `reap_serve`'s fallback to a call of itself, as the rewrite that introduced it did | 2 |
 | pass `reap_serve` the name of a port variable rather than its value | 1 |
 | produce a gauge for a window carrying no percentage | 1 |

@@ -97,9 +97,11 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # directly, so none of them needs a second machine.
 # 485 = main's 450 after the usage/serve fix lowered the floor by 4, plus those
 # 35. Not 489, which was 454 + 35 and would now over-count by the same 4.
-# Raised by 3 source-shape guards on the reaper, whose own recursion crashed
-# the run - they need nothing at all, being greps over this file.
-TALLY_FLOOR=488
+# Raised by 6 source-shape guards that need nothing at all: 3 on the reaper
+# (whose own recursion crashed the run) and 3 on the dispatch block. The
+# behavioural half of the dispatch check is NOT counted - it needs curl and a
+# free port, which is the reason the shape is guarded here as well.
+TALLY_FLOOR=491
 TALLY_FLOOR_NODE=243
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -302,6 +304,22 @@ assert_eq "$(printf '%s' "$_rs" | grep -c 'reap_serve' || true)" "0" \
 assert_contains "$_rs" "pkill -f" "and the fallback it does have is the one the comment claims"
 assert_eq "$(grep -c 'reap_serve "[A-Z]' "$ROOT/tests/run.sh" || true)" "0" \
   "and every caller passes a port, not the name of the variable holding one"
+
+# ⚠️ The dispatch block's SHAPE, asserted here rather than only in the serve
+# section, because the behavioural check down there needs curl and a free port
+# and skips without them — and this invariant is invisible until the day it
+# matters. bash reads a script by remembered byte offset, so a long-running
+# command plus an edit to bin/ccwatch means the next read parses rewritten
+# bytes: `syntax error near unexpected token` on a line that is correct in
+# every revision. One `{ ... }` ending in `exit` is what prevents it, and
+# unwrapping it looks like tidying.
+_disp=$(sed -n '/^# =*  *dispatch  *=*$/,$p' "$ROOT/bin/ccwatch" | grep -vE '^[[:space:]]*(#|$)')
+assert_eq "$(printf '%s\n' "$_disp" | tail -1)" "}" \
+  "the dispatch is one block bash must parse to the end of the file before running"
+assert_eq "$(printf '%s\n' "$_disp" | tail -2 | head -1 | sed 's/^[[:space:]]*//')" 'exit $?' \
+  "and leaves by an exit inside it, so bash never re-reads the script afterwards"
+assert_eq "$(printf '%s\n' "$_disp" | grep -c '^  case ' || true)" "1" \
+  "and the command case sits inside that block rather than beside it"
 
 # ================================================================== ccwatch ===
 printf '\nclassification\n'
@@ -3420,6 +3438,67 @@ EOF
     reap_serve "$SPORT_IE"
   else
     t_skip "a serve nobody reads exits on its own" "no free port"
+  fi
+
+  # ⚠️ A serve outlives its own script being rewritten underneath it.
+  #
+  # Bash reads a script incrementally and remembers a byte offset into the
+  # file; when it wants the next command it seeks back to that offset and reads
+  # whatever is there NOW. `serve` blocks for hours, this repository is worked
+  # on by several sessions at once, and one of them committing over bin/ccwatch
+  # is a normal Tuesday — so the read after cmd_serve returned landed in
+  # rewritten bytes and the server died with
+  #
+  #   ccwatch: line 5582: syntax error near unexpected token `)'
+  #   ccwatch: line 5582: `bscribe)       shift; cmd_subscribe "$@";;'
+  #
+  # measured 2026-09-21 on a serve started from acc27ae after a9159e8 landed:
+  # byte 281701, the start of line 5582 as that process had counted the lines,
+  # is four characters into the `subscribe)` line of the newer file. The named
+  # line is correct in both revisions and the token it quotes exists in
+  # neither, so it reads as a corrupt install of the one tool whose job is to
+  # be believed about whether something is broken.
+  #
+  # Two things in the fixture are load-bearing. It rewrites the copy IN PLACE —
+  # `cat >` on the same path, never a rename — because a rename leaves the
+  # running bash holding the old inode, where the bug cannot happen at all. And
+  # it grows the file by exactly 5 bytes, so the stale offset lands on the last
+  # 5 bytes of the original content: a bare `esac`, which cannot parse. A
+  # different shift can land on a line boundary and parse cleanly, and then the
+  # fixture passes against a broken implementation. Mutation-checked against
+  # the pre-fix dispatch, which fails it with
+  # `line 5591: syntax error near unexpected token 'esac'`.
+  SPORT_OFF=$(free_port) || SPORT_OFF=""
+  if [ -n "$SPORT_OFF" ]; then
+    OFB="$WORK/off-tool"; OFH="$WORK/off-home"; OFC="$WORK/off-cch"
+    mkdir -p "$OFB/bin" "$OFB/web" "$OFH/sessions" "$OFC"
+    cp "$CCWATCH" "$OFB/bin/ccwatch"
+    chmod +x "$OFB/bin/ccwatch"
+    cp "$ROOT/web/"*.html "$ROOT/web/"*.js "$OFB/web/" 2>/dev/null || true
+    printf '' > "$WORK/ps-off"
+    ( CLAUDE_CONFIG_DIR="$OFH" CCWATCH_FAKE_PS="$WORK/ps-off" CCWATCH_HOME="$OFC" \
+      CCWATCH_SERVE_IDLE_EXIT=3 "$OFB/bin/ccwatch" serve --port "$SPORT_OFF" \
+      >"$WORK/off-serve.log" 2>&1 & )
+    if wait_until 25 srv_up "$SPORT_OFF"; then
+      { head -1 "$CCWATCH"; printf '#pad\n'; tail -n +2 "$CCWATCH"; } > "$WORK/off-next"
+      cat "$WORK/off-next" > "$OFB/bin/ccwatch"
+      assert_eq "$(( $(wc -c < "$OFB/bin/ccwatch") - $(wc -c < "$CCWATCH") ))" "5" \
+        "the fixture shifts the offsets by the 5 bytes its landing point depends on"
+      if wait_until 25 srv_dead "$SPORT_OFF"; then
+        assert_contains "$(cat "$WORK/off-serve.log" 2>/dev/null)" "does not accumulate" \
+          "a serve whose script is rewritten underneath it still leaves by its own idle path"
+        assert_eq "$(grep -cE 'syntax error|unexpected token|: line [0-9]+:|command not found' \
+                       "$WORK/off-serve.log" 2>/dev/null | tr -d ' ')" "0" \
+          "and bash never re-reads the rewritten file, so it reports nothing about the script"
+      else
+        t_skip "a serve survives its own script being rewritten" "still listening after 25s"
+      fi
+    else
+      t_skip "a serve survives its own script being rewritten" "server did not come up"
+    fi
+    reap_serve "$SPORT_OFF"
+  else
+    t_skip "a serve survives its own script being rewritten" "no free port"
   fi
 
   # ⚠️ And an explicit reaper that needs no process table, which is the thing

@@ -6144,33 +6144,57 @@ platform_detect
 need jq "install with: brew install jq"
 need awk
 
-case "${1:-}" in
-  ''|watch)        cmd_watch;;
-  once)            render "$(snapshot)";;
-  --json)          snapshot;;
-  resume)          shift; cmd_resume "$@";;
-  hook)            shift; cmd_hook "$@";;
-  log)             shift; cmd_log "${1:-30}";;
-  setup)           shift; cmd_setup "$@";;
-  install-hooks)   cmd_install_hooks;;
-  statusline)      shift; cmd_statusline "$@";;
-  install-statusline) cmd_install_statusline;;
-  bar)             shift; cmd_bar "$@";;
-  send)            shift; cmd_send "$@";;
-  kill)            shift; cmd_kill "$@";;
-  deploys)         shift; cmd_deploys "$@";;
-  subscribe)       shift; cmd_subscribe "$@";;
-  unsubscribe)     shift; cmd_unsubscribe "$@";;
-  subs)            cmd_subs;;
-  peers)           shift; cmd_peers "$@";;
-  convo)           shift; cmd_convo "$@";;
-  ask)             shift; cmd_ask "$@";;
-  serve)           shift; cmd_serve "$@";;
-  daemon)          cmd_daemon;;
-  tick)            daemon_tick;;
-  verify-ui)       shift; cmd_verify_ui "$@";;
-  doctor)          cmd_doctor;;
-  -h|--help|help)  usage;;
-  --version)       say "ccwatch $CCWATCH_VERSION";;
-  *) die "unrecognised command '$1'" "try: ccwatch --help";;
-esac
+# ⚠️ The dispatch is ONE `{ ... }` block that ends in `exit`, and both halves
+# are load-bearing. Bash reads a script incrementally and remembers a byte
+# offset into the file; when it needs the next command it seeks back to that
+# offset and reads the bytes that are there NOW. So a long-running command —
+# `serve`, `watch`, `daemon` — plus an edit to this file while it runs means
+# the read after that command lands at a stale offset in rewritten bytes. A
+# `serve` started from one revision printed this on the way out, after the
+# file had been committed over by another session:
+#
+#   ccwatch: line 5582: syntax error near unexpected token `)'
+#   ccwatch: line 5582: `bscribe)       shift; cmd_subscribe "$@";;'
+#
+# Byte 281701 was the start of line 5582 as that process had counted the lines;
+# in the new file it is four characters into the `subscribe)` line. Nothing was
+# wrong with either revision — the named line is correct in both, and the token
+# it quotes exists in neither — so it reads as a corrupt install of a tool
+# whose whole job is to be believed about whether something is broken.
+#
+# Wrapped, bash must parse to the closing brace (the end of the file) before it
+# runs any of this, and `exit` inside a command already parsed in full means it
+# never reads the file again.
+{
+  case "${1:-}" in
+    ''|watch)        cmd_watch;;
+    once)            render "$(snapshot)";;
+    --json)          snapshot;;
+    resume)          shift; cmd_resume "$@";;
+    hook)            shift; cmd_hook "$@";;
+    log)             shift; cmd_log "${1:-30}";;
+    setup)           shift; cmd_setup "$@";;
+    install-hooks)   cmd_install_hooks;;
+    statusline)      shift; cmd_statusline "$@";;
+    install-statusline) cmd_install_statusline;;
+    bar)             shift; cmd_bar "$@";;
+    send)            shift; cmd_send "$@";;
+    kill)            shift; cmd_kill "$@";;
+    deploys)         shift; cmd_deploys "$@";;
+    subscribe)       shift; cmd_subscribe "$@";;
+    unsubscribe)     shift; cmd_unsubscribe "$@";;
+    subs)            cmd_subs;;
+    peers)           shift; cmd_peers "$@";;
+    convo)           shift; cmd_convo "$@";;
+    ask)             shift; cmd_ask "$@";;
+    serve)           shift; cmd_serve "$@";;
+    daemon)          cmd_daemon;;
+    tick)            daemon_tick;;
+    verify-ui)       shift; cmd_verify_ui "$@";;
+    doctor)          cmd_doctor;;
+    -h|--help|help)  usage;;
+    --version)       say "ccwatch $CCWATCH_VERSION";;
+    *) die "unrecognised command '$1'" "try: ccwatch --help";;
+  esac
+  exit $?
+}
