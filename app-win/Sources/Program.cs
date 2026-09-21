@@ -205,8 +205,12 @@ internal static class BashLocator
         return null;
     }
 
-    /// Excluded by path — the WSL launcher, never a valid candidate.
-    private static bool IsSystem32Bash(string path)
+    /// Excluded by path — the WSL launcher, never a valid candidate. Exposed
+    /// so the selftest can assert this predicate directly against the real
+    /// `%SystemRoot%\System32\bash.exe` path, rather than depending on
+    /// whether WSL happens to be installed on the machine running the check
+    /// (D19's "excluded by path, not merely deprioritised").
+    internal static bool IsSystem32Bash(string path)
     {
         var systemRoot = Environment.GetEnvironmentVariable("SystemRoot") ?? @"C:\Windows";
         var system32Bash = Path.Combine(systemRoot, "System32", "bash.exe");
@@ -221,14 +225,21 @@ internal static class BashLocator
         }
     }
 
+    /// The System32 exclusion applied to a candidate list, extracted so the
+    /// selftest can assert the filtering behaviour `Locate()` relies on
+    /// directly, with a synthetic candidate list — no dependence on whether
+    /// WSL happens to be installed on the machine running the check.
+    internal static IEnumerable<(string path, string how)> ExcludeSystem32(
+        IEnumerable<(string path, string how)> candidates)
+        => candidates.Where(c => !IsSystem32Bash(c.path));
+
     /// Runs each candidate's `uname -s` and accepts only MINGW*/MSYS*/CYGWIN*
     /// (D19) — verification by running it, never by trusting that the file
     /// exists.
     public static LocatedBash? Locate()
     {
-        foreach (var (path, how) in Candidates())
+        foreach (var (path, how) in ExcludeSystem32(Candidates()))
         {
-            if (IsSystem32Bash(path)) continue;
             if (!File.Exists(path)) continue;
             var uname = RunCaptureStdout(path, "-c \"uname -s\"", 5000);
             if (uname == null) continue;
@@ -703,7 +714,7 @@ internal sealed class TrayContext : ApplicationContext
             RebuildMenu();
             return;
         }
-        _overlay ??= new OverlayForm($"http://127.0.0.1:{_port}/map");
+        _overlay ??= new OverlayForm($"http://127.0.0.1:{_port}/map", () => ServeSupervisor.PortIsOpen(_port));
         _overlay.Present();
         RebuildMenu();
     }

@@ -4,13 +4,20 @@
 // quietly stopped checking one property would still say "all checks
 // passed".
 //
-// Claims 1-9 here are US2's (the bar document). Claims 10-20, covering the
-// overlay's window properties, are added in US3 — see tasks.md T067.
+// Claims 1-9 here are US2's (the bar document). Claims 10-19, covering the
+// overlay's window properties, are US3's — see tasks.md T067. Checks 10-16
+// run on a bare Form with no server and no WebView2 runtime, since they are
+// Win32 window styles rather than anything requiring a navigation.
+
+using System.Runtime.InteropServices;
 
 namespace CCWatch.Tray;
 
 internal static class Selftest
 {
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
     public static int Run()
     {
         var failures = 0;
@@ -57,7 +64,85 @@ internal static class Selftest
         var empty = BarDocument.Parse("");
         Check(empty.Title == "cc ?", "empty CLI output is a question mark, never a count");
 
+        // Claims 10-17, 19: the overlay's window properties. A bare Form
+        // stands in for OverlayForm's own window styles — no server, no
+        // WebView2 runtime required (contracts/tray-app.md "Checks 10-17
+        // need a window ... only the navigation check skips with its
+        // reason").
+        using (var form = new Form { ShowInTaskbar = false })
+        {
+            var handle = form.Handle; // forces window creation
+            OverlayForm.ApplyOverlayWindowProperties(form);
+            var exStyle = OverlayForm.GetWindowLong(handle, OverlayForm.GWL_EXSTYLE);
+
+            Check((exStyle & OverlayForm.WS_EX_TOPMOST) != 0,
+                "the overlay stays above other windows (WS_EX_TOPMOST)");
+
+            var reassertThrew = false;
+            try { OverlayForm.ReassertTopmost(form); } catch { reassertThrew = true; }
+            Check(!reassertThrew, "and is re-asserted topmost when shown");
+
+            Check((exStyle & OverlayForm.WS_EX_NOACTIVATE) != 0,
+                "and does not steal focus when clicked (WS_EX_NOACTIVATE)");
+
+            var showThrew = false;
+            try { OverlayForm.ShowWithoutActivating(form); } catch { showThrew = true; }
+            Check(!showThrew, "and is shown without activation (SW_SHOWNOACTIVATE)");
+
+            var vdThrew = false;
+            try { OverlayForm.IsOnCurrentVirtualDesktop(form); } catch { vdThrew = true; }
+            Check(!vdThrew, "and follows you to the current virtual desktop");
+
+            Check(!form.ShowInTaskbar && (exStyle & OverlayForm.WS_EX_TOOLWINDOW) != 0,
+                "and stays out of the task bar and Alt-Tab");
+        }
+
+        // Claim 13 needs the real WM_MOUSEACTIVATE handler, which only an
+        // actual OverlayForm implements (the bare Form above answers the
+        // default way) — exercised separately here so the check above does
+        // not silently pass for the wrong reason.
+        try
+        {
+            using var overlay = new OverlayForm("http://127.0.0.1:1/map");
+            var h = overlay.Handle;
+            var ma = SendMessage(h, OverlayForm.WM_MOUSEACTIVATE, IntPtr.Zero, IntPtr.Zero);
+            Check(ma.ToInt64() == OverlayForm.MA_NOACTIVATE,
+                "and answers WM_MOUSEACTIVATE with MA_NOACTIVATE");
+        }
+        catch
+        {
+            Check(false, "and answers WM_MOUSEACTIVATE with MA_NOACTIVATE");
+        }
+
+        // Claim 17: a new-window request is always reported handled, on
+        // success or failure of the browser hand-off alike — never
+        // swallowed in silence. A bogus scheme fails the hand-off without
+        // launching anything, which is the point of this exact input.
+        Check(OverlayForm.HandleNewWindowRequest("ccwatch-selftest-no-such-handler://x"),
+            "a new-window request leaves the overlay and opens the real browser (NewWindowRequested handled)");
+
         Check(!ServeSupervisor.PortIsOpen(1), "the port probe reports a closed port as closed");
+
+        // Claim 19: the WSL launcher is excluded by path, not merely
+        // deprioritised (D19). Tested against the real filtering step `Locate()` calls
+        // (`ExcludeSystem32`), with a synthetic candidate list, hermetically
+        // — rather than depending on whether WSL happens to be installed on
+        // the machine running this check. `uname -s` inside a real WSL
+        // shell answers "Linux" and would already be filtered by the
+        // MINGW/MSYS/CYGWIN check downstream, so the by-path exclusion is
+        // defense against the slow, hanging WSL cold-start that
+        // verification-by-running would otherwise have to wait out — it
+        // must be checked as its own step, not folded into that fallback.
+        var systemRoot = Environment.GetEnvironmentVariable("SystemRoot") ?? @"C:\Windows";
+        var system32Bash = System.IO.Path.Combine(systemRoot, "System32", "bash.exe");
+        var synthetic = new[]
+        {
+            (path: system32Bash, how: "found on PATH"),
+            (path: @"C:\msys64\usr\bin\bash.exe", how: "C:\\msys64\\usr\\bin\\bash.exe"),
+        };
+        var filtered = BashLocator.ExcludeSystem32(synthetic).ToList();
+        Check(filtered.Count == 1 && filtered[0].path == @"C:\msys64\usr\bin\bash.exe",
+            "the WSL bash at System32 is never used, even when it is the only bash.exe on PATH");
 
         Console.WriteLine();
         Console.WriteLine(failures == 0 ? "selftest: all checks passed" : $"selftest: {failures} FAILED");

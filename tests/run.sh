@@ -1521,6 +1521,17 @@ else
     "and that the app never parses a bash= out of a session row"
   assert_contains "$_winst" "empty CLI output is a question mark, never a count" \
     "and that a failed snapshot renders cc ?, never cc 0"
+  # US3 (overlay) claims — contracts/tray-app.md claim table.
+  assert_contains "$_winst" "the overlay stays above other windows (WS_EX_TOPMOST)" \
+    "and that the overlay carries the topmost extended window style"
+  assert_contains "$_winst" "and does not steal focus when clicked (WS_EX_NOACTIVATE)" \
+    "and that it never steals keyboard focus when clicked"
+  assert_contains "$_winst" "and follows you to the current virtual desktop" \
+    "and that it follows the operator to the current virtual desktop"
+  assert_contains "$_winst" "a new-window request leaves the overlay and opens the real browser" \
+    "and that a target=_blank link is handed to the real browser, never swallowed"
+  assert_contains "$_winst" "the WSL bash at System32 is never used" \
+    "and that the WSL launcher at System32\\\\bash.exe is excluded even when it is the only candidate"
 fi
 
 # ==================================================================== bar ====

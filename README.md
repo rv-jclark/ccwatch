@@ -1805,10 +1805,12 @@ implementation broken in the specific way it describes:
 | plant a real `date -r` call outside the platform section (FR-001) | 1 |
 | split a Windows bar-document line on the last `" | "` instead of the first | 1 (app-win, gated — see below) |
 | drop a line carrying an unknown parameter instead of retaining it | 1 (app-win, gated — see below) |
+| remove `WS_EX_NOACTIVATE` from the overlay's extended window style | 1 (app-win, gated — see below) |
+| remove the `%SystemRoot%\System32\bash.exe` exclusion from `BashLocator` | 1 (app-win, gated — see below) |
 
-The two `app-win` rows above were confirmed by tracing the C# parser against
-the mutation by hand, not by watching `tests/run.sh` turn red: there is no
-.NET SDK on the macOS machine this was authored on, so the assertions that
+The four `app-win` rows above were confirmed by tracing the C# against the
+mutation by hand, not by watching `tests/run.sh` turn red: there is no .NET
+SDK on the macOS machine this was authored on, so the assertions that
 exercise them (`tests/run.sh`'s `app-win` section) skip here with the reason
 stated rather than running. They are mechanically re-confirmed the first time
 `./app-win/build.ps1 -SelfTest` runs on Windows — see the `windows-latest` CI

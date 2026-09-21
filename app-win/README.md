@@ -31,3 +31,20 @@ renders it, and adds only verbs (principle XI in `CLAUDE.md`).
 
 Nothing in `bin/ccwatch` or `web/` depends on this app (FR-028). It is a
 separate build step, same as `app/build.sh` is for macOS.
+
+## The overlay's stated limitation
+
+The overlay stays above other windows via `WS_EX_TOPMOST`, re-asserted with
+`SetWindowPos(HWND_TOPMOST, …)`. That covers a maximised application and a
+borderless-fullscreen one — the case this feature's user story describes —
+but it does **not** reliably cover an **exclusive-fullscreen Direct3D**
+application (most full-screen games): Windows has no public equivalent of
+macOS's `.statusBar` window level, which sits above even that.
+
+Two undocumented alternatives were considered and rejected:
+`SetWindowBand` and the unpublished virtual-desktop pinning interfaces. Both
+are rejected for the same reason — their GUIDs and ordinals change between
+Windows builds and they fail **silently** when they do, which is exactly the
+failure shape `--selftest` exists to catch loudly instead. `WS_EX_TOPMOST` is
+a public, stable API; a window that occasionally loses the exclusive-fullscreen
+case is a known, named limitation, not a surprise on the next Windows update.

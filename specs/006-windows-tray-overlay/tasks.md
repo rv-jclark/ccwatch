@@ -143,7 +143,7 @@ description: "Task list for: Windows support for the taskbar tray and the overla
 ### Tests for User Story 2
 
 - [X] T056 [P] [US2] Add an `app-win` section to `tests/run.sh`: `t_skip` with "app-win not built — run ./app-win/build.ps1" when the binary is absent, `t_skip` with "a Windows binary cannot run on macOS" on Darwin, and on a built Windows binary assert the selftest's summary line, exit code, and claims 6, 7, 9 by their exact substring text (contracts/tray-app.md "What tests/run.sh asserts about this app"); none of these count toward `TALLY_FLOOR`
-- [ ] T057 [US2] Mutation-check the parser assertions (T056) by splitting the bar line on the last ` | ` instead of the first, and by dropping a line carrying an unknown parameter, confirming each break turns the corresponding selftest claim red; add rows to the mutation table in `README.md`
+- [X] T057 [US2] Mutation-check the parser assertions (T056) by splitting the bar line on the last ` | ` instead of the first, and by dropping a line carrying an unknown parameter, confirming each break turns the corresponding selftest claim red; add rows to the mutation table in `README.md`
 
 **Checkpoint**: with a mixture of idle/working/blocked sessions, the tray's title and every menu row are byte-identical to `ccwatch bar --no-actions` at the same moment; a broken snapshot shows `cc ?` with the explanation, never `cc 0`; a session name containing `|` never produces a clickable menu row.
 
@@ -157,21 +157,21 @@ description: "Task list for: Windows support for the taskbar tray and the overla
 
 ### Implementation for User Story 3
 
-- [ ] T058 [US3] Implement the overlay `Form` in `app-win/Sources/Program.cs` hosting `Microsoft.Web.WebView2.WinForms.WebView2` pointed at `http://127.0.0.1:<port>/map` — the same page the browser is served, from the same server (FR-023)
-- [ ] T059 [US3] Implement the z-order property: `TopMost = true` and `WS_EX_TOPMOST`, re-asserted via `SetWindowPos(HWND_TOPMOST, …)` on show and on foreground-change (FR-024, D20)
-- [ ] T060 [US3] Implement the virtual-desktop property: obtain `IVirtualDesktopManager`, check `IsWindowOnCurrentVirtualDesktop`, and hide/re-show the window when it is false so it materialises on the desktop in use (FR-024, D20)
-- [ ] T061 [US3] Implement the no-focus-steal property: `WS_EX_NOACTIVATE`, `WM_MOUSEACTIVATE` answered with `MA_NOACTIVATE`, and shown via `ShowWindow(SW_SHOWNOACTIVATE)` rather than `.Show()` (FR-024, D20)
-- [ ] T062 [US3] Implement the taskbar/Alt-Tab exclusion: `ShowInTaskbar = false` and `WS_EX_TOOLWINDOW` (D20)
-- [ ] T063 [US3] Implement `NewWindowRequested` handling: `Process.Start(UseShellExecute = true)` on the requested URL, then `e.Handled = true`, so a link is never swallowed in silence (FR-025)
-- [ ] T064 [US3] Implement reload-on-show: re-navigate the WebView2 to the `/map` URL each time the overlay is shown rather than leaving it running hidden (contracts/tray-app.md — avoids keeping the collector awake for a hidden view)
-- [ ] T065 [US3] Implement the no-server-answering message: opening the overlay when nothing answers on the dashboard port states that plainly rather than presenting an empty map (FR-023, principle IV)
-- [ ] T066 [US3] Document the stated limitation in `app-win/README.md`: `TopMost` covers maximised and borderless-fullscreen windows but not exclusive-fullscreen Direct3D applications, and name the undocumented alternatives that were rejected and why (D20)
-- [ ] T067 [US3] Extend `--selftest` with claims 10-19 from contracts/tray-app.md (z-order bit, re-assert path, focus bit, `WM_MOUSEACTIVATE` handler, `SW_SHOWNOACTIVATE` show path, virtual-desktop interface + reveal, taskbar/Alt-Tab exclusion, new-window-request handled, closed-port probe, WSL-bash exclusion, verify-by-running-uname) — window-property checks (10-16) run without the WebView2 runtime present; only the navigation check skips with its reason when it is absent (FR-027)
+- [X] T058 [US3] Implement the overlay `Form` in `app-win/Sources/Program.cs` hosting `Microsoft.Web.WebView2.WinForms.WebView2` pointed at `http://127.0.0.1:<port>/map` — the same page the browser is served, from the same server (FR-023)
+- [X] T059 [US3] Implement the z-order property: `TopMost = true` and `WS_EX_TOPMOST`, re-asserted via `SetWindowPos(HWND_TOPMOST, …)` on show and on foreground-change (FR-024, D20)
+- [X] T060 [US3] Implement the virtual-desktop property: obtain `IVirtualDesktopManager`, check `IsWindowOnCurrentVirtualDesktop`, and hide/re-show the window when it is false so it materialises on the desktop in use (FR-024, D20)
+- [X] T061 [US3] Implement the no-focus-steal property: `WS_EX_NOACTIVATE`, `WM_MOUSEACTIVATE` answered with `MA_NOACTIVATE`, and shown via `ShowWindow(SW_SHOWNOACTIVATE)` rather than `.Show()` (FR-024, D20)
+- [X] T062 [US3] Implement the taskbar/Alt-Tab exclusion: `ShowInTaskbar = false` and `WS_EX_TOOLWINDOW` (D20)
+- [X] T063 [US3] Implement `NewWindowRequested` handling: `Process.Start(UseShellExecute = true)` on the requested URL, then `e.Handled = true`, so a link is never swallowed in silence (FR-025)
+- [X] T064 [US3] Implement reload-on-show: re-navigate the WebView2 to the `/map` URL each time the overlay is shown rather than leaving it running hidden (contracts/tray-app.md — avoids keeping the collector awake for a hidden view)
+- [X] T065 [US3] Implement the no-server-answering message: opening the overlay when nothing answers on the dashboard port states that plainly rather than presenting an empty map (FR-023, principle IV)
+- [X] T066 [US3] Document the stated limitation in `app-win/README.md`: `TopMost` covers maximised and borderless-fullscreen windows but not exclusive-fullscreen Direct3D applications, and name the undocumented alternatives that were rejected and why (D20)
+- [X] T067 [US3] Extend `--selftest` with claims 10-19 from contracts/tray-app.md (z-order bit, re-assert path, focus bit, `WM_MOUSEACTIVATE` handler, `SW_SHOWNOACTIVATE` show path, virtual-desktop interface + reveal, taskbar/Alt-Tab exclusion, new-window-request handled, closed-port probe, WSL-bash exclusion, verify-by-running-uname) — window-property checks (10-16) run without the WebView2 runtime present; only the navigation check skips with its reason when it is absent (FR-027)
 
 ### Tests for User Story 3
 
-- [ ] T068 [US3] Extend the `app-win` section of `tests/run.sh` to assert selftest claims 10, 12, 15, 17, 19 by their exact substring text when running on a built Windows binary (contracts/tray-app.md)
-- [ ] T069 [US3] Mutation-check the overlay assertions in T068 by removing `WS_EX_NOACTIVATE` and by removing the `System32\bash.exe` exclusion, confirming each break turns the corresponding claim red; add rows to the mutation table in `README.md`
+- [X] T068 [US3] Extend the `app-win` section of `tests/run.sh` to assert selftest claims 10, 12, 15, 17, 19 by their exact substring text when running on a built Windows binary (contracts/tray-app.md)
+- [X] T069 [US3] Mutation-check the overlay assertions in T068 by removing `WS_EX_NOACTIVATE` and by removing the `System32\bash.exe` exclusion, confirming each break turns the corresponding claim red; add rows to the mutation table in `README.md`
 
 **Checkpoint**: the overlay's window-property selftest passes on a built Windows binary; the four manual checks in quickstart.md §3 (maximised app, virtual-desktop switch, click-while-typing, new-window link) are the only remaining verification and are run once as part of US3's manual pass, not automated.
 
