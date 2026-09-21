@@ -1539,6 +1539,7 @@ All environment variables, all optional.
 | `CCWATCH_PORT` | `8787` | port for `ccwatch serve`, and the one `ccwatch bar` probes to decide whether to link to a dashboard or offer to start one |
 | `CCWATCH_IDLE_GRACE` | `15` | seconds `/api/state` may go unread before `ccwatch serve` stops collecting |
 | `CCWATCH_SNAPSHOT_TIMEOUT` | `90` | seconds the snapshot collector may run before it is reported as a failed collection |
+| `CCWATCH_TRANSCRIPT_TIMEOUT` | `30` | seconds a transcript read may take before the panel is told it was given up on. Raise it on a slow host rather than lose the panel |
 | `CCWATCH_SNAPSHOT_CADENCE` | `2` | seconds between snapshot collections while the feed is being read; settable so an assertion can make the cadence longer than the exchange it measures |
 | `CCWATCH_HOME` | `~/.claude/ccwatch` | where the event log and usage feed live |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | which Claude Code config directory to read |

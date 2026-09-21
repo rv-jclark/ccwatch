@@ -26,3 +26,7 @@ app-win/obj/
 # a file somebody will read by mistake.
 *.orig
 *.rej
+
+# Zero-byte files bash drops in the cwd when it crashes. Eighteen appeared
+# during a night when the host ran out of swap and bash segfaulted repeatedly.
+sh-thd-*

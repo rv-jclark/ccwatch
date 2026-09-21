@@ -80,7 +80,7 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # Raised again by the `collectors` section: 20, all of which always run - they
 # need no port, no server and no optional tool.
 # And by `bar --no-actions`: 7, and the usage-led title and reset clock: 11.
-# And 19 on reporters that disagree about the usage figure - all of which
+# And 15 on reconstructing one counter from every session that samples it -
 # always run: they pose their own readings on disk and need nothing else. The `app` section adds 8 more that are
 # deliberately NOT in the floor: seven need a built app bundle, the eighth needs
 # a linter, and a floor counting them would fail on any machine that has never
@@ -92,7 +92,9 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # Raised by the platform probe layer (US1): 35, all of which always run - they
 # override CCWATCH_PLATFORM in the environment (D2) or exercise a probe
 # directly, so none of them needs a second machine.
-TALLY_FLOOR=489
+# 485 = main's 450 after the usage/serve fix lowered the floor by 4, plus those
+# 35. Not 489, which was 454 + 35 and would now over-count by the same 4.
+TALLY_FLOOR=485
 TALLY_FLOOR_NODE=243
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -115,6 +117,40 @@ wait_until() { # wait_until <seconds> <command...>
 }
 # The conditions the waits above are usually waiting for, named once each so a
 # typo in one is not a wait that silently never succeeds.
+# reap_serve <port> — stop the serve on that port, by recorded pid first.
+#
+# ⚠️ `pkill -f` was the only reaper here, and it needs a process table the host
+# may refuse: under a sandbox `pgrep` answers "Cannot get process list", so
+# every server a run started was leaked. 36 were live at once on this machine
+# and a second agent had to be asked to clear them. `ccwatch serve` now records
+# its pid, and a recorded pid can be signalled with no enumeration at all.
+#
+# pkill is kept as the fallback, for a server started before the pidfile
+# existed or with a home this cannot guess.
+reap_serve() { # reap_serve <port>
+  local port="$1" f pid found=0
+  for f in "$WORK"/*/serve/"$port".pid "$WORK"/*/*/serve/"$port".pid; do
+    [ -f "$f" ] || continue
+    pid=$(cat "$f" 2>/dev/null)
+    case "$pid" in ''|*[!0-9]*) continue;; esac
+    kill "$pid" 2>/dev/null && found=1
+    rm -f "$f" 2>/dev/null
+  done
+  # ⚠️ This was `reap_serve "port"` - a recursive call, passing the literal
+  # string "port" rather than "$port", with no base case. A port whose pidfile
+  # had already gone left found=0, so it recursed until bash overflowed its
+  # stack and died of SIGSEGV: exit 139, and NOT ONE LINE of output, so the
+  # suite read as never having run rather than as having failed. It fires
+  # whenever a stale ccwatch-tests.* directory names a port with no pidfile
+  # beside it, which is the state every killed run leaves behind - measured
+  # twice here before the cause was found. The comment above always said pkill
+  # was the fallback; this is that pkill.
+  if [ "$found" -eq 0 ]; then
+    pkill -f "ccwatch serve --port $port" 2>/dev/null || true
+  fi
+  return 0
+}
+
 srv_up() { curl -s --max-time 2 -o /dev/null "http://127.0.0.1:$1/"; }
 srv_dead() { ! curl -s --max-time 2 -o /dev/null "http://127.0.0.1:$1/"; }
 srv_warm() { # the first snapshot has landed
@@ -155,7 +191,7 @@ printf '%s\n' "$$" > "$SUITE_PID_FILE"
 cleanup_suite() {
   if [ -f "$SERVE_PORTS" ]; then
     while IFS= read -r _p; do
-      [ -n "$_p" ] && pkill -f "ccwatch serve --port $_p" 2>/dev/null
+      [ -n "$_p" ] && reap_serve "$_p"
     done < "$SERVE_PORTS"
   fi
   rm -rf "$WORK"
@@ -181,7 +217,7 @@ for _stale in "${TMPDIR:-/tmp}"/ccwatch-tests.*; do
   if [ -n "$_owner" ] && kill -0 "$_owner" 2>/dev/null; then continue; fi
   if [ -f "$_stale/serve-ports" ]; then
     while IFS= read -r _p; do
-      [ -n "$_p" ] && pkill -f "ccwatch serve --port $_p" 2>/dev/null
+      [ -n "$_p" ] && reap_serve "$_p"
     done < "$_stale/serve-ports"
   fi
   rm -rf "$_stale"
@@ -818,15 +854,26 @@ _nc=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-u" CCWATCH_HOME="$SLH" \
       NO_COLOR=1 "$CCWATCH" --json 2>/dev/null | jq -r '.sessions[0].context')
 assert_eq "$_nc" "null" "a context reading that stopped being refreshed is dropped, not frozen"
 
-# --- reporters that do not agree about the same window ----------------------
-# ⚠️ This whole block exists because of a measured wrong answer, not a
-# hypothetical. `usage.json` is written by whichever statusline repainted last,
-# and the code used to say the figures are account-wide "so any session that
-# reports is as good as any other". On a real machine four sessions wrote 12%,
-# 14%, 15% and `five_hour: null` inside one minute, and the menu bar was
-# reported cycling 101% / 88% / 62% — three figures, at most one true, each
-# shown with no hedge. Picking the newest would not have fixed that; it would
-# have made the wrong number stable.
+# --- one counter, sampled by every session at a different moment -----------
+# ⚠️ What this block is really about, established from twelve captured
+# payloads rather than reasoned about:
+#
+#     session   model               5h%    resets_at
+#     42591a89  claude-fable-5-1     26   1789961400
+#     319aa7d0  claude-opus-5[1m]    32   1789961400
+#     921774f7  claude-opus-5[1m]    42   1789961400
+#
+# Every session reports the SAME resets_at — one window, one account, and the
+# model is irrelevant. Claude Code does not refetch the rate limit on every
+# statusline repaint, so each payload carries that session's last known value,
+# and eight sessions written within two seconds were holding caches minutes
+# apart. Within a window `used_percentage` only climbs, so each reading is a
+# lower bound and the LARGEST is the freshest.
+#
+# The first attempt at this withheld the figure whenever readings differed,
+# which hid a perfectly knowable number and was reported as "8 sessions report
+# different figures — not shown". Constitution III withholds a reading nobody
+# can stand behind; it does not license refusing to work out which is right.
 UAH="$WORK/usage-agree"
 UAC="$WORK/usage-agree-cch"
 mkdir -p "$UAH/sessions" "$UAH/projects/-fake-repo" "$UAC/usage"
@@ -841,97 +888,107 @@ touch -t "$(date -r "$((_uanow - 30))" '+%Y%m%d%H%M.%S')" \
   "$UAH/projects/-fake-repo/dd000001-0000-0000-0000-000000000001.jsonl"
 mkps 9951 "1:00.00" > "$WORK/ps-ua"
 
-# ua_report <sid> <five_hour-pct|none> <seconds-ago>
+# ua_report <sid> <5h-pct|none> <seconds-ago> [resets-in-seconds]
+#
+# ⚠️ `resets_at` is pinned to ONE absolute instant per window offset, computed
+# from $_uanow rather than from each call's own clock. Computing it per call
+# put two readings of the same window a second apart, which is not what a real
+# payload looks like — every session reports the window's exact instant — and
+# it made an assertion that passed in isolation fail in the full suite, where
+# the calls straddled a second boundary. A fixture whose inputs depend on how
+# fast it runs is testing the clock.
 ua_report() {
   python3 -c "
-import json, os, sys, time
-sid, pct, off = sys.argv[1], sys.argv[2], int(sys.argv[3])
-n = int(time.time())
-five = None if pct == 'none' else {'used_percentage': float(pct), 'resets_at': n + 7000}
-json.dump({'at': n - off, 'session': sid, 'five_hour': five},
-          open(os.path.join(sys.argv[4], sid + '.json'), 'w'))
-" "$1" "$2" "$3" "$UAC/usage"
+import json, os, sys
+sid, pct, off, base, resets, out = (sys.argv[1], sys.argv[2], int(sys.argv[3]),
+                                    int(sys.argv[4]), int(sys.argv[5]), sys.argv[6])
+five = None if pct == 'none' else {'used_percentage': float(pct),
+                                   'resets_at': base + resets}
+json.dump({'at': base - off, 'session': sid, 'five_hour': five},
+          open(os.path.join(out, sid + '.json'), 'w'))
+" "$1" "$2" "$3" "$_uanow" "${4:-7000}" "$UAC/usage"
 }
 ua_run() { CLAUDE_CONFIG_DIR="$UAH" CCWATCH_FAKE_PS="$WORK/ps-ua" CCWATCH_HOME="$UAC" \
              NO_COLOR=1 "$CCWATCH" "$@" 2>/dev/null; }
 
-rm -f "$UAC/usage"/*.json
+# The reported symptom: three caches of one counter, the highest being current.
+rm -f "$UAC/usage"/*.json "$UAC/usage.json"
 ua_report aaa 101 2
 ua_report bbb 88 5
 ua_report ccc 62 8
-_uadis=$(ua_run bar)
-assert_not_contains "$(ua_run bar --title)" "%" \
-  "three reporters disagreeing means NO percentage in the menu bar title"
-assert_contains "$_uadis" "3 sessions disagree" "and the dropdown says how many disagree"
-assert_contains "$_uadis" "62%" "with the low end of the range"
-assert_contains "$_uadis" "101%" "and the high end, so the spread is visible"
-assert_contains "$_uadis" "not shown" "and states that the figure is withheld"
-_uaonce=$(ua_run once)
-assert_contains "$_uaonce" "report different figures" \
-  "the terminal header withholds it the same way"
-assert_not_contains "$_uaonce" "5h 101%" "and does not render one of the figures anyway"
-# ⚠️ doctor is where "why is there no percentage" gets answered, so it names
-# the reporters. The header can only afford a range; this is the thing that
-# tells you which session to go and look at.
-_uadoc=$(CLAUDE_CONFIG_DIR="$UAH" CCWATCH_FAKE_PS="$WORK/ps-ua" CCWATCH_HOME="$UAC" \
-         NO_COLOR=1 "$CCWATCH" doctor 2>&1)
-assert_contains "$_uadoc" "different usage figures" "doctor reports the disagreement"
-assert_contains "$_uadoc" "aaa" "and lists each reporter"
-assert_contains "$_uadoc" "101%" "with the figure each one gave"
+_uamax=$(ua_run bar --title)
+assert_contains "$_uamax" "101%" "the freshest figure for the window is the one shown"
+assert_not_contains "$_uamax" "88%" "not a staler cache of the same counter"
+assert_not_contains "$_uamax" "62%" "nor the stalest"
+# ⚠️ And it is SHOWN, not withheld. This is the assertion that would have
+# caught the first attempt, which hid the number and told the reader eight
+# sessions disagreed.
+assert_not_contains "$(ua_run bar)" "not shown" \
+  "a knowable figure is never withheld for being reported more than once"
+assert_not_contains "$(ua_run bar)" "disagree" "and is never described as a disagreement"
+assert_contains "$(ua_run once)" "5h 101%" "the terminal header shows it too"
 
-# ⚠️ And agreement still shows the number, or every assertion above is
-# satisfied by a tool that simply never reports usage again.
+# ⚠️ The newest WRITE is not the answer; the highest reading for the window is.
+# Ordering by write time is the obvious implementation and it is wrong: the
+# session that wrote most recently may be carrying the oldest cache, which is
+# exactly the flicker that was reported (14% / 15% / a bare session count).
 rm -f "$UAC/usage"/*.json
-ua_report aaa 101 2
-ua_report bbb 100 5
-ua_report ccc 99 8
-assert_contains "$(ua_run bar --title)" "101%" \
-  "reporters within the tolerance are believed, and the newest one is shown"
-assert_not_contains "$(ua_run bar)" "disagree" "with no disagreement reported"
+ua_report old 99 30
+ua_report new 40 1
+assert_contains "$(ua_run bar --title)" "99%" \
+  "the most recently written reading does not win if it holds a staler figure"
 
-# ⚠️ Drift is not disagreement. Usage climbs while you work, so a reading from
-# ten minutes ago being much lower is expected — only readings taken close
-# together are compared. Without that window, every long-lived machine would
-# report a permanent disagreement and never show a figure again.
+# ⚠️ Reset instants a second apart are ONE window. Pinning the fixture clock
+# above is what makes these tests deterministic, and it also removed the only
+# thing that was accidentally exercising this path — so it is posed on purpose
+# here. The bug it guards is real and was hit: grouping windows by exact
+# `resets_at` equality meant two sessions reporting an instant one second
+# apart were treated as two windows, and the higher (fresher) reading was
+# discarded in silence. Real payloads happen to agree to the second, which is
+# exactly why this needs an assertion rather than an assumption.
 rm -f "$UAC/usage"/*.json
-ua_report aaa 101 2
-ua_report old 40 400
-assert_contains "$(ua_run bar --title)" "101%" \
-  "an old, much lower reading is drift rather than disagreement"
+ua_report skewhi 99 30 7000
+ua_report skewlo 40 1 7001
+assert_contains "$(ua_run bar --title)" "99%" \
+  "reset instants one second apart are the same window, not two"
+# And at a skew no clock disagreement would exceed, but far short of a roll.
+rm -f "$UAC/usage"/*.json
+ua_report skewhi 99 30 7000
+ua_report skewlo 40 1 7090
+assert_contains "$(ua_run bar --title)" "99%" \
+  "and so are instants a minute and a half apart"
 
-# ⚠️ A reporter whose payload has no five_hour must not blank the reading. That
-# is the observed blip: the menu bar dropped its percentage entirely for one
-# refresh because the session that wrote last had `five_hour: null`.
+# ⚠️ A reading from a window that has already rolled must not drag it down.
+# `resets_at` is what says which window a figure belongs to, and after a reset
+# the counter starts again — so a leftover 99% from the last window would
+# otherwise outrank a true 4% in this one, permanently.
 rm -f "$UAC/usage"/*.json
-ua_report aaa 101 5
+ua_report past 99 60 -3600
+ua_report now 4 2 7000
+_uaroll=$(ua_run bar --title)
+assert_contains "$_uaroll" "4%" "a reading from the previous window is ignored"
+assert_not_contains "$_uaroll" "99%" "however high it was"
+
+# A reporter with no five_hour is skipped rather than blanking the figure —
+# the observed blip where the menu bar dropped to a bare session count.
+rm -f "$UAC/usage"/*.json
+ua_report aaa 77 5
 ua_report nul none 1
-assert_contains "$(ua_run bar --title)" "101%" \
-  "a reporter with no five_hour is skipped, not allowed to blank the figure"
+assert_contains "$(ua_run bar --title)" "77%" \
+  "a reporter with no five_hour cannot blank the figure"
 
-# ⚠️ One repaint is one reporter, even though it writes two files. `ccwatch
-# statusline` writes the same reading to usage.json AND to
-# usage/<session>.json, so without de-duplication a single session counts
-# twice — and the count is the whole claim in "N sessions report different
-# figures". Reporting three when two sessions disagreed would be a made-up
-# number in the middle of a message about not making numbers up.
-#
-# Nothing else here poses this: the disagreement fixture above writes only
-# per-reporter files and the legacy fixture below writes only usage.json, so
-# removing the de-duplication left every assertion green.
+# ⚠️ One repaint is one reporter even though it writes two files, because the
+# count is what `doctor` reports and a made-up count is a made-up number.
 rm -f "$UAC/usage"/*.json "$UAC/usage.json"
-ua_report dup 101 2
-cp "$UAC/usage/dup.json" "$UAC/usage.json"      # the same repaint, both files
-ua_report other 62 4
-_uadedup=$(ua_run bar)
-assert_contains "$_uadedup" "2 sessions disagree" \
-  "a session writing both files counts once, not twice"
-assert_not_contains "$_uadedup" "3 sessions disagree" \
-  "so the reporter count is sessions, not files"
+ua_report dup 50 2
+cp "$UAC/usage/dup.json" "$UAC/usage.json"
+_uadoc=$(CLAUDE_CONFIG_DIR="$UAH" CCWATCH_FAKE_PS="$WORK/ps-ua" CCWATCH_HOME="$UAC" \
+         NO_COLOR=1 "$CCWATCH" --json 2>/dev/null | jq -r '.usage.reporters')
+assert_eq "$_uadoc" "1" "a session writing both files counts once, not twice"
 rm -f "$UAC/usage.json"
 
-# A mixed install: a statusline that predates the per-reporter files writes
-# only usage.json, and dropping it would report "not reporting" on a machine
-# that plainly is.
+# A mixed install: an older statusline writes only usage.json, and ignoring it
+# would report "not reporting" on a machine that plainly is.
 rm -f "$UAC/usage"/*.json
 python3 -c "
 import json, time
@@ -1610,7 +1667,13 @@ assert_eq "$(printf '%s' "$_bartitle" | awk 'END{print NR}')" "1" \
 # Rule 2, in the place it matters most: the menu is read at a glance, so a
 # verdict with no measurement beside it is asking to be taken on trust.
 assert_contains "$_bar" "HUNG?" "a suspect session is named with its own word in the dropdown"
-assert_contains "$_bar" "quiet 20m" "and the silence that produced that verdict is printed with it"
+# ⚠️ "quiet 2" rather than "quiet 20m". The fixture poses 1200s of silence,
+# which is exactly 20m — and `dur` flips to 21m at 1260s, so the assertion
+# depended on the suite reaching it within 60s of building the fixture. It
+# failed on a run at load average 210. The claim is that the MEASUREMENT
+# travels with the verdict, not which minute it lands on, so the assertion now
+# says only that.
+assert_contains "$_bar" "quiet 2" "and the silence that produced that verdict is printed with it"
 
 # ⚠️ The glyph is the one thing the menu renders from `sev` itself rather than
 # taking verbatim, so it is the one place two renderers of one payload can
@@ -1665,7 +1728,7 @@ assert_not_contains "$_barna" "ccwatch $("$CCWATCH" --version | awk '{print $2}'
 assert_eq "$(printf '%s\n' "$_barna" | head -1)" "$(printf '%s\n' "$_bar" | head -1)" \
   "while the title line is byte-for-byte the one the default prints"
 assert_contains "$_barna" "HUNG?" "and the severity word survives"
-assert_contains "$_barna" "quiet 20m" "and so does the measurement beside it"
+assert_contains "$_barna" "quiet 2" "and so does the measurement beside it"
 # ⚠️ And the default still HAS the verbs, or the four assertions above would be
 # satisfied by a bar that never emitted them at all.
 assert_contains "$_bar" "Refresh now" "the default rendering still carries them"
@@ -2478,7 +2541,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
     "serve finds its web assets when installed as a symlink, as the README says to"
   assert_eq "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$SPORT4/")" "200" \
     "and actually serves the dashboard through the link"
-  pkill -f "ccwatch serve --port $SPORT4" 2>/dev/null || true
+  reap_serve "SPORT4"
 
   # --- the send endpoint, which is the part with teeth ---------------------
   #
@@ -2539,7 +2602,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
   assert_eq "$(curl -s --max-time 5 "http://127.0.0.1:$SPORT/api/state" | jq -r '.can_kill')" "false" \
     "and the page is told it cannot kill, so no button is drawn"
 
-  pkill -f "ccwatch serve --port $SPORT" 2>/dev/null || true
+  reap_serve "SPORT"
 
   # --- killing, when explicitly enabled ------------------------------------
   SPORT4=$(free_port) || SPORT4=""
@@ -2566,7 +2629,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
     # The refusal text is passed through verbatim: it explains what would have
     # been lost, and reducing it to "failed" throws that away.
     assert_contains "$_kb4" "half-edited" "with the reason preserved verbatim"
-    pkill -f "ccwatch serve --port $SPORT4" 2>/dev/null || true
+    reap_serve "SPORT4"
     rm -f "$FH/sessions/9501.json"
   else
     t_skip "kill over HTTP" "no free port"
@@ -2586,7 +2649,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
   _rotok=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT2/" \
            | grep -oE 'const SEND_TOKEN = "[0-9a-f]+"' | sed 's/.*"\(.*\)"/\1/')
   assert_eq "$_rotok" "" "and serves no token, so the page shows itself as read-only"
-  pkill -f "ccwatch serve --port $SPORT2" 2>/dev/null || true
+  reap_serve "SPORT2"
 
   # Killing the wrapper must take the HTTP server with it. It did not: python
   # ran in the foreground of the shell, so Ctrl-C reached it but any other kill
@@ -2601,7 +2664,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
     wait_until 25 srv_up "$SPORT3" || true
     assert_eq "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$SPORT3/")" "200" \
       "a third server starts and answers"
-    pkill -f "ccwatch serve --port $SPORT3" 2>/dev/null || true
+    reap_serve "SPORT3"
     # Waiting for the port to go quiet, rather than a fixed 3s: the wrapper
     # normally takes its child down in well under a second, and the deadline
     # is what makes a leak a failure instead of a hang.
@@ -2647,7 +2710,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
   else
     t_skip "killing the wrapper leaves no orphan" "no free port"
   fi
-  pkill -f "ccwatch serve --port $SPORT" 2>/dev/null || true
+  reap_serve "SPORT"
   rm -f "$FH/sessions/9107.json"
 
   # --- idle-aware collection: no reader, no work (FR-001, FR-002, SC-001) --
@@ -2733,7 +2796,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
     done
     assert_eq "$_fresh" "yes" \
       "and a read resumes collection, which catches up on its own cadence"
-    pkill -f "ccwatch serve --port $SPORT5" 2>/dev/null || true
+    reap_serve "SPORT5"
     rm -f "$FH/sessions/9601.json"
   else
     t_skip "idle-aware collection" "no free port"
@@ -2842,7 +2905,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
     assert_eq "$(awk -v n="$_now3" -v c="$_ca1" 'BEGIN{print (n - c > 0.2) ? "yes" : "no"}')" "yes" \
       "so the client-derived age (now - collected_at) keeps growing rather than freezing"
     fi
-    pkill -f "ccwatch serve --port $SPORT6" 2>/dev/null || true
+    reap_serve "SPORT6"
     rm -f "$FH/sessions/9701.json"
   else
     t_skip "conditional responses" "no free port"
@@ -2872,7 +2935,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
       "warming stays true because no snapshot has ever succeeded"
     assert_eq "$(printf '%s' "$_to" | jq -r '.sessions')" "null" \
       "and sessions is null, never a fabricated empty list"
-    pkill -f "ccwatch serve --port $SPORT7" 2>/dev/null || true
+    reap_serve "SPORT7"
   else
     t_skip "failed snapshot is distinguishable from an empty host" "no free port"
   fi
@@ -2892,7 +2955,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
       "with no error"
     assert_eq "$(printf '%s' "$_empty" | jq -r '.sessions')" "[]" \
       "and sessions is an empty array, not null — the two payloads are distinguishable by inspection alone"
-    pkill -f "ccwatch serve --port $SPORT8" 2>/dev/null || true
+    reap_serve "SPORT8"
   else
     t_skip "empty host is distinguishable from a failed snapshot" "no free port"
   fi
@@ -2943,7 +3006,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
     assert_eq "$(awk -v a="$_age_after" 'BEGIN{print (a > 3) ? "yes" : "no"}')" "yes" \
       "so its age keeps growing truthfully, rather than resetting to near-zero as a fresh empty collection would"
     chmod +x "$TC/bin/ccwatch"
-    pkill -f "ccwatch serve --port $SPORT9" 2>/dev/null || true
+    reap_serve "SPORT9"
     rm -f "$FH/sessions/9801.json"
   else
     t_skip "a failed collection retains the prior snapshot" "no free port"
@@ -3191,6 +3254,130 @@ assert_contains "$_rosterappend" "list" "alongside #rosterlist, as a sibling of 
 assert_not_contains "$_maphtml" "list.append(open" \
   "and #rosteropen is never appended into the listbox, whose rows have presentational children"
 assert_not_contains "$_maphtml" "list.appendChild(open" "by either append form"
+
+# ⚠️ A transcript read that times out must reach the panel as an error, not as
+# an empty panel. It did not: `subprocess.TimeoutExpired` escaped do_GET,
+# socketserver printed a full traceback into the serve log, and the browser got
+# a reset connection — so the reader saw nothing and no reason for it. Reported
+# from a real terminal at load average 210. /api/state had always wrapped its
+# subprocess; this route was the one that did not (constitution IV).
+#
+# The timeout is a knob so this can be forced rather than waited for.
+# ⚠️ `free_port` is defined inside the serve section, which is itself behind a
+# `curl`/--fast guard — so it does not exist when that section was skipped, and
+# calling it would be a "command not found" dressed as a test failure. Checked
+# rather than assumed.
+if command -v curl >/dev/null 2>&1 && type free_port >/dev/null 2>&1; then
+  TPORT=$(free_port) || TPORT=""
+  if [ -n "$TPORT" ]; then
+    TTH="$WORK/tt-home"; TTC="$WORK/tt-cch"
+    mkdir -p "$TTH/sessions" "$TTH/projects/-fake-repo" "$TTC"
+    _ttnow=$(date '+%s')
+    cat > "$TTH/sessions/9981.json" <<EOF
+{"pid":9981,"sessionId":"ffffffff-1111-0000-0000-000000000001","cwd":"/fake/repo",
+ "startedAt":$(( (_ttnow - 3600) * 1000 )),"kind":"interactive","entrypoint":"cli",
+ "name":"tt","version":"9.9.9","status":"idle",
+ "statusUpdatedAt":$(( (_ttnow - 240) * 1000 ))}
+EOF
+    printf '{"type":"user","sessionId":"ffffffff-1111-0000-0000-000000000001","message":{"role":"user","content":"hi"}}\n' \
+      > "$TTH/projects/-fake-repo/ffffffff-1111-0000-0000-000000000001.jsonl"
+    mkps 9981 "1:00.00" > "$WORK/ps-tt"
+    ( CLAUDE_CONFIG_DIR="$TTH" CCWATCH_FAKE_PS="$WORK/ps-tt" CCWATCH_HOME="$TTC" \
+      CCWATCH_TRANSCRIPT_TIMEOUT=0.001 CCWATCH_SERVE_IDLE_EXIT=0 \
+      "$CCWATCH" serve --port "$TPORT" >"$WORK/tt-serve.log" 2>&1 & )
+    if wait_until 25 srv_up "$TPORT"; then
+      _ttcode=$(curl -s -o "$WORK/tt-body" -w '%{http_code}' --max-time 10 \
+        "http://127.0.0.1:$TPORT/api/transcript?sid=ffffffff-1111-0000-0000-000000000001&n=5")
+      assert_eq "$_ttcode" "504" "a transcript read that times out answers 504, not a dropped connection"
+      assert_contains "$(cat "$WORK/tt-body" 2>/dev/null)" "given up on" \
+        "and says so in the body, so the panel can render a reason"
+      # ⚠️ The traceback is the symptom the reader actually reported, so it is
+      # asserted directly rather than inferred from the status code.
+      assert_not_contains "$(cat "$WORK/tt-serve.log" 2>/dev/null)" "Traceback" \
+        "and the server logs no traceback"
+    else
+      t_skip "a transcript read that times out answers 504" "server did not come up"
+    fi
+    reap_serve "$TPORT"
+  else
+    t_skip "a transcript read that times out answers 504" "no free port"
+  fi
+
+  # ⚠️ A forgotten serve exits on its own. This is the leak, structurally: a
+  # reaper that cannot run leaves the process, and the processes all compute
+  # the same answer over the same 1.7GB tree.
+  SPORT_IE=$(free_port) || SPORT_IE=""
+  if [ -n "$SPORT_IE" ]; then
+    IEH="$WORK/ie-home"; IEC="$WORK/ie-cch"
+    mkdir -p "$IEH/sessions" "$IEC"
+    printf '' > "$WORK/ps-ie"
+    ( CLAUDE_CONFIG_DIR="$IEH" CCWATCH_FAKE_PS="$WORK/ps-ie" CCWATCH_HOME="$IEC" \
+      CCWATCH_SERVE_IDLE_EXIT=2 "$CCWATCH" serve --port "$SPORT_IE" \
+      >"$WORK/ie-serve.log" 2>&1 & )
+    if wait_until 25 srv_up "$SPORT_IE"; then
+      if wait_until 20 srv_dead "$SPORT_IE"; then
+        t_pass "a serve nobody reads exits on its own rather than accumulating"
+      else
+        t_fail "a serve nobody reads exits on its own rather than accumulating" \
+               "still listening on $SPORT_IE after 20s with a 2s idle limit"
+      fi
+      assert_contains "$(cat "$WORK/ie-serve.log" 2>/dev/null)" "does not accumulate" \
+        "and says why it went, so it does not look like a crash"
+      # And the pidfile goes with it, or `--stop` would report a server that
+      # is not there.
+      assert_eq "$(ls "$IEC/serve" 2>/dev/null | wc -l | tr -d ' ')" "0" \
+        "and its pid record is removed on the way out"
+    else
+      t_skip "a serve nobody reads exits on its own" "server did not come up"
+    fi
+    reap_serve "$SPORT_IE"
+  else
+    t_skip "a serve nobody reads exits on its own" "no free port"
+  fi
+
+  # ⚠️ And an explicit reaper that needs no process table, which is the thing
+  # the suite itself now uses.
+  SPORT_ST=$(free_port) || SPORT_ST=""
+  if [ -n "$SPORT_ST" ]; then
+    STH="$WORK/st-home"; STC="$WORK/st-cch"
+    mkdir -p "$STH/sessions" "$STC"
+    printf '' > "$WORK/ps-st"
+    ( CLAUDE_CONFIG_DIR="$STH" CCWATCH_FAKE_PS="$WORK/ps-st" CCWATCH_HOME="$STC" \
+      CCWATCH_SERVE_IDLE_EXIT=0 "$CCWATCH" serve --port "$SPORT_ST" \
+      >"$WORK/st-serve.log" 2>&1 & )
+    if wait_until 25 srv_up "$SPORT_ST"; then
+      # ⚠️ The recorded pid must be a LIVE process. The first version of this
+      # compared two derivations of the same file, which is equal to itself
+      # whatever the file holds — green against an empty pidfile.
+      _stpid=$(cat "$STC/serve/$SPORT_ST.pid" 2>/dev/null | tr -d ' \n')
+      case "$_stpid" in
+        ''|*[!0-9]*) t_fail "serve records a usable pid" "pidfile held: '$_stpid'";;
+        *) kill -0 "$_stpid" 2>/dev/null \
+             && t_pass "serve records a pid a reaper can signal without enumerating" \
+             || t_fail "serve records a pid a reaper can signal without enumerating" \
+                       "pid $_stpid is not signallable";;
+      esac
+      # A record whose process is gone is a crash, not a running server, and is
+      # reported as its own fact.
+      printf '999999\n' > "$STC/serve/17999.pid"
+      _stout=$(CCWATCH_HOME="$STC" NO_COLOR=1 "$CCWATCH" serve --stop 2>&1)
+      assert_contains "$_stout" "stopped serve on $SPORT_ST" "serve --stop reaps it by that pid"
+      assert_contains "$_stout" "stale record" "and distinguishes a record whose process had already gone"
+      assert_eq "$(wait_until 10 srv_dead "$SPORT_ST" && echo gone || echo up)" "gone" \
+        "and the port really is released"
+      assert_contains "$(CCWATCH_HOME="$STC" NO_COLOR=1 "$CCWATCH" serve --stop 2>&1)" \
+        "No serve recorded" "with nothing left to stop afterwards"
+    else
+      t_skip "serve --stop reaps by recorded pid" "server did not come up"
+    fi
+    reap_serve "$SPORT_ST"
+  else
+    t_skip "serve --stop reaps by recorded pid" "no free port"
+  fi
+else
+  t_skip "serve lifecycle (timeout, idle exit, --stop)" \
+         "needs curl and the serve section (which defines free_port) to have run"
+fi
 
 # ============================================================ repo identity ==
 printf '\nrepo identity\n'

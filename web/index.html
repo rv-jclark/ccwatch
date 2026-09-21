@@ -372,18 +372,6 @@ function renderGauges(u) {
   // Withheld rather than annotated past the staleness limit. A percentage on
   // screen is read as current whatever is printed beside it — a fixture left
   // over from an earlier run showed 52% while the real figure was 7%.
-  // ⚠️ Withheld when the reporters do not agree, and BEFORE the staleness
-  // check, because a disagreement is not a gap: several sessions each wrote a
-  // fresh figure and at most one of them is true. Measured on a real machine —
-  // four sessions reporting 12%, 14%, 15% and nothing inside one minute, and a
-  // menu bar cycling 101% / 88% / 62%. Showing the newest would make the wrong
-  // number stable rather than make it right (constitution I and III).
-  if (u.disagree) {
-    note("stale", `usage: ${u.disagree.count} sessions report different` +
-      ` figures (${Math.floor(u.disagree.lo)}%\u2013${Math.floor(u.disagree.hi)}%)` +
-      ` \u2014 not shown`);
-    return;
-  }
   if (u.age > (u.stale_after || 600)) {
     note("stale", `usage: last reading ${dur(u.age)} old — not shown`);
     return;
