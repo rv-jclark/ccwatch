@@ -2901,8 +2901,31 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
     _ca3=$(jq -r '.collected_at.snapshot' "$WORK/body3")
     assert_eq "$_ca3" "$_ca1" \
       "collected_at is not reset by a 304 — the same instant survives the exchange"
+    # ⚠️ Threshold 0, against _ca3, and NOT a timing tune - the fifth change to
+    # these ETag assertions, and the first to say what the check covers. The
+    # previous three tuned timings against a theory of the race nobody had
+    # checked, which is why this warning is long.
+    #
+    # The old form required (now - _ca1) > 0.2, which was only ever satisfied
+    # because the three loopback curls above happened to take 200ms. On a
+    # GitHub runner they complete in well under that, so it went red while
+    # collected_at was perfectly correct: one runner's speed reported as a
+    # regression (constitution XIV).
+    #
+    # The obvious repair - sleep, then keep the 0.2 - is WRONG, and was written
+    # here before being thrown away. _ca1 is captured BEFORE the 304 exchange,
+    # so any wait makes (now - _ca1) > 0.2 true by construction: the check
+    # would then pass even if the server reset collected_at on every 304, which
+    # is the one thing it exists to notice. A no-op counted as coverage is
+    # worse than a flake, because a flake is visible.
+    #
+    # What is actually left to prove here is that the surviving instant is in
+    # the PAST, so a client subtracting it gets a growing age rather than zero
+    # or a negative. That the instant survived unchanged is proved by _ca3 ==
+    # _ca1 immediately above, so the pair covers reset AND direction with no
+    # assumption about how fast the machine is.
     _now3=$(python3 -c 'import time; print(time.time())')
-    assert_eq "$(awk -v n="$_now3" -v c="$_ca1" 'BEGIN{print (n - c > 0.2) ? "yes" : "no"}')" "yes" \
+    assert_eq "$(awk -v n="$_now3" -v c="$_ca3" 'BEGIN{print (n - c > 0) ? "yes" : "no"}')" "yes" \
       "so the client-derived age (now - collected_at) keeps growing rather than freezing"
     fi
     reap_serve "$SPORT6"
