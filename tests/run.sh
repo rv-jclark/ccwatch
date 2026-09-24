@@ -101,8 +101,10 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # (whose own recursion crashed the run) and 3 on the dispatch block. The
 # behavioural half of the dispatch check is NOT counted - it needs curl and a
 # free port, which is the reason the shape is guarded here as well.
-TALLY_FLOOR=493
-TALLY_FLOOR_NODE=243
+# Raised by the pixel-art sprites: 1 static (sprites.js loads before the
+# script that draws with it) and 16 node checks on web/sprites.js.
+TALLY_FLOOR=494
+TALLY_FLOOR_NODE=259
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
 # deadline passes. Returns 0 if it succeeded.
@@ -5335,6 +5337,171 @@ assert_contains "$_rcfn" "probe_clock" \
 _clockfn=$(sed -n '/^_ccwatch_clock_select() {/,/^}/p' "$ROOT/bin/ccwatch")
 assert_contains "$_clockfn" "TZ=America/New_York date -r" \
   "and probe_clock's macOS candidate formats with date -r, never jq, which reported the wrong zone here"
+
+
+# ============================================================= sprites-module ===
+printf '\nsprites-module\n'
+#
+# web/sprites.js is the map's pixel art: every grid, every pose, and the
+# run-length paths the page turns into SVG. In its own file for the reason the
+# other web modules are, so these can require() it without a browser. What is
+# asserted is what the art is FOR — each status a distinct shape, the raised
+# arm animatable, the meter never drawing a measurement as an absence — not
+# what any pixel looks like, which is verify-ui's screenshot and a person.
+if command -v node >/dev/null 2>&1; then
+  cat > "$WORK/sprites-check.js" <<'SPRITESJS'
+var S = require(process.argv[2]);
+var out = [];
+function check(name, cond, detail) {
+  out.push((cond ? "PASS|" : "FAIL|") + name + "|" + (detail || ""));
+}
+var CLASSES = ["waiting", "hung", "busy", "idle", "quiet"];
+
+// Rasterise a figure's paths back into a grid of which cells are drawn, so a
+// shape can be compared without trusting compose() to describe itself.
+function mask(fig) {
+  var g = [];
+  for (var y = 0; y < fig.h; y++) g.push(new Array(fig.w + 1).join("."));
+  ["body", "arm", "bubble"].forEach(function (name) {
+    fig.groups[name].forEach(function (p) {
+      var re = /M(\d+) (\d+)h(\d+)v1h-(\d+)z/g, m;
+      while ((m = re.exec(p.d))) {
+        var x = +m[1], y = +m[2], n = +m[3];
+        g[y] = g[y].slice(0, x) + new Array(n + 1).join("#") + g[y].slice(x + n);
+      }
+    });
+  });
+  return g.join("\n");
+}
+
+// S-A every grid is the size the page's viewBox says it is. A row one
+// character short shifts every pixel after it and still renders "something".
+(function () {
+  var bad = [];
+  CLASSES.forEach(function (cls) {
+    var p = S.POSE[cls];
+    [p.head].concat(p.arms, p.arm ? [p.arm] : []).forEach(function (layer) {
+      layer.forEach(function (r, i) { if (r.length !== S.W) bad.push(cls + " row " + i + ": " + r.length); });
+    });
+  });
+  check("S-A every sprite row is exactly " + S.W + " cells wide", bad.length === 0, bad.join(", "));
+  var f = S.figure("busy", "var(--ok)", "x", null);
+  check("S-A and a figure is the 16x20 the viewBox declares", f.w === 16 && f.h === 20, f.w + "x" + f.h);
+})();
+
+// S-B principle VII: colour is never the only carrier. Every status must
+// differ in SHAPE, so the same figure in greyscale still says which it is.
+(function () {
+  var seen = {}, dup = [];
+  CLASSES.forEach(function (cls) {
+    var m = mask(S.figure(cls, "var(--ok)", "same-sid", null));
+    if (seen[m]) dup.push(cls + " = " + seen[m]);
+    seen[m] = cls;
+  });
+  check("S-B every status is a distinct silhouette, not just a distinct colour",
+        dup.length === 0, dup.join(", "));
+})();
+
+// S-C the raised arm is its own group, because `.waiting .arm` is what the
+// page animates; drawn into the body it would still show and never move.
+(function () {
+  var w = S.figure("waiting", "var(--block)", "x", null);
+  check("S-C a session blocked on you has a raised arm the page can animate",
+        w.groups.arm.length > 0, "arm group has " + w.groups.arm.length + " paths");
+  check("S-C and a bubble, which the page throbs",
+        w.groups.bubble.length > 0);
+})();
+
+// S-D the hollow outline is drawn in the status colour and nothing else: a
+// session with nothing to corroborate it must not look as solid as one that
+// has been corroborated.
+(function () {
+  var q = S.figure("quiet", "var(--info)", "x", null);
+  var fills = q.groups.body.map(function (p) { return p.fill; });
+  check("S-D an uncorroborated session is a hollow outline in its status colour",
+        fills.length === 1 && fills[0] === "var(--info)", JSON.stringify(fills));
+})();
+
+// S-E principle V: a class this module was never told about is drawn as the
+// uncorroborated outline, never as some other status's pose.
+(function () {
+  var a = mask(S.figure("no-such-class", "var(--dim)", "x", null));
+  var b = mask(S.figure("quiet", "var(--dim)", "x", null));
+  check("S-E an unknown class falls back to the hollow outline, not a borrowed pose", a === b);
+})();
+
+// S-F the status colour arrives as the page's own token and is used as is,
+// so the tunic and the label read one mapping and cannot disagree.
+(function () {
+  // Every tunic path, by letter: the shaded half carries the token too, so
+  // "some path uses the token" passed with the main tunic painted grey.
+  var b = S.figure("busy", "var(--ok)", "x", null);
+  var tunic = b.groups.body.filter(function (p) { return p.ch === "t" || (p.ch === "T" && p.opacity == null); });
+  var wrong = tunic.filter(function (p) { return p.fill !== "var(--ok)"; });
+  check("S-F the tunic is painted with the status token it was given",
+        tunic.length === 2 && wrong.length === 0, JSON.stringify(tunic.map(function (p) { return p.ch + "=" + p.fill; })));
+})();
+
+// S-G the same session is the same character on every tick, and a board of
+// sessions is not one character repeated.
+(function () {
+  var a = S.variant("7f3c2a10-aaaa"), b = S.variant("7f3c2a10-aaaa");
+  check("S-G a session's look is a pure function of its id",
+        a.hair === b.hair && a.skin === b.skin);
+  var looks = {};
+  for (var i = 0; i < 40; i++) { var v = S.variant("sid-" + i); looks[v.hair + v.skin] = 1; }
+  var n = Object.keys(looks).length;
+  check("S-G and forty sessions do not all look alike", n >= 8, n + " distinct looks");
+})();
+
+// S-H the context meter. Absent when there is no reading (principle III: a
+// withheld reading is withheld, not drawn empty), never empty when there is
+// one, and coloured by the same thresholds as everywhere else.
+(function () {
+  check("S-H no context reading draws no meter at all",
+        S.figure("busy", "var(--ok)", "x", null).meter === null);
+  var low = S.figure("busy", "var(--ok)", "x", 4).meter;
+  check("S-H a small reading still lights a cell rather than reading as empty",
+        low && low.lit === 1, JSON.stringify(low));
+  var zero = S.figure("busy", "var(--ok)", "x", 0).meter;
+  check("S-H a true zero lights nothing, and is still a meter",
+        zero && zero.lit === 0);
+  var hot = S.figure("busy", "var(--ok)", "x", 85).meter;
+  check("S-H 85% is drawn in the bad colour", hot && hot.fill === "var(--bad)", JSON.stringify(hot));
+  var over = S.figure("busy", "var(--ok)", "x", 150).meter;
+  check("S-H an out-of-range reading is clamped to the ten cells there are",
+        over && over.lit === 10, JSON.stringify(over));
+})();
+
+// S-I the ground is self-contained: a tile that referenced a URL would be a
+// request the page makes, and one that can fail and leave the blocks bare.
+(function () {
+  var t = S.grassTile("#111111", "#222222");
+  check("S-I the grass tile is an inline SVG with no external reference",
+        /^<svg /.test(t) && !/https?:\/\/(?!www\.w3\.org\/2000\/svg)/.test(t) && !/href/.test(t), t.slice(0, 80));
+})();
+
+process.stdout.write(out.join("\n") + "\n");
+SPRITESJS
+
+  while IFS='|' read -r status name detail; do
+    [ -z "$status" ] && continue
+    if [ "$status" = "PASS" ]; then
+      t_pass "$name"
+    else
+      t_fail "$name" "$detail"
+    fi
+  done < <(node "$WORK/sprites-check.js" "$ROOT/web/sprites.js" 2>&1)
+else
+  t_skip "sprites module" "node not installed"
+fi
+# The page draws with the module, so it must load it before the inline script
+# that calls it — a figure() that runs first throws on every tick and the map
+# is empty, which the browserless suite would otherwise never see.
+_spr_line=$(grep -n '<script src="/sprites.js"></script>' "$ROOT/web/map.html" | head -1 | cut -d: -f1)
+_inline_line=$(grep -n '^<script>$' "$ROOT/web/map.html" | head -1 | cut -d: -f1)
+assert_eq "$(awk -v a="${_spr_line:-0}" -v b="${_inline_line:-0}" 'BEGIN{print (a>0 && b>0 && a<b) ? "yes" : "no"}')" "yes" \
+  "map.html loads sprites.js before the script that draws with it"
 
 
 # =============================================================== markdown ====

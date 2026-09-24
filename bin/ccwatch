@@ -4502,6 +4502,33 @@ function run(doc, win) {
   check("no figure is hidden or collapsed to zero size", unrendered.length === 0,
         unrendered.map(function (a) { return a.dataset.name; }).join(", "));
 
+  // 3b - and each is pixel art that is actually drawn, at a whole number of
+  // screen pixels per art pixel. A box of the right size can hold no paths at
+  // all (a sprite module that drew nothing is a figure-shaped hole), and at a
+  // fractional scale some art pixels are one screen pixel and some two, which
+  // is the smear that pixel art is ruined by. Only asserted at the default
+  // root size: the narrow layouts shrink the board in rem on purpose, and
+  // that trade is theirs.
+  var arts = agents.map(function (a) { return a.querySelector(".figure"); });
+  // At least one path, not "several": the hollow outline is legitimately a
+  // single path, and a first version of this check asking for five flagged
+  // every uncorroborated session on the board.
+  var blank = agents.filter(function (a, i) { return !arts[i] || arts[i].querySelectorAll("path[d]").length < 1; });
+  check("every figure is drawn from sprite paths, not an empty box", blank.length === 0,
+        blank.map(function (a) { return a.dataset.name; }).join(", "));
+  if (win.getComputedStyle(de).fontSize === "16px") {
+    var smeared = arts.filter(function (s) {
+      var b = boxOf(s);
+      return !s || Math.abs(b.w / 16 - Math.round(b.w / 16)) > 0.01 || Math.round(b.w / 16) < 1;
+    });
+    check("at the default size every art pixel is a whole number of screen pixels",
+          smeared.length === 0,
+          smeared.length + " figures at " + (arts[0] ? boxOf(arts[0]).w : "?") + "px for a 16-cell sprite");
+  } else {
+    skip("at the default size every art pixel is a whole number of screen pixels",
+         "the root is " + win.getComputedStyle(de).fontSize + ", not the 16px default");
+  }
+
   // 4 - reachable means "in the scroll content", which in flow layout is the
   // whole of it. Anything outside the scrollable range cannot be scrolled to,
   // and that is the failure mode the camera had no way to rule out.
@@ -4995,14 +5022,14 @@ function run(doc, win) {
             figW > 0 && figW < 50,
             ".agent rendered " + Math.round(figW) + "px wide (70px at the default root size)");
       // ⚠️ The art itself, not just its container. `figure()` creates the SVG
-      // at a fixed 34x38 in JS, so before it was sized in em the labels and
+      // at a fixed size in JS, so before it was sized in CSS the labels and
       // gaps shrank around figures that stayed exactly as big — which is most
       // of why the board did not get denser. A check on `.agent` alone cannot
       // see that: the container was already narrowing.
       var artW = boxOf(doc.querySelector(".figure")).w;
       check("and the figure art shrank with it, not just its container",
             artW > 0 && artW < 30,
-            ".figure rendered " + Math.round(artW) + "px wide (34px at the default)");
+            ".figure rendered " + Math.round(artW) + "px wide (32px at the default)");
       // ⚠️ And the labels, which are in px and so are reached by NONE of the
       // root-size change. An owner heading at 14px beside a 12px board was the
       // complaint; a check on the media query would pass against a rule that

@@ -752,13 +752,17 @@ projects.
 └───────────────────────────┘ └───────────────────────┘ └────────────────────────┘
 ```
 
-Each project is a territory; each session is a figure inside it. Appearance
-carries the status: a **raised arm and a pulsing `!`** for a session blocked on
-you, a **tilted figure with `?`** for one that says it is busy but has gone
-quiet, a **bobbing** figure for one that is working, an **outline** for a
-session with nothing to corroborate it, and a `z` for idle. The fill level
-inside the body is how full its context window is. Motion is only ever applied
-to a state that is actually changing, so a still figure means a still session.
+Each project is a territory; each session is a small pixel-art character
+inside it, standing on grass. Appearance carries the status, in shape as well
+as colour: a **raised arm and a pulsing `!` bubble** for a session blocked on
+you, **eyes down, a bead of sweat and a `?`** for one that says it is busy but
+has gone quiet, a **hammer held up, bobbing** for one that is working, a
+**hollow outline** for a session with nothing to corroborate it, and **eyes
+shut with a `z`** for idle. The bar under the feet is how full its context
+window is. Hair and skin are picked from the session id, so the same session is
+the same character on every refresh, and they mean nothing else. Motion is only
+ever applied to a state that is actually changing, so a still figure means a
+still session.
 
 That motion is **stepped, not tweened** — each pose is held, and the figure
 snaps between poses. That is a performance constraint, not a style choice.
@@ -771,7 +775,8 @@ Holding the poses with `step-end` changes the style twice per cycle instead of
 roughly 54 times, and the same page costs 2.8%.
 
 The cost is a **cliff, not a slope**: three animated figures and seven measured
-the same (4.3% + 3.8%), and `tilt` at 3.4s cost exactly what `bob` at 0.9s did.
+the same (4.3% + 3.8%), and `tilt` at 3.4s (now `sway`) cost exactly what `bob`
+at 0.9s did.
 The price is 60fps frame production at all, not the number of things moving —
 so thinning the animations out or slowing them down buys nothing, and only
 losing the tween does. This is worth stating because the obvious reading of a
@@ -783,6 +788,46 @@ into the new view untouched if it had not been measured first.
 Unfinished runs lie in the territory they belong to, deploy badges sit in its
 header, and messages between sessions are drawn as arrows between the two
 figures — including across territories, which is the case worth seeing.
+
+### The figures are pixel art, written as text
+
+Every sprite is a 16x20 grid of letters in `web/sprites.js`, one letter per
+colour, and the page draws each colour as a single SVG path of horizontal runs
+with `shape-rendering: crispEdges`. That shape was chosen over the obvious one,
+a sprite sheet shown through `<img>` with `image-rendering: pixelated`, for
+three reasons:
+
+- **An image can still be decoding when the page is measured.** `verify-ui`
+  asserts that every session has a figure with a non-zero box, and an `<img>`
+  that has not loaded yet is a 0x0 box standing for a session that exists.
+- **A raster cannot take a CSS token.** The tunic is the status colour, and it
+  has to be the *same* `var(--ok)` the label uses, in both themes, or the two
+  can drift apart.
+- **A diff can show a pixel.** Changing a pose is a text edit that review can
+  read.
+
+It is hand-drawn rather than a downloaded tileset because the network it was
+built on blocks the tileset's host (the CC0 *Ninja Adventure* pack on itch.io
+was the first choice). Swapping one in later means replacing the grids in
+`web/sprites.js` and nothing else; no other file draws a pixel.
+
+Three details matter more than they look:
+
+- **Whole pixels only.** At the default 16px root a figure is 2em = 32px for a
+  16-cell sprite, exactly 2x, and `verify-ui` asserts that ratio: at 1.5x some
+  art pixels are one screen pixel and some are two, and pixel art at a
+  fractional scale looks smeared. Every animation moves by one cell of the grid
+  (an SVG child's `px` are viewBox units), and nothing rotates, because a
+  rotated sprite is resampled. That is why the suspected hang now sways by one
+  pixel instead of tilting. The narrow layouts give up the whole-pixel scale
+  on purpose, to fit more agents.
+- **The hollow outline is the silhouette's edge**, not the sprite's outline
+  pixels. Those include the lines between the arms and the torso and between
+  the legs, and drawn alone they looked like a pair of headphones.
+- **The bubble is white with a dark glyph**, with the status colour only on its
+  rim. With the glyph in the status colour as well, rim and glyph ran together
+  at 2x, and `!` read as `H` and `?` as `A`. Found in a screenshot at 8x, which
+  is where pixel art has to be checked.
 
 ### Warnings live in the header, because a banner moves the board
 
@@ -1864,6 +1909,19 @@ implementation broken in the specific way it describes:
 | remove the `%SystemRoot%\System32\bash.exe` exclusion from `BashLocator` | 1 (app-win, gated — see below) |
 | leave the overlay's web view with no navigation delegate, so a load against a dead serve fails into a blank white panel | 1 (app selftest) |
 | give a serve that ran for days no fresh restart budget, so its fourth death over the app's life is final | 1 (app selftest) |
+| drop one character from a sprite row | 1 |
+| draw the suspected hang with the idle pose, so it differs from idle only in colour | 1 |
+| draw the raised arm into the body instead of its own group | 1 |
+| fill the uncorroborated figure instead of drawing it hollow | 1 |
+| fall back to the working pose for a class the sprites do not know | 1 |
+| paint either half of the tunic a fixed grey instead of the status token | 1 each (the first version of this check was satisfied by the other half and missed it) |
+| pick a session's look at random instead of from its id | 1 |
+| give every session the same hair | 1 |
+| draw the context meter with no reading, or leave it dark at 4% | 1 each |
+| move the context meter's bad threshold from 80% to 90%, or stop clamping it | 1 each |
+| have the grass tile reference an external image | 1 |
+| load `sprites.js` after the script that draws with it, or not at all | 1 |
+| size the figure in `em`, so it resolves against the button's 13px font and a 16-cell sprite renders at 26px | 1 (verify-ui) — not a planted mutation: this was the implementation, and the check's first run caught it |
 
 The four `app-win` rows above were confirmed by tracing the C# against the
 mutation by hand, not by watching `tests/run.sh` turn red: there is no .NET
