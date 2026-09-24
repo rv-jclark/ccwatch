@@ -101,7 +101,7 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # (whose own recursion crashed the run) and 3 on the dispatch block. The
 # behavioural half of the dispatch check is NOT counted - it needs curl and a
 # free port, which is the reason the shape is guarded here as well.
-TALLY_FLOOR=491
+TALLY_FLOOR=493
 TALLY_FLOOR_NODE=243
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -1579,6 +1579,12 @@ else
   # suite opened a browser tab on whoever ran it.
   assert_contains "$_appst" "hands exactly that url out" \
     "the app selftest records the url it would open rather than opening one"
+  # ⚠️ The blank white overlay: serve was down, the load failed in silence,
+  # and the panel had forgotten its own url so no later show could recover.
+  assert_contains "$_appst" "reported as a failure, not left blank" \
+    "the app selftest loads the overlay against a dead port and sees it say so"
+  assert_contains "$_appst" "gets a fresh one, rather than being given up on" \
+    "and that a serve which ran for days does not inherit a crash loop's budget"
   assert_contains "$_appst" "no bash= parameter is ever parsed" \
     "and that the app never parses a bash= out of a session row"
   # The app must not be able to drift from the CLI about the format they share.

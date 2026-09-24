@@ -624,7 +624,18 @@ listening on the port — most likely a `ccwatch serve` you started in a termina
 — it adopts it and labels it `not started by this app`, because killing it or
 fighting it for the port are both worse. A serve that keeps dying is restarted
 three times and then reported, with the reason, instead of respawned forever
-under a menu that says "running".
+under a menu that says "running". The three are a guard against a crash
+*loop*: a serve that stayed up for a minute or more gets a fresh budget when it
+dies, and so does **Restart serve**. Before that, a serve that ran for two days
+and was then taken down by an edit to its own script spent the budget one
+death at a time, and after the fourth the app had no serve at all.
+
+**Show Overlay** starts serve again if it is down, because the overlay is
+nothing without it. And a map that cannot load is never a blank page: the panel
+says `The map is not loading`, with WebKit's reason and the menu's serve line,
+and retries every 3s while it is open. It was a plain white window, and it
+stayed white even after serve came back — the panel reloaded `webView.url`,
+which a failed first load leaves nil, so it had forgotten which page it was for.
 
 From a figure's panel, **open in browser** takes that agent to a browser tab —
 `/map?sid=<session>`, where there is room to read the transcript. It is a real
@@ -1851,6 +1862,8 @@ implementation broken in the specific way it describes:
 | drop a line carrying an unknown parameter instead of retaining it | 1 (app-win, gated — see below) |
 | remove `WS_EX_NOACTIVATE` from the overlay's extended window style | 1 (app-win, gated — see below) |
 | remove the `%SystemRoot%\System32\bash.exe` exclusion from `BashLocator` | 1 (app-win, gated — see below) |
+| leave the overlay's web view with no navigation delegate, so a load against a dead serve fails into a blank white panel | 1 (app selftest) |
+| give a serve that ran for days no fresh restart budget, so its fourth death over the app's life is final | 1 (app selftest) |
 
 The four `app-win` rows above were confirmed by tracing the C# against the
 mutation by hand, not by watching `tests/run.sh` turn red: there is no .NET

@@ -224,7 +224,21 @@ final class ServeSupervisor {
     private var process: Process?
     private var lastStderr = ""
     private var restarts = 0
+    private var startedAt: Date?
+    private var restartPending = false
     var onChange: (() -> Void)?
+
+    /// How long a serve must have stayed up for its death to be a new problem
+    /// rather than the same one again.
+    ///
+    /// ⚠️ The budget used to be three restarts for the life of the app. A serve
+    /// that ran for two days and then died — one was taken down by an edit to
+    /// its own script mid-run — spent that budget one death at a time, and the
+    /// fourth left the app with no serve at all: the overlay a blank white
+    /// window, the menu still offering to show it. Three restarts is a guard
+    /// against a crash LOOP, and a child that lived this long was not in one.
+    static let steadyAfter: TimeInterval = 60
+    static func budgetResets(afterRunning ran: TimeInterval) -> Bool { ran >= steadyAfter }
 
     init(cli: URL, port: Int) {
         self.cli = cli
@@ -280,6 +294,7 @@ final class ServeSupervisor {
             return
         }
         process = p
+        startedAt = Date()
         state = .running(pid: p.processIdentifier)
         onChange?()
     }
@@ -287,6 +302,9 @@ final class ServeSupervisor {
     private func childExited(_ proc: Process) {
         process = nil
         guard case .running = state else { return }   // a deliberate stop
+        if let t = startedAt, ServeSupervisor.budgetResets(afterRunning: Date().timeIntervalSince(t)) {
+            restarts = 0
+        }
         let why = lastStderr.isEmpty
             ? "exited \(proc.terminationStatus)"
             : "exited \(proc.terminationStatus): \(lastStderr.split(separator: "\n").last ?? "")"
@@ -298,7 +316,14 @@ final class ServeSupervisor {
             restarts += 1
             state = .failed(reason: "\(why) — restarting (\(restarts)/3)")
             onChange?()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.start() }
+            restartPending = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                // A manual restart in the meantime already started one; a second
+                // start() would find our own child on the port and call it adopted.
+                guard let self = self, self.restartPending else { return }
+                self.restartPending = false
+                self.start()
+            }
         } else {
             state = .failed(reason: "\(why) — gave up after 3 restarts")
             onChange?()
@@ -314,6 +339,24 @@ final class ServeSupervisor {
         // the suite. Waiting briefly keeps us from orphaning it on quit.
         let deadline = Date().addingTimeInterval(3)
         while p.isRunning && Date() < deadline { usleep(50_000) }
+    }
+
+    /// "Restart serve", and the overlay asking for a serve it needs. Either is
+    /// a person asking, so it gets a fresh budget rather than inheriting one a
+    /// crash loop already spent.
+    func restart() {
+        restartPending = false
+        stop()
+        restarts = 0
+        start()
+    }
+
+    /// Starts one if there is none and none is on its way. A serve that is
+    /// running, adopted, or about to be restarted is left alone.
+    func ensureRunning() {
+        guard process == nil, !restartPending else { return }
+        if case .adopted = state, ServeSupervisor.portIsOpen(port) { return }
+        restart()
     }
 
     var summary: String {
@@ -377,12 +420,28 @@ final class OverlayUIDelegate: NSObject, WKUIDelegate {
     }
 }
 
-final class OverlayPanel: NSPanel {
+final class OverlayPanel: NSPanel, WKNavigationDelegate {
     private let webView: WKWebView
     private let uiDelegate = OverlayUIDelegate()
     private static let frameKey = "CCWatchOverlayFrame"
+    /// The page this panel exists to show. Kept here, not read back off the
+    /// web view, because after a failed load `webView.url` is nil.
+    ///
+    /// ⚠️ `present()` used to reload `webView.url`. When serve was down on the
+    /// first show, the load failed, the url stayed nil, and every later show
+    /// reloaded nothing — the panel was a blank white window for good, even
+    /// after serve came back.
+    let home: URL
+    /// What the menu says about serve, so the failure page can say it too.
+    var serveStatus: () -> String = { "" }
+    /// Set while the panel is showing why the map did not load. Exposed for
+    /// the selftest.
+    private(set) var failure: String?
+    private var retry: DispatchWorkItem?
+    static let retryEvery: TimeInterval = 3
 
     init(url: URL) {
+        home = url
         let saved = UserDefaults.standard.string(forKey: OverlayPanel.frameKey)
         let rect = saved.flatMap { NSRectFromString($0) } ?? NSRect(x: 80, y: 120, width: 460, height: 620)
         let config = WKWebViewConfiguration()
@@ -401,6 +460,7 @@ final class OverlayPanel: NSPanel {
         isMovableByWindowBackground = true
         contentView = webView
         webView.uiDelegate = uiDelegate
+        webView.navigationDelegate = self
         webView.load(URLRequest(url: url))
     }
 
@@ -408,13 +468,80 @@ final class OverlayPanel: NSPanel {
     /// collecting 15s after the last read of /api/state, so a hidden overlay
     /// holding the feed open would keep the collector awake for nothing.
     func present() {
-        if let u = webView.url { webView.load(URLRequest(url: u)) }
+        webView.load(URLRequest(url: home))
         orderFrontRegardless()
     }
 
     override func close() {
+        retry?.cancel()
+        retry = nil
         UserDefaults.standard.set(NSStringFromRect(frame), forKey: OverlayPanel.frameKey)
         super.close()
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // The failure page is a navigation too; only the real page clears it.
+        if webView.url?.host == home.host, webView.url?.port == home.port { failure = nil }
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
+                 withError error: Error) { loadFailed(error) }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        loadFailed(error)
+    }
+
+    /// The web content process can die (memory pressure, a WebKit crash), and
+    /// what is left behind is — again — a white panel. Load the page afresh.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        webView.load(URLRequest(url: home))
+    }
+
+    /// ⚠️ A failed load must never be a blank page. A white window says
+    /// nothing, and read as "the overlay is broken" it hides the fact that
+    /// matters: nothing is answering on the port. So the panel says so, with
+    /// the reason WebKit gave and what the menu knows about serve, and keeps
+    /// trying while it is on screen — serve being down is usually temporary.
+    private func loadFailed(_ error: Error) {
+        let ns = error as NSError
+        // A load we replaced ourselves (present() during a load) is not a failure.
+        if ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled { return }
+        failure = ns.localizedDescription
+        webView.loadHTMLString(OverlayPanel.failurePage(url: home, reason: ns.localizedDescription,
+                                                        serve: serveStatus()),
+                               baseURL: nil)
+        retry?.cancel()
+        let w = DispatchWorkItem { [weak self] in
+            guard let self = self, self.isVisible else { return }
+            self.webView.load(URLRequest(url: self.home))
+        }
+        retry = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + OverlayPanel.retryEvery, execute: w)
+    }
+
+    static func failurePage(url: URL, reason: String, serve: String) -> String {
+        func esc(_ s: String) -> String {
+            s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
+             .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
+        }
+        let serveLine = serve.isEmpty ? "" : "<p><code>\(esc(serve))</code></p>"
+        return """
+        <!doctype html><meta charset="utf-8"><title>ccwatch — map not loading</title>
+        <style>
+          :root { color-scheme: light dark; }
+          body { font: 13px -apple-system, system-ui, sans-serif; margin: 28px 20px;
+                 background: Canvas; color: CanvasText; }
+          h1 { font-size: 15px; margin: 0 0 10px; }
+          code { font: 12px ui-monospace, Menlo, monospace; }
+          p { margin: 0 0 10px; line-height: 1.45; }
+          .dim { opacity: .7; }
+        </style>
+        <h1>The map is not loading</h1>
+        <p>Nothing answered at <code>\(esc(url.absoluteString))</code>: \(esc(reason))</p>
+        \(serveLine)
+        <p class="dim">Trying again every \(Int(retryEvery))s while this window is open.
+        If it does not come back, choose <b>Restart serve</b> from the menu.</p>
+        """
     }
 }
 
@@ -622,7 +749,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rebuildMenu()
             return
         }
-        if overlay == nil { overlay = OverlayPanel(url: mapURL) }
+        // The overlay is nothing without serve, so asking for one is asking
+        // for the other — including after the supervisor gave up on it.
+        serve?.ensureRunning()
+        if overlay == nil {
+            let o = OverlayPanel(url: mapURL)
+            o.serveStatus = { [weak self] in self?.serve?.summary ?? "serve: no ccwatch found" }
+            overlay = o
+        }
         overlay?.present()
         rebuildMenu()
     }
@@ -632,8 +766,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func restartServe() {
-        serve?.stop()
-        serve?.start()
+        serve?.restart()
     }
 
     @objc private func toggleLogin() {
@@ -734,6 +867,35 @@ func selftest() -> Int32 {
     check(!panel.hidesOnDeactivate, "and does not vanish when another app activates")
 
     check(!ServeSupervisor.portIsOpen(1), "the port probe reports a closed port as closed")
+    check(!ServeSupervisor.budgetResets(afterRunning: 5),
+          "a serve dying seconds after start spends the restart budget")
+    check(ServeSupervisor.budgetResets(afterRunning: 2 * 86400),
+          "but one that ran for days gets a fresh one, rather than being given up on")
+
+    // ⚠️ The white panel. Load against a port nothing listens on and wait for
+    // WebKit to give up: the panel must say so in words and still know which
+    // page it is for, or the next show reloads nothing.
+    // ⚠️ Not port 1, which the port-probe check above uses: WebKit refuses
+    // its blocked ports by loading about:blank and reporting SUCCESS, so the
+    // check could never have failed there. A closed ordinary port gives the
+    // real case — -1004, "Could not connect to the server".
+    var deadPort = 18990
+    while ServeSupervisor.portIsOpen(deadPort) { deadPort += 1 }
+    let dead = URL(string: "http://127.0.0.1:\(deadPort)/map")!
+    let down = OverlayPanel(url: dead)
+    down.serveStatus = { "serve: exited 2 — gave up after 3 restarts" }
+    let until = Date().addingTimeInterval(15)
+    while down.failure == nil && Date() < until {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+    }
+    check(down.failure != nil, "a map that cannot load is reported as a failure, not left blank")
+    check(down.home == dead, "and the panel still knows which page to reload on the next show")
+    let page = OverlayPanel.failurePage(url: dead, reason: "Could not connect <b>",
+                                        serve: "serve: exited 2 — gave up after 3 restarts")
+    check(page.contains(dead.absoluteString) && page.contains("gave up after 3 restarts"),
+          "and the failure page names the url and what the menu knows about serve")
+    check(!page.contains("connect <b>") && page.contains("connect &lt;b&gt;"),
+          "and escapes what it quotes")
 
     // ⚠️ The delegate has to exist and has to return nil. A WKWebView with no
     // UI delegate drops `target="_blank"` silently — the reader clicks "open
