@@ -4737,6 +4737,127 @@ function run(doc, win) {
           " vs content " + inner.offsetWidth + "x" + inner.offsetHeight);
   }
 
+  // 13a - message lines are drawn for the figures being looked at, never all
+  // of them at rest (web/comms.js). The board used to draw every edge from the
+  // last two days as a permanent line, and each one crossed the blocks between
+  // its ends. Posed with a synthetic payload between figures that really are
+  // on the board, so it asks the question on a machine with no peer traffic
+  // too — and read synchronously, before the page's own tick can repaint the
+  // real one over it.
+  if (agents.length >= 2 && win.CCWATCH_COMMS && win.wires && win.renderComms && win.selectRow) {
+    var countWires = function () { return doc.querySelectorAll("#wires .wire").length; };
+    var footEdges = function () { return (doc.getElementById("foot") || {textContent: ""}).textContent; };
+    var priorSel = inner.querySelector(".agent.selected");
+    // Focusing a figure scrolls it into view, and so can restoring the
+    // selection. Put back afterwards, as 12 does: the checks after this one
+    // measure boxes, and a board left scrolled puts its labels under the header.
+    var priorTop = board.scrollTop;
+    win.selectRow(null);
+    // Against the real feed first. ⚠️ Skipped, not passed, when the feed has
+    // no edge between two figures on the board: then "no lines" is true of a
+    // page that draws every edge too, and mutated to do exactly that, this
+    // stayed green on a machine with no peer traffic.
+    var rest = win.relayoutWires();
+    if (rest && rest.drawable > 0) {
+      check("at rest the board draws no message lines, whatever the feed holds",
+            countWires() === 0, countWires() + " lines for " + rest.drawable
+              + " drawable edges, with nothing hovered, focused or selected");
+    } else {
+      skip("at rest the board draws no message lines, whatever the feed holds",
+           "the live feed has no edge between two figures on the board; the posed one below asks instead");
+    }
+
+    var A = agents[0], B = agents[1], Cf = agents[2] || null;
+    var nowMs = Date.now();
+    var iso = function (s) { return new Date(nowMs - s * 1000).toISOString(); };
+    var synth = {edges: [{from: A.dataset.name, to: B.dataset.name, count: 3, last: iso(30)}]};
+    if (Cf) synth.edges.push({from: Cf.dataset.name, to: B.dataset.name, count: 1, last: iso(7200)});
+    win.wires(synth);
+    check("and still none when there is traffic to draw", countWires() === 0,
+          countWires() + " lines for " + synth.edges.length + " posed edges");
+
+    A.dispatchEvent(new win.PointerEvent("pointerover", {bubbles: true}));
+    var hovered = [].slice.call(doc.querySelectorAll("#wires .wire"));
+    check("hovering a figure draws its own lines and only those",
+          hovered.length === 1 && /^M/.test(hovered[0].querySelector("path").getAttribute("d") || ""),
+          hovered.length + " lines drawn for 1 edge touching " + A.dataset.name);
+    check("with a recent one drawn stronger than history",
+          hovered.length === 1 && hovered[0].classList.contains("recent")
+            && +win.getComputedStyle(hovered[0].querySelector("path")).opacity > 0.6,
+          hovered.length ? hovered[0].getAttribute("class") + " at opacity "
+            + win.getComputedStyle(hovered[0].querySelector("path")).opacity : "no line");
+    check("and the footer says how many of how many are drawn",
+          footEdges().indexOf("drawing 1 of") !== -1, JSON.stringify(footEdges()));
+    inner.dispatchEvent(new win.PointerEvent("pointerleave"));
+    check("and leaving the board takes them away again", countWires() === 0,
+          countWires() + " lines after the pointer left");
+    check("at which point the footer says they are hidden, not absent",
+          footEdges().indexOf("hover or select") !== -1, JSON.stringify(footEdges()));
+
+    A.focus();
+    check("keyboard focus on a figure draws its lines as hover does", countWires() === 1,
+          countWires() + " lines with " + A.dataset.name + " focused");
+    A.blur();
+    check("and they go when focus leaves", countWires() === 0, countWires() + " lines after blur");
+
+    // A click selects as well as opening the inspector, because the inspector
+    // is modal: a click could otherwise never leave the lines on screen.
+    A.click();
+    var afterClick = countWires();
+    if (win.closeModal) win.closeModal();
+    // ⚠️ closeModal hands focus back to the figure, and focus draws its lines
+    // by itself — left there, this passes with the pinning removed entirely.
+    if (doc.activeElement && doc.activeElement.blur) doc.activeElement.blur();
+    check("clicking a figure pins its lines, and they outlast the inspector",
+          afterClick === 1 && countWires() === 1 && A.classList.contains("selected"),
+          afterClick + " lines while open, " + countWires() + " after close, selected: "
+            + A.classList.contains("selected"));
+    if (Cf) {
+      Cf.dispatchEvent(new win.PointerEvent("pointerover", {bubbles: true}));
+      check("hovering another figure adds its lines to the pinned ones", countWires() === 2,
+            countWires() + " lines with " + A.dataset.name + " pinned and "
+              + Cf.dataset.name + " hovered");
+      inner.dispatchEvent(new win.PointerEvent("pointerleave"));
+    }
+    win.selectRow(null);
+
+    // 13a' - the comms marker: on a figure that has just talked, absent on one
+    // whose only traffic is old, and out of flow so a message arriving does not
+    // move the board.
+    var hA = boxOf(A).h, hB = boxOf(B).h;
+    var marked = win.renderComms(synth);
+    var envA = A.querySelector(".comms"), envB = B.querySelector(".comms");
+    check("a figure that just sent a message wears the comms marker, and so does its receiver",
+          !!envA && !!envB && envA.querySelectorAll("path[d]").length >= 1
+            && boxOf(envA).w > 0 && boxOf(envA).h > 0,
+          marked + " marked; " + A.dataset.name + ": " + !!envA + ", " + B.dataset.name + ": " + !!envB);
+    if (Cf) {
+      check("but not one whose only traffic is two hours old", !Cf.querySelector(".comms"),
+            Cf.dataset.name + " is marked for an edge 7200s old");
+    }
+    check("the marker says who and when in words, not only as a picture",
+          A.title.indexOf("messaged " + B.dataset.name) !== -1
+            && (A.getAttribute("aria-label") || "").indexOf("messaged " + B.dataset.name) !== -1,
+          JSON.stringify(A.title));
+    check("and it sits over the figure without moving it",
+          envA && win.getComputedStyle(envA).position === "absolute"
+            && Math.abs(boxOf(A).h - hA) < 0.5 && Math.abs(boxOf(B).h - hB) < 0.5,
+          "height " + hA + " -> " + boxOf(A).h + ", position "
+            + (envA ? win.getComputedStyle(envA).position : "n/a"));
+    win.renderComms({edges: [{from: A.dataset.name, to: B.dataset.name, count: 3, last: iso(7200)}]});
+    check("once the traffic is old the marker is gone, not dimmed",
+          !A.querySelector(".comms") && !B.querySelector(".comms")
+            && A.title.indexOf("messaged") === -1,
+          "still marked: " + !!A.querySelector(".comms") + ", title " + JSON.stringify(A.title));
+
+    if (priorSel) win.selectRow(priorSel.dataset.sid);
+    board.scrollTop = priorTop;
+  } else {
+    skip("message lines are drawn only for the figures being looked at",
+         agents.length < 2 ? "the board needs two figures to pose an edge between"
+                           : "the page does not expose wires/renderComms/selectRow");
+  }
+
   // 13b - no branch label is a placeholder. A session with no branch must show
   // no branch line, not a line reading "?" — and not a visible empty one
   // either, which is what `textContent = ""` alone would leave. The count of

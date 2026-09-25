@@ -276,6 +276,31 @@
     return {w: W, h: H, groups: groups, meter: meter};
   }
 
+  // The comms marker: an envelope, worn over a figure's right shoulder while
+  // it has sent or received a peer message recently (see web/comms.js for
+  // "recently"). Its own 7x5 grid rather than a layer in the figure's, because
+  // the top-right of the figure is where the raised arm and the hammer are,
+  // and an envelope painted over either would cost the pose that says what
+  // the session is doing. The page positions it out of flow, over the button.
+  //   O rim (info)   f paper   v the flap's fold
+  var ENVELOPE = [
+    "OOOOOOO",
+    "OvfffvO",
+    "OfvfvfO",
+    "OffvffO",
+    "OOOOOOO",
+  ];
+  function comms() {
+    var paths = toPaths(ENVELOPE);
+    var fill = {O: "var(--info)", f: "#f4f5f7", v: "var(--px-line)"};
+    return {
+      w: ENVELOPE[0].length, h: ENVELOPE.length,
+      parts: Object.keys(paths).sort().map(function (ch) {
+        return {ch: ch, fill: fill[ch], d: paths[ch]};
+      }),
+    };
+  }
+
   // The grass under the owner blocks. Two shades a few percent apart:
   // texture, never contrast — the owner's name and summary are printed on it.
   var GRASS = [
@@ -491,7 +516,7 @@
   var api = {
     W: W, H: H, POSE: POSE, GLYPH: GLYPH,
     compose: compose, toPaths: toPaths, hash: hash, variant: variant,
-    figure: figure,
+    figure: figure, ENVELOPE: ENVELOPE, comms: comms,
     WORLD: WORLD, FRAME: FRAME, frameSize: frameSize,
     paint: paint, toSvg: toSvg, hedge: hedge, wall: wall, rug: rug, floor: floor,
     grass: grass, world: world,

@@ -105,8 +105,10 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # script that draws with it) and 16 node checks on web/sprites.js. Then by
 # the world: 5 node checks on its frames and contrast, and 3 comparing the
 # CSS slices with FRAME, which need node to read FRAME.
-TALLY_FLOOR=495
-TALLY_FLOOR_NODE=267
+# Raised by the comms marker: 1 static (comms.js loads before the inline
+# script) and 22 node checks on web/comms.js and the envelope sprite.
+TALLY_FLOOR=496
+TALLY_FLOOR_NODE=289
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
 # deadline passes. Returns 0 if it succeeded.
@@ -5646,6 +5648,157 @@ _spr_line=$(grep -n '<script src="/sprites.js"></script>' "$ROOT/web/map.html" |
 _inline_line=$(grep -n '^<script>$' "$ROOT/web/map.html" | head -1 | cut -d: -f1)
 assert_eq "$(awk -v a="${_spr_line:-0}" -v b="${_inline_line:-0}" 'BEGIN{print (a>0 && b>0 && a<b) ? "yes" : "no"}')" "yes" \
   "map.html loads sprites.js before the script that draws with it"
+
+
+# ================================================================ comms ======
+printf '\ncomms\n'
+#
+# web/comms.js decides which peer messages the map shows: a marker on a figure
+# that has just talked, and lines only for the figures being looked at. It
+# replaced a board that drew every edge from the last two days as a permanent
+# line — history drawn as though it were activity. The clock is passed in, so
+# every age below is posed exactly rather than read off this machine.
+if command -v node >/dev/null 2>&1; then
+  cat > "$WORK/comms-check.js" <<'COMMSJS'
+var C = require(process.argv[2]);
+var S = require(process.argv[3]);
+var out = [];
+function check(name, cond, detail) {
+  out.push((cond ? "PASS|" : "FAIL|") + name + "|" + (detail || ""));
+}
+// A broken implementation throws here as often as it answers wrongly, and one
+// throw would end the script and take every later check with it. So the
+// reads that index into a result go through this, and fail as themselves.
+function safe(f) { try { return f(); } catch (e) { return false; } }
+var NOW = Date.parse("2026-05-01T12:00:00Z");
+function at(s) { return new Date(NOW - s * 1000).toISOString(); }
+var MAP = {api: true, web: true, db: true};
+
+check("comms.js loads under node and exports an object",
+      typeof C === "object" && C !== null && typeof C.recent === "function", typeof C);
+
+// serve refreshes peers every 45s at best, so a message can be that old before
+// the page first sees it. A window that barely outlasts the cadence shows a
+// marker for a few seconds — gone between two glances.
+check("the recency window outlasts serve's 45s peers cadence by a minute or more",
+      C.RECENT_S - 45 >= 60, "RECENT_S = " + C.RECENT_S);
+
+var r = C.recent([{from: "api", to: "web", count: 1, last: at(40)}], MAP, NOW);
+check("a message 40s old marks its sender as having sent",
+      safe(function () { return r.api.sent.length === 1 && r.api.sent[0].peer === "web" && r.api.sent[0].age === 40; }),
+      JSON.stringify(r.api));
+check("and its receiver as having heard",
+      safe(function () { return r.web.heard.length === 1 && r.web.heard[0].peer === "api"; }),
+      JSON.stringify(r.web));
+
+r = C.recent([{from: "api", to: "web", count: 9, last: at(C.RECENT_S + 60)}], MAP, NOW);
+check("a message older than the window marks neither end", Object.keys(r).length === 0,
+      JSON.stringify(r));
+
+r = C.recent([{from: "api", to: "web", count: 1, last: "yesterday-ish"},
+              {from: "api", to: "db", count: 1}], MAP, NOW);
+check("an unreadable or missing timestamp is never taken for recent", Object.keys(r).length === 0,
+      JSON.stringify(r));
+
+r = C.recent([{from: "api", to: "web", count: 1, last: at(-300)}], MAP, NOW);
+check("a timestamp minutes in the future is not read as just now", Object.keys(r).length === 0,
+      JSON.stringify(r));
+r = C.recent([{from: "api", to: "web", count: 1, last: at(-10)}], MAP, NOW);
+check("but a few seconds of skew between clocks is, at 0s",
+      safe(function () { return r.api.sent[0].age === 0; }), JSON.stringify(r.api));
+
+r = C.recent([{from: "api", to: "gone", count: 1, last: at(20)},
+              {from: "gone", to: "gone2", count: 1, last: at(20)}], MAP, NOW);
+check("a figure that just messaged a session which has since exited is still marked",
+      safe(function () { return r.api.sent[0].peer === "gone" && !r.gone && !r.gone2; }), JSON.stringify(r));
+
+r = C.recent([{from: "api", to: "web", count: 1, last: at(30)},
+              {from: "web", to: "api", count: 1, last: at(90)}], MAP, NOW);
+check("a figure that both sent and heard is marked as both",
+      C.kind(r.api) === "both" && C.kind(r.web) === "both" && C.kind(undefined) === null,
+      C.kind(r.api) + "/" + C.kind(r.web));
+var said = String(safe(function () { return C.text(r.api); }));
+check("and its words say who, and how long ago, both ways",
+      said.indexOf("messaged web 30s ago") !== -1 && said.indexOf("heard from web 1m ago") !== -1,
+      JSON.stringify(said));
+
+var E = [{from: "api", to: "web", count: 3, last: at(30)},
+         {from: "web", to: "api", count: 1, last: at(7200)},
+         {from: "db",  to: "web", count: 1, last: at(30)},
+         {from: "api", to: "gone", count: 1, last: at(30)},
+         {from: "api", to: "api", count: 1, last: at(30)}];
+check("nothing is drawn while nobody is looking at anything",
+      C.visible(E, [], MAP, NOW).length === 0, JSON.stringify(C.visible(E, [], MAP, NOW)));
+var v = C.visible(E, ["api"], MAP, NOW);
+var keys = v.map(function (e) { return e.from + ">" + e.to; }).sort().join(",");
+check("looking at one figure draws its edges both ways, and only its own",
+      keys === "api>web,web>api", keys);
+check("today's edge is drawn as recent and last night's is not",
+      safe(function () {
+        return v.filter(function (e) { return e.from === "api"; })[0].recent === true
+          && v.filter(function (e) { return e.from === "web"; })[0].recent === false; }),
+      JSON.stringify(v));
+check("two figures looked at draw the union of their edges",
+      C.visible(E, ["api", "db"], MAP, NOW).length === 3, C.visible(E, ["api", "db"], MAP, NOW).length);
+check("an edge counts as drawable only with both ends on the map",
+      C.drawable(E, MAP) === 3, C.drawable(E, MAP));
+
+var rest = C.footText({drawn: 0, drawable: 3, exited: 0});
+check("at rest the footer says the edges are there and how to see them",
+      rest.indexOf("3 message edges") !== -1 && rest.indexOf("hover") !== -1, JSON.stringify(rest));
+check("while looking, it says how many of them are drawn",
+      C.footText({drawn: 1, drawable: 3, exited: 0}) === "drawing 1 of 3 message edges",
+      JSON.stringify(C.footText({drawn: 1, drawable: 3, exited: 0})));
+check("and with no edges at all it says nothing",
+      C.footText({drawn: 0, drawable: 0, exited: 0}) === "",
+      JSON.stringify(C.footText({drawn: 0, drawable: 0, exited: 0})));
+check("edges to exited sessions are counted, not dropped",
+      C.footText({drawn: 0, drawable: 0, exited: 2}).indexOf("2 message edges involve sessions that have exited") !== -1
+        && C.footText({drawn: 0, drawable: 3, exited: 2}).indexOf("2 more involve") !== -1,
+      JSON.stringify(C.footText({drawn: 0, drawable: 0, exited: 2})));
+
+// The envelope itself. A rim that stops short is a smudge at 2x, not a shape.
+var env = S.comms();
+var grid = [];
+for (var y = 0; y < env.h; y++) { grid.push(new Array(env.w + 1).join(".").split("")); }
+env.parts.forEach(function (p) {
+  p.d.replace(/M(\d+) (\d+)h(\d+)/g, function (_, x, yy, n) {
+    for (var i = 0; i < +n; i++) grid[+yy][+x + i] = p.ch;
+  });
+});
+var rimOk = true;
+for (var yy = 0; yy < env.h; yy++) for (var xx = 0; xx < env.w; xx++) {
+  var border = yy === 0 || xx === 0 || yy === env.h - 1 || xx === env.w - 1;
+  if (border && grid[yy][xx] !== "O") rimOk = false;
+}
+check("the comms envelope is drawn with an unbroken rim round its whole edge", rimOk,
+      grid.map(function (row) { return row.join(""); }).join("/"));
+check("its rim in the wires' own colour, and its fold drawn inside it",
+      env.parts.some(function (p) { return p.ch === "O" && p.fill === "var(--info)"; })
+        && env.parts.some(function (p) { return p.ch === "v"; }),
+      JSON.stringify(env.parts.map(function (p) { return p.ch + "=" + p.fill; })));
+
+process.stdout.write(out.join("\n") + "\n");
+COMMSJS
+
+  while IFS='|' read -r status name detail; do
+    [ -z "$status" ] && continue
+    if [ "$status" = "PASS" ]; then
+      t_pass "$name"
+    else
+      t_fail "$name" "$detail"
+    fi
+  done < <(node "$WORK/comms-check.js" "$ROOT/web/comms.js" "$ROOT/web/sprites.js" 2>&1)
+else
+  t_skip "comms module" "node not installed"
+fi
+
+# The page reads CCWATCH_COMMS in its inline script, including in the map key
+# it builds at load — so a comms.js loaded after it throws before the first
+# tick, and the board is empty.
+_com_line=$(grep -n '<script src="/comms.js"></script>' "$ROOT/web/map.html" | head -1 | cut -d: -f1)
+assert_eq "$(awk -v a="${_com_line:-0}" -v b="${_inline_line:-0}" 'BEGIN{print (a>0 && b>0 && a<b) ? "yes" : "no"}')" "yes" \
+  "map.html loads comms.js before the script that reads it"
 
 
 # =============================================================== markdown ====

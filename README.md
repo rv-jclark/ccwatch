@@ -1227,6 +1227,39 @@ flag and JSON-record shape the selection uses (`validateWidth`/`loadWidth`/
 clamp, it falls back to `WIDTH_DEFAULT` rather than propagating `NaN` into
 the stylesheet.
 
+### Message lines are drawn for the agents you are looking at
+
+The map used to draw every peer edge it knew about as a permanent line from
+sender to receiver. `serve` reads `peers --days 2`, so a pair that exchanged
+one message yesterday got the same line as a pair talking right now, and every
+line crossed the owner blocks between its ends. The lines were history drawn as
+though they were activity, and the more agents talked the less of the rest of
+the map could be read.
+
+Two things replace them, both decided in `web/comms.js`:
+
+- **A comms marker**, a pixel-art envelope over the figure's right shoulder,
+  on any agent that sent or received a message in the last two minutes. It is
+  absent below that threshold, not dimmed (rule 12), and it is positioned out
+  of flow so a message arriving never moves the rug it stands on. The words
+  go on the figure's title and accessible name ("messaged web-app 40s ago;
+  heard from pricing 1m ago"), because an envelope says neither who nor when.
+  Two minutes and not one because `serve` refreshes peers every 45s at best:
+  at 60s a marker could be up for fifteen seconds and be missed between two
+  glances.
+- **Lines only for the figures being looked at**: hovered, keyboard-focused,
+  or selected, and all of their edges of any age, with the last two minutes
+  drawn stronger. Clicking a figure selects it as well as opening the
+  inspector, which is what pins its lines. The inspector is modal, so a click
+  could otherwise never leave them on screen. It is also the way in on the
+  menu bar overlay, a non-activating panel whose web view cannot be relied on
+  to get hover at all.
+
+Hidden by default is not the same as absent (rule 4), so the footer says what
+is not drawn: "3 message edges between agents on the map — hover or select one
+to draw its own", or "drawing 1 of 3" while you are. With no edges it says
+nothing.
+
 ### The modal says which of five things is true, never two of them at once
 
 Clicking a figure or a roster row opens a panel on one agent: its status and
@@ -1863,6 +1896,18 @@ implementation broken in the specific way it describes:
 | have `setup` install the SwiftBar plugin rather than printing the path | 1 |
 | stop toggling `.selected`, so the selected row's figure carries no mark | 1 (verify-ui) |
 | leave the wire overlay unsized, so every wire is clipped to the SVG's default 300x150 | 1 (verify-ui) |
+| draw every edge on the map again, whether or not anything is looked at | 2 node, 9 verify-ui (10 on a machine with live peer traffic) |
+| ignore hover / focus / the selection when choosing a figure's lines | 4 / 1 / 2 (verify-ui) |
+| have a figure click open the inspector without selecting, so nothing pins its lines | 2 (verify-ui) |
+| keep a figure's marker once its traffic is older than the window | 1 (verify-ui) |
+| mark a figure for an edge older than the recency window, or for an unreadable or future timestamp | 1 each |
+| record a sent message as heard, or never mark the receiver | 5 / 3 |
+| shorten the recency window below a minute past serve's 45s peers cadence | 3 |
+| put the comms marker in the button's flow instead of absolute | 1 (verify-ui) |
+| drop the words from the marker, leaving it only a picture | 1 node, 1 verify-ui |
+| say nothing in the footer while the edges are hidden | 1 node, 1 verify-ui |
+| draw a line to a session that has exited, or count one as drawable | 2 / 1 |
+| break the envelope's rim, or paint it off the wires' colour | 1 each |
 | drop `--force-prefers-reduced-motion` from verify-ui's Chrome, so the reveal check races a compositor that virtual time never advances | 1 (verify-ui) |
 | drop `min-height:0` from `#stage`, so it refuses to shrink below its content and the page scrolls | 1 (verify-ui) |
 | drop the `aria-label` from the map-key button, leaving a control named only by a glyph | 1 (verify-ui) |

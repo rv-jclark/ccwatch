@@ -29,6 +29,9 @@ web/usage.js     the usage meter's arithmetic: how much of a window has gone,
 web/sprites.js   the map's pixel art: the characters as text grids, and the
                  world (hedges, walls, floors, rugs) painted by rule as
                  border-image 9-slices. The only file that draws a pixel
+web/comms.js     which peer messages the map shows: the comms marker on an
+                 agent that talked in the last two minutes, and lines only for
+                 the agents hovered, focused or selected — never all of them
 tests/run.sh     shellcheck + the assertion suite; the only test entry point
 ```
 
