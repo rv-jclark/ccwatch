@@ -4556,6 +4556,18 @@ function run(doc, win) {
     skip("a repo with an unfinished run stands behind a different wall",
          "the board needs one repo with an unfinished run and one without");
   }
+  // ⚠️ The figure's hover and focus rules PARSED, asserted on the stylesheet.
+  // An edit once left `} background:…; }` where `.agent:hover {` had been:
+  // the stray text became the selector prelude of the next rule, so the CSS
+  // parser dropped `.agent:focus-visible` along with it, and a keyboard user
+  // lost the focus ring with nothing on screen looking wrong.
+  var sels = [];
+  [].slice.call(doc.styleSheets).forEach(function (s) {
+    [].slice.call(s.cssRules || []).forEach(function (r) { if (r.selectorText) sels.push(r.selectorText); });
+  });
+  var lost = [".agent:hover", ".agent:focus-visible"].filter(function (s) { return sels.indexOf(s) < 0; });
+  check("a figure's hover and focus rules survive the CSS parser", lost.length === 0,
+        "missing from the parsed stylesheet: " + lost.join(", "));
 
   // 4 - reachable means "in the scroll content", which in flow layout is the
   // whole of it. Anything outside the scrollable range cannot be scrolled to,
