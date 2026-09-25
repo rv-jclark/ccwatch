@@ -102,9 +102,11 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # behavioural half of the dispatch check is NOT counted - it needs curl and a
 # free port, which is the reason the shape is guarded here as well.
 # Raised by the pixel-art sprites: 1 static (sprites.js loads before the
-# script that draws with it) and 16 node checks on web/sprites.js.
+# script that draws with it) and 16 node checks on web/sprites.js. Then by
+# the world: 5 node checks on its frames and contrast, and 3 comparing the
+# CSS slices with FRAME, which need node to read FRAME.
 TALLY_FLOOR=495
-TALLY_FLOOR_NODE=259
+TALLY_FLOOR_NODE=267
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
 # deadline passes. Returns 0 if it succeeded.
@@ -5475,12 +5477,124 @@ function mask(fig) {
         over && over.lit === 10, JSON.stringify(over));
 })();
 
-// S-I the ground is self-contained: a tile that referenced a URL would be a
+// S-I the world is self-contained: an image that referenced a URL would be a
 // request the page makes, and one that can fail and leave the blocks bare.
 (function () {
-  var t = S.grassTile("#111111", "#222222");
-  check("S-I the grass tile is an inline SVG with no external reference",
-        /^<svg /.test(t) && !/https?:\/\/(?!www\.w3\.org\/2000\/svg)/.test(t) && !/href/.test(t), t.slice(0, 80));
+  var bad = [];
+  ["dark", "light"].forEach(function (theme) {
+    var w = S.world(theme);
+    ["grass", "floor", "hedge", "rug", "wall", "wallScorched"].forEach(function (k) {
+      var t = w[k];
+      if (!/^<svg /.test(t) || /https?:\/\/(?!www\.w3\.org\/2000\/svg)/.test(t) || /href/.test(t)) bad.push(theme + "." + k);
+    });
+  });
+  check("S-I every part of the world is an inline SVG with no external reference",
+        bad.length === 0, bad.join(", "));
+})();
+
+// ---- the world ------------------------------------------------------------
+var P = S.WORLD.dark;
+var FRAMES = {
+  hedge: S.hedge(P.hedge),
+  wall: S.wall(P.wall, false),
+  rug: S.rug(P.rug),
+};
+function holeOf(f, x, y) { return x >= f.l && x < f.l + f.m && y >= f.t && y < f.t + f.m; }
+
+// S-J each frame is painted all the way round and empty in the middle — a
+// painted middle would cover the floor and every label on it, and a gap in
+// the border shows the page through the wall. (Its size is not claimed here:
+// the image is built FROM FRAME, so comparing the two can never fail — a
+// mutation proved it. Whether the CSS slices it at FRAME's numbers is the
+// slice check in the shell half of this section.)
+(function () {
+  var bad = [];
+  Object.keys(FRAMES).forEach(function (k) {
+    var img = FRAMES[k], f = S.FRAME[k], sz = S.frameSize(f);
+    if (img.w !== sz.w || img.h !== sz.h) { bad.push(k + " is " + img.w + "x" + img.h); return; }
+    for (var y = 0; y < img.h; y++) for (var x = 0; x < img.w; x++) {
+      var c = img.cells[y][x], hole = holeOf(f, x, y);
+      // The wall's last shadow row is dithered on purpose: half of it is
+      // floor showing through.
+      var dither = k === "wall" && y === f.t - 1 && x >= f.l && x < f.l + f.m;
+      if (hole && c) bad.push(k + " paints its middle at " + x + "," + y);
+      if (!hole && !c && !dither) bad.push(k + " has a gap at " + x + "," + y);
+    }
+  });
+  check("S-J every frame is closed all round and open in the middle",
+        bad.length === 0, bad.slice(0, 4).join("; "));
+})();
+
+// S-K the three-quarter view in one rule: only a north side shows its face,
+// so the owner's hedge and the repo's wall are deeper at the top than on any
+// other side. A frame the same all round is a box, not a wall.
+(function () {
+  var flat = ["hedge", "wall"].filter(function (k) {
+    var f = S.FRAME[k];
+    return !(f.t > f.l && f.t > f.r && f.t > f.b);
+  });
+  check("S-K the hedge and the wall are deeper on the north side than any other",
+        flat.length === 0, flat.join(", "));
+})();
+
+// S-L and the north wall casts its shadow onto the floor below it, which is
+// what makes a stripe of bricks read as a wall standing up.
+(function () {
+  var f = S.FRAME.wall, img = FRAMES.wall;
+  var row = img.cells[f.t - 2].slice(f.l, f.l + f.m);
+  check("S-L the north wall casts a shadow across the floor",
+        row.every(function (c) { return c === P.wall.shadow; }), JSON.stringify(row.slice(0, 4)));
+})();
+
+// S-M principle VII: the wall of a repo with an unfinished run differs in
+// SHAPE, not only colour. Each image is reduced to which pixels match which,
+// with the colours themselves thrown away; a recolour leaves that unchanged.
+(function () {
+  function shape(img) {
+    var ids = {}, n = 0;
+    return img.cells.map(function (r) {
+      return r.map(function (c) { if (!c) return "."; if (!(c in ids)) ids[c] = String.fromCharCode(97 + n++); return ids[c]; }).join("");
+    }).join("\n");
+  }
+  var scorched = S.wall(Object.assign({}, P.wall, {scorched: P.scorched}), true);
+  check("S-M a repo with an unfinished run has a wall of a different shape, not just a different colour",
+        shape(scorched) !== shape(FRAMES.wall));
+})();
+
+// S-N every label is readable on every ground it is printed on. The text
+// colours are read from the page's own stylesheet — the dark root, the light
+// root, and the light theme's override for the board — so this measures what
+// the page actually paints, against the grounds this module actually draws.
+(function () {
+  var html = require("fs").readFileSync(process.argv[3], "utf8");
+  function block(re) { var m = html.match(re); return m ? m[1] : ""; }
+  var dark = block(/:root \{\n([\s\S]*?)\n  \}/);
+  var light = block(/prefers-color-scheme: light\) \{\n\s*:root \{([\s\S]*?)\}/) +
+              block(/prefers-color-scheme: light\) \{[\s\S]*?#board \{([^}]*)\}/);
+  // The LAST declaration wins, as in the cascade: the board's override is
+  // appended after the root's value.
+  function tok(b, n) { var all = b.match(new RegExp("--" + n + ":(#[0-9a-f]{6})", "g")); return all && all[all.length - 1].split(":")[1]; }
+  function lum(h) {
+    var c = [1, 3, 5].map(function (i) { var v = parseInt(h.slice(i, i + 2), 16) / 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); });
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  }
+  function ratio(a, b) { var x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); }
+  var low = [], seen = 0;
+  [["dark", dark], ["light", light]].forEach(function (t) {
+    var w = S.WORLD[t[0]];
+    var grounds = {grass: w.grass, floor: w.floor.plank, rug: w.rug.field};
+    ["ink", "dim", "ok", "warn", "bad", "block", "info"].forEach(function (n) {
+      var v = tok(t[1], n);
+      if (!v) { low.push(t[0] + " --" + n + " not found in map.html"); return; }
+      Object.keys(grounds).forEach(function (g) {
+        seen++;
+        var r = ratio(v, grounds[g]);
+        if (r < 4.5) low.push(t[0] + " --" + n + " on " + g + " is " + r.toFixed(2) + ":1");
+      });
+    });
+  });
+  check("S-N every text colour is at least 4.5:1 on every ground, in both themes",
+        low.length === 0 && seen === 42, low.join("; ") || seen + " pairs");
 })();
 
 process.stdout.write(out.join("\n") + "\n");
@@ -5493,10 +5607,38 @@ SPRITESJS
     else
       t_fail "$name" "$detail"
     fi
-  done < <(node "$WORK/sprites-check.js" "$ROOT/web/sprites.js" 2>&1)
+  done < <(node "$WORK/sprites-check.js" "$ROOT/web/sprites.js" "$ROOT/web/map.html" 2>&1)
 else
   t_skip "sprites module" "node not installed"
 fi
+# The frames' slice numbers are written into map.html's CSS and also live in
+# web/sprites.js as FRAME. Two copies of one fact drift, and a wall sliced at
+# 12 when it is painted 16 deep cuts the bricks in half with nothing failing
+# but the look — so the CSS is checked against the module's own numbers, and
+# at exactly twice them, which is what keeps every art pixel a whole 2x2.
+if command -v node >/dev/null 2>&1; then
+  while IFS='|' read -r _fv _fc; do
+    [ -n "$_fv" ] || continue
+    assert_contains "$(grep -F "border-image:var(--$_fv) " "$ROOT/web/map.html")" "$_fc" \
+      "map.html slices the $_fv frame at web/sprites.js's own numbers, at 2x"
+  done < <(node -e '
+    var F = require(process.argv[1]).FRAME;
+    ["hedge", "wall", "rug"].forEach(function (k) {
+      var f = F[k];
+      // Written as the page writes it: the shortest shorthand — one number
+      // when all four sides agree, else the width list with the left side
+      // left off because it equals the right.
+      var same = f.t === f.r && f.r === f.b && f.b === f.l;
+      console.log(k + "|border-image:var(--" + k + ") " +
+        (same ? f.t + " / " + (f.t * 2) + "px"
+              : [f.t, f.r, f.b, f.l].join(" ") + " / " + (f.t * 2) + "px " + (f.r * 2) + "px " + (f.b * 2) + "px") +
+        " repeat");
+    });
+  ' "$ROOT/web/sprites.js")
+else
+  t_skip "map.html slices the frames at web/sprites.js's own numbers" "node not installed"
+fi
+
 # The page draws with the module, so it must load it before the inline script
 # that calls it — a figure() that runs first throws on every tick and the map
 # is empty, which the browserless suite would otherwise never see.

@@ -4529,6 +4529,34 @@ function run(doc, win) {
          "the root is " + win.getComputedStyle(de).fontSize + ", not the 16px default");
   }
 
+  // 3c - the world is painted round every block: a hedge round each owner, a
+  // wall round each repo, a rug under each branch. Asserted on the COMPUTED
+  // border-image, because every way this fails leaves a plausible page — a
+  // custom property that never got set, a url() the CSS parser rejected — a
+  // transparent border of exactly the right width, and the board looks tidy
+  // and empty rather than broken.
+  var unpainted = [];
+  [".district", ".building", ".zone"].forEach(function (sel) {
+    [].slice.call(doc.querySelectorAll(sel)).forEach(function (e) {
+      if (!/^url\("data:image\/svg\+xml/.test(win.getComputedStyle(e).borderImageSource)) unpainted.push(sel);
+    });
+  });
+  check("every owner, repo and branch is framed in painted scenery", unpainted.length === 0,
+        unpainted.length + " unpainted: " + unpainted.slice(0, 5).join(", "));
+  // And a repo with an unfinished run is drawn with a different wall. A red
+  // border cannot carry that any more — border-color is ignored under a
+  // border-image — so if the scorched wall does not apply, nothing does.
+  var wreck = doc.querySelector(".building.has-unfinished");
+  var sound = doc.querySelector(".building:not(.has-unfinished)");
+  if (wreck && sound) {
+    check("a repo with an unfinished run stands behind a different wall",
+          win.getComputedStyle(wreck).borderImageSource !== win.getComputedStyle(sound).borderImageSource,
+          "both repos computed the same border-image, so the scorched wall never applied");
+  } else {
+    skip("a repo with an unfinished run stands behind a different wall",
+         "the board needs one repo with an unfinished run and one without");
+  }
+
   // 4 - reachable means "in the scroll content", which in flow layout is the
   // whole of it. Anything outside the scrollable range cannot be scrolled to,
   // and that is the failure mode the camera had no way to rule out.

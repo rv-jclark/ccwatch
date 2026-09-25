@@ -16,12 +16,30 @@
     /* The pixel art's outline and eyes, and the grass behind the owner blocks
        (a data: URL painted from web/sprites.js at load, so no image is ever
        fetched). */
-    --px-line:#07080b; --grass:var(--grass-dark, none);
+    --px-line:#07080b; --px-cast:rgba(0,0,0,.45);
+    --grass:var(--px-grass-dark, none); --floor:var(--px-floor-dark, none);
+    --hedge:var(--px-hedge-dark, none); --rug:var(--px-rug-dark, none);
+    --wall:var(--px-wall-dark, none); --wall-scorched:var(--px-wallScorched-dark, none);
+    --rugfield:var(--px-rugfield-dark, transparent);
   }
   @media (prefers-color-scheme: light) {
     :root { --bg:#eef1f5; --panel:#fff; --line:#dfe3ea; --ink:#1a1d23; --dim:#6b7280;
             --ok:#0f8a63; --warn:#8a5d00; --bad:#c0392b; --block:#7c3aed; --info:#1f6fb2;
-            --ground:#f6f8fb; --px-line:#1a1d23; --grass:var(--grass-light, none); }
+            --ground:#f6f8fb; --px-line:#1a1d23; --px-cast:rgba(60,48,30,.18);
+            --grass:var(--px-grass-light, none); --floor:var(--px-floor-light, none);
+            --hedge:var(--px-hedge-light, none); --rug:var(--px-rug-light, none);
+            --wall:var(--px-wall-light, none); --wall-scorched:var(--px-wallScorched-light, none);
+            --rugfield:var(--px-rugfield-light, transparent); }
+    /* ⚠️ Two text tokens darkened on the board, and only there. Printed on
+       the daylight grass, --dim measured 4.49:1 — under the 4.5 that small
+       text needs — and --ok about 4.1 on every ground (it was 4.4 on the old
+       white panel, so already short). tests/run.sh computes every text
+       token against every ground in web/sprites.js, so a palette change
+       that makes a label unreadable fails there, not in somebody's eyes.
+       ⚠️ On #board, not #boardinner: the suite finds #boardinner's layout
+       rule as the FIRST `#boardinner {` in the file, and this one, above it,
+       took its place and failed the wire overlay's positioning check. */
+    #board { --dim:#5f6673; --ok:#0c7a57; }
   }
   * { box-sizing:border-box; }
   /* ⚠️ The page fills the viewport and does NOT scroll; the map takes whatever
@@ -79,7 +97,13 @@
        A single grid column too: `minmax(min(280px,100%), 1fr)` already gives
        one at 470px, but saying so stops the 280px floor deciding anything. */
     #board #boardinner { gap:.5rem; }
-    #boardinner .district { padding:.4rem .45rem; border-radius:6px; }
+    /* The frames at 1x, still whole pixels: a 32px wall is a seventh of an
+       overlay-width card. */
+    #boardinner .district { padding:.35rem .4rem; border-width:7px 3px 3px;
+                            border-image-width:7px 3px 3px; background-size:16px 16px; }
+    #boardinner .building { border-width:16px 4px 4px; border-image-width:16px 4px 4px;
+                            background-size:16px 16px; box-shadow:0 2px 0 var(--px-cast); }
+    #boardinner .zone { border-width:2px; border-image-width:2px; }
     #boardinner .dhead { margin-bottom:.3rem; gap:.4rem; }
     /* ⚠️ The track floor drops to 150px so repos SHARE a row. The base rule
        reserves 280px per card, and two of those do not fit in a 470px overlay,
@@ -95,7 +119,7 @@
       gap:.35rem;
       grid-template-columns:repeat(auto-fit, minmax(min(150px, 100%), 1fr));
     }
-    #boardinner .building { padding:.3rem .35rem; }
+    #boardinner .building { padding:.3rem .35rem; }  /* frame: see above */
     #boardinner .zones { gap:.25rem; }
     #boardinner .zone { padding-left:.3rem; }
     #boardinner .figures { gap:.1rem; }
@@ -406,14 +430,23 @@
   .wire text { font-size:9px; }
 
   /* An owner: the outermost grouping, one per org, plus "no repo". */
-  /* Square corners and a one-pixel drop shadow, so the blocks read as tiles
-     of the same world as the figures. The grass is texture, not contrast: its
-     two shades are a few percent apart because the owner's name and summary
-     are printed on top of it. */
-  .district { border:1px solid var(--line); border-radius:0;
+  /* The world, in the three-quarter view of a 16-bit Zelda: every frame is a
+     9-slice painted by web/sprites.js, and every one is TALLER AT THE TOP,
+     because only a north wall shows its face. Each is drawn at exactly 2x its
+     art (the slice numbers are art pixels, the widths are twice them), so a
+     pixel of hedge is the same size as a pixel of character.
+     ⚠️ Decoration on flow layout, never a scene the layout is fitted into.
+     A border-image paints round whatever box the browser produced, so the
+     board is still the scrolling list that cannot lose a session.
+
+     An owner is a field of grass fenced by a hedge. The grass is texture,
+     not contrast: its two shades are a few percent apart because the owner's
+     name and summary are printed on top of it. */
+  .district { border:solid transparent; border-width:14px 6px 6px;
+              border-image:var(--hedge) 7 3 3 3 / 14px 6px 6px repeat;
               background-color:var(--ground); background-image:var(--grass);
-              background-size:32px 32px; image-rendering:pixelated;
-              box-shadow:0 2px 0 var(--line); padding:.7rem .8rem; }
+              background-size:32px 32px; background-clip:padding-box;
+              image-rendering:pixelated; padding:.55rem .75rem .7rem; }
   .dhead { display:flex; align-items:baseline; gap:.6rem; flex-wrap:wrap;
            margin-bottom:.6rem; }
   .dlabel { font-size:14px; color:var(--ink); font-weight:600; }
@@ -435,10 +468,22 @@
                grid-template-columns:repeat(auto-fit, minmax(min(280px, 100%), 1fr)); }
 
   /* A repo. */
-  .building { border:1px solid var(--line); border-radius:0; background:var(--panel);
-              box-shadow:0 2px 0 var(--line);
+  /* A repo is a room in cutaway: its brick north wall and the wall's shadow
+     across the top, stone caps round the rest, planks underfoot. */
+  .building { border:solid transparent; border-width:32px 8px 8px;
+              border-image:var(--wall) 16 4 4 4 / 32px 8px 8px repeat;
+              /* The room's shadow on the grass to its south, one art pixel
+                 deep: what makes it stand ON the field rather than float. */
+              box-shadow:0 4px 0 var(--px-cast);
+              background-color:var(--panel); background-image:var(--floor);
+              background-size:32px 32px; background-clip:padding-box;
+              image-rendering:pixelated;
               padding:.5rem .6rem; min-width:0; }
-  .building.has-unfinished { border-color:var(--bad); }
+  /* ⚠️ An unfinished run is carried by the wall's SHAPE — cracked, scorched
+     bricks — not by a red outline, which a border-image cannot draw anyway:
+     `border-color` is ignored under one, so the old rule would have silently
+     stopped meaning anything. The words (the wreck badges) are unchanged. */
+  .building.has-unfinished { border-image-source:var(--wall-scorched); }
   .bhead { display:flex; align-items:baseline; gap:.4rem; }
   /* min-width:0 with the ellipsis: a repo slug is long, and must not widen the
      grid track past the column it was given. */
@@ -451,7 +496,11 @@
 
   /* A branch, and the figures standing in it. */
   .zones { display:flex; flex-direction:column; gap:.4rem; }
-  .zone { border-left:2px dashed var(--line); padding-left:.45rem; }
+  /* A branch is a rug on the floor. Its field is a flat colour, not a
+     pattern, because the branch's name is printed on it. */
+  .zone { border:4px solid transparent; border-image:var(--rug) 2 / 4px repeat;
+          background:var(--rugfield); background-clip:padding-box;
+          image-rendering:pixelated; padding:.2rem .4rem .25rem; }
   .zlabel { font-size:10px; color:var(--dim); overflow:hidden;
             text-overflow:ellipsis; white-space:nowrap; }
   .figures { display:flex; flex-wrap:wrap; gap:.15rem; }
@@ -1047,15 +1096,21 @@ $("legend").innerHTML = [
            : `<span>click an agent to read its conversation (read-only)</span>`,
 ].join("");
 
-// The grass, painted once: both themes' tiles go on the root as custom
-// properties and the stylesheet picks one, so a theme change needs no script.
-// A data: URL rather than a file, so the ground is never a request that can
-// fail and leave the blocks bare.
-(function paintGround() {
-  const tile = svg => `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+// The world, painted once: both themes' grass, hedges, walls, floors and rugs
+// go on the root as custom properties (`--px-<part>-<theme>`) and the
+// stylesheet picks a theme's set, so a theme change needs no script. data:
+// URLs rather than files, so the scenery is never a request that can fail
+// and leave the blocks bare — and if this never runs, every frame falls back
+// to a transparent border of the same width, so the layout does not move.
+(function paintWorld() {
+  const url = svg => `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
   const st = document.documentElement.style;
-  st.setProperty("--grass-dark", tile(CCWATCH_SPRITES.grassTile("#121a17", "#18251e")));
-  st.setProperty("--grass-light", tile(CCWATCH_SPRITES.grassTile("#eef5ec", "#e0ecdc")));
+  for (const theme of ["dark", "light"]) {
+    const w = CCWATCH_SPRITES.world(theme);
+    for (const part of ["grass", "floor", "hedge", "rug", "wall", "wallScorched"])
+      st.setProperty(`--px-${part}-${theme}`, url(w[part]));
+    st.setProperty(`--px-rugfield-${theme}`, w.rugField);
+  }
 })();
 
 // One mapping from status to appearance, so the figure, the label colour and

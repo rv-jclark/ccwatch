@@ -758,7 +758,11 @@ projects.
 ```
 
 Each project is a territory; each session is a small pixel-art character
-inside it, standing on grass. Appearance carries the status, in shape as well
+inside it. The board is drawn as a place, in the three-quarter view of a 16-bit
+Zelda: an owner is a field of grass fenced by a hedge, a repo is a room seen in
+cutaway — a brick north wall casting its shadow across a plank floor — and a
+branch is a rug on that floor, with its sessions standing on it. A repo with an
+unfinished run stands behind scorched, cracked bricks. Appearance carries the status, in shape as well
 as colour: a **raised arm and a pulsing `!` bubble** for a session blocked on
 you, **eyes down, a bead of sweat and a `?`** for one that says it is busy but
 has gone quiet, a **hammer held up, bobbing** for one that is working, a
@@ -793,6 +797,43 @@ into the new view untouched if it had not been measured first.
 Unfinished runs lie in the territory they belong to, deploy badges sit in its
 header, and messages between sessions are drawn as arrows between the two
 figures — including across territories, which is the case worth seeing.
+
+### The world is a frame round each block, not a scene
+
+The hedges, walls and rugs are CSS `border-image` 9-slices painted by
+`web/sprites.js`, each deeper on its north side than anywhere else — the whole
+of the 2.5D is that one rule, because in a three-quarter view only a north wall
+shows its face. That shape was chosen over drawing a scene and fitting the
+blocks into it, for the reason the camera went: a scene is a placement, and a
+placement can put a session somewhere you are not looking. A border-image
+decorates whatever box flow layout produced, so the board is still the
+scrolling list that cannot lose one — it only looks like a place.
+
+Three things this costs, and how each is held:
+
+- **The red border that marked an unfinished run is gone**, because
+  `border-color` is ignored under a border-image. It would have kept its rule
+  and silently stopped drawing anything. The scorched wall replaces it, and is
+  a different *shape* (cracks), not only a different colour; the suite reduces
+  both walls to which pixels match which, with the colours thrown away, and
+  requires them to differ. `verify-ui` checks the computed style really swaps.
+- **Text is printed on scenery now**, so every text token is measured against
+  every ground it can land on — grass, floor and rug, in both palettes — and
+  must reach 4.5:1. Measured before the fix: `--dim` was 4.49:1 on daylight
+  grass and `--ok` about 4.1:1 everywhere, so the light theme darkens both on
+  the board. The colours are read from `map.html`'s own stylesheet, so the
+  check measures what the page paints, not a copy of it.
+- **The slice numbers live in two places**: `FRAME` in `web/sprites.js`, and
+  the `border-image` lines in the CSS. A wall painted 16 deep and sliced at 12
+  cuts the bricks in half and fails nothing but the look, so the suite computes
+  the CSS each frame should have from `FRAME` and requires it verbatim, at
+  exactly 2x.
+
+A failure of the scenery must not look like an empty board either: if the
+paint script never runs, every frame falls back to a transparent border of the
+same width, so nothing moves — and `verify-ui` asserts the computed
+`border-image` of every owner, repo and branch is a painted one, because that
+fallback is a tidy page that is quietly wrong.
 
 ### The figures are pixel art, written as text
 
@@ -1925,7 +1966,15 @@ implementation broken in the specific way it describes:
 | give every session the same hair | 1 |
 | draw the context meter with no reading, or leave it dark at 4% | 1 each |
 | move the context meter's bad threshold from 80% to 90%, or stop clamping it | 1 each |
-| have the grass tile reference an external image | 1 |
+| have any part of the world (grass, floor, hedge, rug, either wall) reference an external image | 1 |
+| paint a wall's middle, leave a gap in the hedge's top, or shrink a frame's north side to match the others | 1 each |
+| stop the north wall casting its shadow | 1 |
+| draw the scorched wall without its cracks, so it is the plain wall recoloured | 1 |
+| drop the light theme's board-only `--dim`/`--ok`, darken the daylight grass, or lighten the dusk rug | 1 each |
+| paint the wall 15 deep, the rug's border 3 wide, or the hedge's south side 4 deep without changing the CSS that slices them | 1 each |
+| stop painting the hedge, leaving owners in a transparent border of the right width | 1 (verify-ui) |
+| drop the rule that puts a repo with an unfinished run behind the scorched wall | 1 (verify-ui) |
+| have the sprite module return no paths, leaving figure-sized empty boxes | 1 (verify-ui) |
 | load `sprites.js` after the script that draws with it, or not at all | 1 |
 | size the figure in `em`, so it resolves against the button's 13px font and a 16-cell sprite renders at 26px | 1 (verify-ui) — not a planted mutation: this was the implementation, and the check's first run caught it |
 

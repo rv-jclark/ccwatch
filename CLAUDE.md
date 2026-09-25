@@ -26,8 +26,9 @@ web/alerts.js    the trust model both pages read, and the header alert set
                  shaped from it — never a banner in the page's flow
 web/usage.js     the usage meter's arithmetic: how much of a window has gone,
                  and when it resets (Eastern, via `date -r` — never jq)
-web/sprites.js   the map's pixel art, as text grids, and the SVG paths drawn
-                 from them. The only file that draws a pixel
+web/sprites.js   the map's pixel art: the characters as text grids, and the
+                 world (hedges, walls, floors, rugs) painted by rule as
+                 border-image 9-slices. The only file that draws a pixel
 tests/run.sh     shellcheck + the assertion suite; the only test entry point
 ```
 
