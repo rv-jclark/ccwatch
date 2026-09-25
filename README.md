@@ -619,6 +619,11 @@ clicking it does not steal focus from the terminal you are working in. All four
 are asserted by `./app/build.sh --selftest`, because they fail **invisibly**: a
 panel at the wrong level looks perfect until something covers it.
 
+And one it must **not** have: `.fullSizeContentView`. It lays the web view under
+the title bar, and a `WKWebView` takes every click it covers, so the strip you
+drag a window by was the page's header — the overlay could be resized and not
+moved. The selftest asserts the title bar is outside the content view.
+
 It supervises `serve` rather than assuming it. If something is already
 listening on the port — most likely a `ccwatch serve` you started in a terminal
 — it adopts it and labels it `not started by this app`, because killing it or
@@ -1909,6 +1914,7 @@ implementation broken in the specific way it describes:
 | remove the `%SystemRoot%\System32\bash.exe` exclusion from `BashLocator` | 1 (app-win, gated — see below) |
 | leave the overlay's web view with no navigation delegate, so a load against a dead serve fails into a blank white panel | 1 (app selftest) |
 | give a serve that ran for days no fresh restart budget, so its fourth death over the app's life is final | 1 (app selftest) |
+| put `.fullSizeContentView` back on the overlay, so the page covers the title bar and the panel cannot be dragged | 1 (app selftest) |
 | drop one character from a sprite row | 1 |
 | draw the suspected hang with the idle pose, so it differs from idle only in colour | 1 |
 | draw the raised arm into the body instead of its own group | 1 |

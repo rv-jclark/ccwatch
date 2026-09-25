@@ -103,7 +103,7 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # free port, which is the reason the shape is guarded here as well.
 # Raised by the pixel-art sprites: 1 static (sprites.js loads before the
 # script that draws with it) and 16 node checks on web/sprites.js.
-TALLY_FLOOR=494
+TALLY_FLOOR=495
 TALLY_FLOOR_NODE=259
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -1576,6 +1576,8 @@ else
     "and it checks the overlay's window level, not merely that a panel exists"
   assert_contains "$_appst" "across Spaces" "and that the overlay follows you across Spaces"
   assert_contains "$_appst" "steal focus" "and that clicking it does not take focus"
+  assert_contains "$_appst" "title bar clear of the page" \
+    "and that the page does not cover the title bar it is dragged by"
   # ⚠️ Asserted because the selftest used to DO this rather than record it:
   # it drove the live delegate, which called NSWorkspace, so every run of the
   # suite opened a browser tab on whoever ran it.

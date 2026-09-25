@@ -446,10 +446,19 @@ final class OverlayPanel: NSPanel, WKNavigationDelegate {
         let rect = saved.flatMap { NSRectFromString($0) } ?? NSRect(x: 80, y: 120, width: 460, height: 620)
         let config = WKWebViewConfiguration()
         webView = WKWebView(frame: .zero, configuration: config)
+        // ⚠️ No `.fullSizeContentView`. With it the web view extended up under
+        // the title bar, and a WKWebView takes every mouse-down it covers — so
+        // the one strip you grab to move a window was the page's header, and
+        // the overlay could be resized but not moved. Reported from real use.
+        // `isMovableByWindowBackground` does not help: the web view is not
+        // background. The title bar has to be a region the page is not in.
         super.init(contentRect: rect,
                    styleMask: [.nonactivatingPanel, .titled, .closable, .resizable,
-                               .fullSizeContentView, .utilityWindow],
+                               .utilityWindow],
                    backing: .buffered, defer: false)
+        // The saved value is a FRAME (see close()), and init takes a content
+        // rect: without this the window grew by a title bar every launch.
+        if saved != nil { setFrame(rect, display: false) }
         isFloatingPanel = true
         level = .statusBar
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -865,6 +874,11 @@ func selftest() -> Int32 {
     check(panel.isFloatingPanel, "and is a floating panel")
     check(panel.styleMask.contains(.nonactivatingPanel), "and does not steal focus when clicked")
     check(!panel.hidesOnDeactivate, "and does not vanish when another app activates")
+    // ⚠️ Whatever the content view covers, the web view swallows the mouse in.
+    // If it reaches the top edge there is no title bar left to drag by.
+    let contentH = panel.contentView?.frame.height ?? panel.frame.height
+    check(panel.frame.height - contentH > 0,
+          "and leaves the title bar clear of the page, so it can be dragged")
 
     check(!ServeSupervisor.portIsOpen(1), "the port probe reports a closed port as closed")
     check(!ServeSupervisor.budgetResets(afterRunning: 5),
