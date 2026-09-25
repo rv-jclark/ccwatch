@@ -2024,6 +2024,7 @@ implementation broken in the specific way it describes:
 | size the figure in `em`, so it resolves against the button's 13px font and a 16-cell sprite renders at 26px | 1 (verify-ui) — not a planted mutation: this was the implementation, and the check's first run caught it |
 | put `.zones` back to a flex column, so every branch takes its room's full width | 2 (verify-ui: the default width and 470px) |
 | leave `} background:…; }` where `.agent:hover {` was, which also drops `.agent:focus-visible` | 1 (verify-ui) — not a planted mutation: a7b7967 shipped it, and it was found by reading the CSS |
+| stop removing the previous screenshot, and have the browser write nothing, so last run's images are left in place | 2 (verify-ui --shots). Removing the `rm` alone is not a reliable mutation: whether the old code left a stale image or hung for ten minutes in `wait` depended on whether Chrome survived the early TERM, and here it did — so the check needed the browser taken out as well to go red |
 
 The four `app-win` rows above were confirmed by tracing the C# against the
 mutation by hand, not by watching `tests/run.sh` turn red: there is no .NET

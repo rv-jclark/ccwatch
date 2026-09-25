@@ -5787,7 +5787,18 @@ EOF
   if [ -n "$shots" ]; then
     mkdir -p "$shots"
     local p
+    # A screenshot is only evidence if this run wrote it; see the check below.
+    # The sleep is because `-nt` compares whole seconds under bash 3.2, and a
+    # shot written in the marker's own second would read as not newer.
+    : > "$work/shots-started"; sleep 1
     for p in map ""; do
+      # ⚠️ Remove the old image first. The wait below ends on `-s`, and a file
+      # left by the previous run is already non-empty, so it broke at once
+      # and signalled a Chrome that had barely started. Either it died before
+      # writing, and the run reported "screenshots:" over images a day old
+      # while the page they were meant to show had changed, or it ignored
+      # the TERM and `wait` sat on it for ten minutes — both measured.
+      rm -f "$shots/${p:-table}.png"
       "$chrome" --headless=new --disable-gpu --no-first-run --no-default-browser-check \
         --user-data-dir="$work/profile" --window-size="$vw,$vh" \
         --virtual-time-budget=12000 --hide-scrollbars \
@@ -5801,6 +5812,12 @@ EOF
       done
       kill "$shot_pid" 2>/dev/null
       wait "$shot_pid" 2>/dev/null || true
+      if [ "$shots/${p:-table}.png" -nt "$work/shots-started" ]; then
+        pass=$((pass + 1)); say "  ${_c_green}✓${_c_reset} the ${p:-table} screenshot was written by this run"
+      else
+        fail=$((fail + 1)); say "  ${_c_red}✗${_c_reset} the ${p:-table} screenshot was written by this run"
+        printf '      %s\n' "$shots/${p:-table}.png is missing or older than this run" >&2
+      fi
     done
     say "${_c_dim}screenshots: $shots${_c_reset}"
   fi
