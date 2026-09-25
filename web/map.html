@@ -120,7 +120,10 @@
       grid-template-columns:repeat(auto-fit, minmax(min(150px, 100%), 1fr));
     }
     #boardinner .building { padding:.3rem .35rem; }  /* frame: see above */
-    #boardinner .zones { gap:.25rem; }
+    /* The branch floor drops with the figures, for the reason the repo floor
+       does above: 7.75rem is still two 3.2rem figures and the rug round them. */
+    #boardinner .zones { gap:.25rem;
+      grid-template-columns:repeat(auto-fit, minmax(min(7.75rem, 100%), 1fr)); }
     #boardinner .zone { padding-left:.3rem; }
     #boardinner .figures { gap:.1rem; }
     #boardinner .agent { width:3.2rem; padding:.05rem .1rem .1rem; }
@@ -500,7 +503,17 @@
   .deploy-badge { font-size:10px; color:var(--ok); }
 
   /* A branch, and the figures standing in it. */
-  .zones { display:flex; flex-direction:column; gap:.4rem; }
+  /* ⚠️ A grid, not a flex column. As a column every branch took the full
+     width of its room whatever it held, so a repo with four branches of one
+     agent each was four stacked rugs of mostly empty floor — the same dead
+     space auto-fit removed one level up, in `.buildings`. auto-fit for the
+     same reason as there: a repo with one branch still gets one full-width
+     rug. 10.5rem is two figures side by side (2 x 4.4rem, the gap, the rug's
+     padding and border) so a rug never narrows to one figure per line; the
+     branch name ellipsises first. Rugs in a row share the tallest one's
+     height, which is the trade for them lining up. */
+  .zones { display:grid; gap:.4rem;
+           grid-template-columns:repeat(auto-fit, minmax(min(10.5rem, 100%), 1fr)); }
   /* A branch is a rug on the floor. Its field is a flat colour, not a
      pattern, because the branch's name is printed on it. */
   .zone { border:4px solid transparent; border-image:var(--rug) 2 / 4px repeat;

@@ -2022,6 +2022,7 @@ implementation broken in the specific way it describes:
 | have the sprite module return no paths, leaving figure-sized empty boxes | 1 (verify-ui) |
 | load `sprites.js` after the script that draws with it, or not at all | 1 |
 | size the figure in `em`, so it resolves against the button's 13px font and a 16-cell sprite renders at 26px | 1 (verify-ui) — not a planted mutation: this was the implementation, and the check's first run caught it |
+| put `.zones` back to a flex column, so every branch takes its room's full width | 2 (verify-ui: the default width and 470px) |
 | leave `} background:…; }` where `.agent:hover {` was, which also drops `.agent:focus-visible` | 1 (verify-ui) — not a planted mutation: a7b7967 shipped it, and it was found by reading the CSS |
 
 The four `app-win` rows above were confirmed by tracing the C# against the

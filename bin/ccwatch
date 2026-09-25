@@ -4466,6 +4466,27 @@ function boxOf(el) {
 function onScreen(b, vw, vh) {
   return b.r > 0 && b.l < vw && b.b > 0 && b.t < vh && b.w > 0 && b.h > 0;
 }
+// ⚠️ Branches share a row when their room has space for two. As a flex
+// column every branch took the room's full width, and the markup is identical
+// either way, so only geometry can see it. It asks only of a room wide enough
+// for two floor-width rugs, so a narrow card that honestly holds one per row
+// is not counted against it.
+function branchesShareRow(doc, win, name, floorRem) {
+  var rem = parseFloat(win.getComputedStyle(doc.documentElement).fontSize);
+  var pick = null;
+  [].slice.call(doc.querySelectorAll(".zones")).forEach(function (z) {
+    var gap = parseFloat(win.getComputedStyle(z).columnGap) || 0;
+    if (!pick && z.children.length >= 2 && z.clientWidth >= 2 * floorRem * rem + gap) { pick = z; }
+  });
+  if (!pick) {
+    skip(name, "no repo on this machine has two branches in a room wide enough for two");
+    return;
+  }
+  var aB = boxOf(pick.children[0]), bB = boxOf(pick.children[1]);
+  check(name, Math.abs(aB.t - bB.t) < 2 && bB.l > aB.l,
+        "rug tops " + Math.round(aB.t) + " and " + Math.round(bB.t) + ", lefts " +
+        Math.round(aB.l) + " and " + Math.round(bB.l) + " in a " + pick.clientWidth + "px room");
+}
 
 function run(doc, win) {
   var de = doc.documentElement;
@@ -4556,6 +4577,7 @@ function run(doc, win) {
     skip("a repo with an unfinished run stands behind a different wall",
          "the board needs one repo with an unfinished run and one without");
   }
+  branchesShareRow(doc, win, "two branches in one repo share a row rather than stacking", 10.5);
   // ⚠️ The figure's hover and focus rules PARSED, asserted on the stylesheet.
   // An edit once left `} background:…; }` where `.agent:hover {` had been:
   // the stray text became the selector prelude of the next rule, so the CSS
@@ -5177,6 +5199,7 @@ function run(doc, win) {
         skip("two repos in one owner share a row rather than stacking",
              "no owner on this machine has two repos to place");
       }
+      branchesShareRow(doc, win, "and at 470px two branches in one repo still share a row", 7.75);
 
       var figW = boxOf(doc.querySelector(".agent")).w;
       check("and a figure is scaled down so more of them fit per row",
