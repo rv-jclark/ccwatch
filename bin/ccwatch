@@ -2085,6 +2085,15 @@ cmd_bar() {
       elif s < 86400 then "\((s/3600)|floor)h"
       else                "\((s/86400)|floor)d" end;
 
+    # The time left on a rate-limit window, with one decimal once it is in
+    # hours or days: "resets in 2h" was asked about because at 2h59m it is an
+    # hour short of the truth. Floored, never rounded, so it can say the window
+    # resets sooner than it does but never later. A whole number drops the
+    # ".0" -- "2h", not "2.0h" -- so the common case costs no width.
+    def rdur(s): if s == null or s < 3600 then dur(s)
+      elif s < 86400 then "\((s/360)|floor|./10)h"
+      else                "\((s/8640)|floor|./10)d" end;
+
     # ⚠️ A security control, not tidying. A bare pipe opens SwiftBar parameter
     # parsing and `bash=` is one of the parameters it accepts, so a session
     # name or a waitingFor note carrying one would put a CLICKABLE COMMAND in
@@ -2157,7 +2166,7 @@ cmd_bar() {
              and (.usage.five_hour != null)
         then "\(.usage.five_hour.used_percentage|floor)%"
              + ( if .usage.five_hour.resets_at == null then ""
-                 else " · resets in \(dur(.usage.five_hour.resets_at - $now))" end )
+                 else " · resets in \(rdur(.usage.five_hour.resets_at - $now))" end )
         else "cc \($live)" end )                          as $lead
 
     | ( [ $lead, (if $conditions == "" then empty else $conditions end) ]
@@ -2234,8 +2243,8 @@ cmd_bar() {
                   else "\(nm) · \(x.used_percentage|floor)% used"
                        + ( if x.resets_at == null then ""
                            elif clock == ""
-                           then " · resets in \(dur(x.resets_at - $now))"
-                           else " · resets in \(dur(x.resets_at - $now)) · \(clock)"
+                           then " · resets in \(rdur(x.resets_at - $now))"
+                           else " · resets in \(rdur(x.resets_at - $now)) · \(clock)"
                            end )
                   end;
                 [ gauge("5h"; .usage.five_hour; $c5),

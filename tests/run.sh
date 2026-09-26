@@ -107,7 +107,7 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # CSS slices with FRAME, which need node to read FRAME.
 # Raised by the comms marker: 1 static (comms.js loads before the inline
 # script) and 22 node checks on web/comms.js and the envelope sprite.
-TALLY_FLOOR=499
+TALLY_FLOOR=502
 TALLY_FLOOR_NODE=289
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -1960,6 +1960,17 @@ python3 -c "import json,time; n=int(time.time()); print(json.dumps({'at':n,'five
   > "$BCH/usage.json"
 _barreset=$(bar_run)
 assert_contains "$_barreset" "resets in 2h" "the menu prints how long is left on the window"
+# ⚠️ And a whole hour as "2h", not "2.0h". 7500s is 2.08h, which floors to 2.0.
+assert_not_contains "$_barreset" "2.0h" "a whole number of hours is printed without a .0"
+# With a decimal when it is not whole: at 2h59m "2h" is an hour short. 9300s is
+# 2.58h, floored to 2.5 — and floored, so a slow suite (down to 9000s left)
+# still reads 2.5, and it can never read later than the truth.
+python3 -c "import json,time; n=int(time.time()); print(json.dumps({'at':n,'five_hour':{'used_percentage':37.0,'resets_at':n+9300}}))" \
+  > "$BCH/usage.json"
+assert_contains "$(bar_run --title)" "resets in 2.5h" "the title gives the hours to one decimal"
+assert_contains "$(bar_run)" "resets in 2.5h ·" "and so does the dropdown"
+python3 -c "import json,time; n=int(time.time()); print(json.dumps({'at':n,'five_hour':{'used_percentage':37.0,'resets_at':n+7500}}))" \
+  > "$BCH/usage.json"
 assert_contains "$_barreset" "EDT" "and the wall clock it resets at, with the zone"
 # A bare percentage does not say whether it is what you have spent or what is
 # left, and the dropdown has room to say which.

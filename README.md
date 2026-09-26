@@ -700,7 +700,10 @@ a session blocked on you right now, and on a laptop the notch leaves little
 room: an item that does not fit is simply not drawn, which is a far worse
 absence than a count moved one click away. So the title and its icon leave
 them out, and the dropdown's summary line and `UNFINISHED RUNS` block still
-list every one.
+list every one. The reset time is floored to one decimal once it is in hours —
+`resets in 2.5h`, and `2h` rather than `2.0h` when it is whole — because at
+2h59m a bare `2h` is an hour short, and flooring means it can read early but
+never late.
 
 Nothing is behind a submenu, though the format offers them and they would tidy
 the list up considerably. A submenu is a collapsed badge: it turns a crashed
@@ -1882,6 +1885,8 @@ implementation broken in the specific way it describes:
 | add an all-clear clause to a menu bar title with nothing wrong | 1 |
 | put the unfinished-run count back into the menu bar title | 1 |
 | flag unfinished runs with the title's icon while the title names no condition | 1 |
+| print a reset time in whole hours only | 2 |
+| print a whole-hour reset time as `2.0h` | 1 |
 | drop the words that say a crashed phase needs a rerun | 1 |
 | render an empty menu for a machine with no live sessions | 2 |
 | map `sev` to a different glyph in the menu than the table's awk does | 2 |
