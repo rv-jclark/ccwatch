@@ -107,7 +107,7 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # CSS slices with FRAME, which need node to read FRAME.
 # Raised by the comms marker: 1 static (comms.js loads before the inline
 # script) and 22 node checks on web/comms.js and the envelope sprite.
-TALLY_FLOOR=496
+TALLY_FLOOR=499
 TALLY_FLOOR_NODE=289
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -609,6 +609,20 @@ assert_eq "$(printf '%s' "$_old" | jq '.unfinished | length')" "0" \
   "the window excludes a run older than the cutoff"
 assert_eq "$(printf '%s' "$_old" | jq '.unfinished_old')" "1" \
   "and counts what it withheld, so the omission is stated rather than silent"
+
+# The menu bar title leaves unfinished runs out: they already stopped and ask
+# nothing of you this minute, and the width beside a notch is scarce. The
+# dropdown still states them, so leaving them out of the title does not make
+# them an absence. Here, where the fixture is known to hold one (asserted above).
+_unbar=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-un" CCWATCH_HOME="$WORK/ccwatch-events" \
+         NO_COLOR=1 "$CCWATCH" bar --no-actions 2>/dev/null)
+assert_not_contains "$(printf '%s\n' "$_unbar" | head -1)" "unfinished" \
+  "the menu bar title does not spend its width on unfinished runs"
+# Nor the icon or colour, which with no word beside them would be colour
+# carrying a meaning alone.
+assert_not_contains "$(printf '%s\n' "$_unbar" | head -1)" "sfimage=" \
+  "and does not flag them with an icon the title has no word for"
+assert_contains "$_unbar" "1 unfinished run(s)" "while the dropdown still states them"
 
 # --- rendering, since a table nobody can read is not an answer --------------
 _out=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-un" CCWATCH_HOME="$WORK/ccwatch-events" \

@@ -695,6 +695,13 @@ condition it does find goes in the title rather than only the loudest, because
 the title is the one surface visible without a click and a condition left out
 of it reads as no condition at all.
 
+Unfinished runs are the one exception. They are runs that already stopped, not
+a session blocked on you right now, and on a laptop the notch leaves little
+room: an item that does not fit is simply not drawn, which is a far worse
+absence than a count moved one click away. So the title and its icon leave
+them out, and the dropdown's summary line and `UNFINISHED RUNS` block still
+list every one.
+
 Nothing is behind a submenu, though the format offers them and they would tidy
 the list up considerably. A submenu is a collapsed badge: it turns a crashed
 phase into something you have to hover to discover, which is the same
@@ -1873,6 +1880,8 @@ implementation broken in the specific way it describes:
 | drop `parse_failed` from the menu bar title | 1 |
 | drop `parse_failed` from the menu's dropdown sentence | 2 |
 | add an all-clear clause to a menu bar title with nothing wrong | 1 |
+| put the unfinished-run count back into the menu bar title | 1 |
+| flag unfinished runs with the title's icon while the title names no condition | 1 |
 | drop the words that say a crashed phase needs a rerun | 1 |
 | render an empty menu for a machine with no live sessions | 2 |
 | map `sev` to a different glyph in the menu than the table's awk does | 2 |

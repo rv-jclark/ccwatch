@@ -2120,10 +2120,17 @@ cmd_bar() {
     # Normal is the quiet case: with no condition found the title is the live
     # count and nothing else, because a title that always says something is
     # one you stop reading.
+    #
+    # Unfinished runs are the one exception, left out of the title AND its
+    # icon and colour. They are runs that already stopped, not a session
+    # blocked right now, and "1 unfinished" spent width the notch leaves little
+    # of on something that needs nothing from you this minute. The summary line
+    # of the dropdown and its UNFINISHED RUNS block still list every one. The icon
+    # goes with the words, because a red triangle beside a title that names no
+    # condition would leave the colour carrying the meaning alone (rule VII).
     | ( [ (if $waiting > 0 then "\($waiting) waiting"    else empty end),
           (if $asking  > 0 then "\($asking) asking"      else empty end),
           (if $suspect > 0 then "\($suspect) suspect"    else empty end),
-          (if $unfin   > 0 then "\($unfin) unfinished"   else empty end),
           (if $bad     > 0 then "\($bad) unreadable"     else empty end) ]
         | join(" · ") )                              as $conditions
 
@@ -2163,14 +2170,14 @@ cmd_bar() {
     # glance is all anyone gives it.
     #
     # Pink for "a session is blocked on you", which is the only state where the
-    # answer is you rather than waiting. Red for suspect/unfinished/unreadable.
+    # answer is you rather than waiting. Red for suspect/unreadable.
     # Both are light enough to read on a dark menu bar and dark enough on a
     # light one.
     | ( [ (if   $waiting > 0 or $asking > 0 then "sfimage=bell.badge"
-           elif $suspect > 0 or $unfin > 0 or $bad > 0 then "sfimage=exclamationmark.triangle"
+           elif $suspect > 0 or $bad > 0 then "sfimage=exclamationmark.triangle"
            else empty end),
           (if   $waiting > 0 or $asking > 0 then "color=#ff6fb5"
-           elif $suspect > 0 or $unfin > 0 or $bad > 0 then "color=#ff6b6b"
+           elif $suspect > 0 or $bad > 0 then "color=#ff6b6b"
            else empty end) ]
         | if length == 0 then "" else " | " + join(" ") end ) as $icon
 
