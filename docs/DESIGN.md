@@ -1549,9 +1549,12 @@ ccwatch install-hooks         # never miss a prompt that opened between polls
 change and asks, and a second place asking the same question is a second place
 to keep honest.
 
-For the menu bar, build the app ([The menu bar app](../README.md#the-menu-bar-app)).
-`setup` still ends by printing the SwiftBar plugin command. That plugin has
-been superseded, and you only need it on a machine that cannot build the app.
+On macOS it ends by printing the command that builds and installs the menu bar
+app ([The menu bar app](../README.md#the-menu-bar-app)), for the same reason it
+doesn't run it: building needs `swiftc` and writes `/Applications`. It used to
+print the SwiftBar plugin instead. Because that line is the last thing a new
+user reads, it sent every one of them to install a third-party host for the
+fallback, while the app it had been replaced by went unmentioned.
 
 ## Tests
 
@@ -1741,7 +1744,9 @@ implementation broken in the specific way it describes:
 | repoint an existing symlink even when the answer was no | 2 |
 | drop `setup`'s `PATH` check | 1 |
 | list an absent tool without saying what its absence costs | 1 |
-| have `setup` install the SwiftBar plugin rather than printing the path | 1 |
+| have `setup` point at the SwiftBar plugin instead of the menu bar app | 2 |
+| offer the macOS app from `setup` on Windows too | 1 |
+| have a Windows `setup` stop before its optional steps (the guard behind the line above) | 1 |
 | stop toggling `.selected`, so the selected row's figure carries no mark | 1 (verify-ui) |
 | leave the wire overlay unsized, so every wire is clipped to the SVG's default 300x150 | 1 (verify-ui) |
 | draw every edge on the map again, whether or not anything is looked at | 2 node, 9 verify-ui (10 on a machine with live peer traffic) |

@@ -107,7 +107,9 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # CSS slices with FRAME, which need node to read FRAME.
 # Raised by the comms marker: 1 static (comms.js loads before the inline
 # script) and 22 node checks on web/comms.js and the envelope sprite.
-TALLY_FLOOR=502
+# Raised by 3 for setup's menu bar hint: the SwiftBar line became the app, and
+# gained a Windows half and the guard that keeps that half from passing empty.
+TALLY_FLOOR=505
 TALLY_FLOOR_NODE=289
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -1196,11 +1198,25 @@ else
   assert_contains "$_su" "deploy panel available" "and a present one is confirmed"
 fi
 
-# The menu bar plugin is pointed at rather than installed: its directory is
-# SwiftBar's, and setup has no business guessing whether that is where you
-# want it.
-assert_contains "$_su" "extra/swiftbar/ccwatch.10s.sh" \
-  "setup prints the plugin path rather than symlinking into SwiftBar itself"
+# The menu bar is the app, printed rather than built: building needs swiftc and
+# writes /Applications. It used to print the SwiftBar plugin the app superseded,
+# which sent every new user to install a third-party host for the fallback.
+# Platform pinned both ways, because the app is macOS-only and the suite also
+# runs on a Windows runner.
+_suapp=$(printf '' | CCWATCH_PLATFORM=macos CLAUDE_CONFIG_DIR="$FH" \
+         CCWATCH_HOME="$WORK/setup-cch" NO_COLOR=1 "$CCWATCH" setup --bin-dir "$SUB" 2>&1)
+assert_contains "$_suapp" "app/build.sh' --install --run" \
+  "setup points at the menu bar app, with the command that installs it"
+assert_not_contains "$_suapp" "SwiftBar" \
+  "and no longer at the superseded SwiftBar plugin"
+_suwin=$(printf '' | CCWATCH_PLATFORM=windows CLAUDE_CONFIG_DIR="$FH" \
+         CCWATCH_HOME="$WORK/setup-cch" NO_COLOR=1 "$CCWATCH" setup --bin-dir "$SUB" 2>&1)
+# ⚠️ Only an absence if setup got that far: a Windows run that died early would
+# pass the next line by printing nothing at all.
+assert_contains "$_suwin" "Optional, each asks first" \
+  "a Windows setup reaches the end of its advice"
+assert_not_contains "$_suwin" "app/build.sh" \
+  "and does not offer a macOS app on Windows"
 assert_contains "$_su" "install-statusline" "and names the optional steps it does not take"
 
 # =============================================================== platform ====
