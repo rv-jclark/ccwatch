@@ -2,12 +2,15 @@
 
 A single bash script that reports on every Claude Code session on the machine
 and which one is stuck. No build, no dependencies to install, no package
-manifest. Read `README.md` first: it explains *why* each verdict is shaped the
-way it is, and most of the rules below are only sensible in light of that.
+manifest. Read `docs/DESIGN.md` first: it explains *why* each verdict is shaped
+the way it is, and most of the rules below are only sensible in light of that.
 
 ## Layout
 
 ```
+README.md        for someone installing and using it — keep it that way
+docs/DESIGN.md   why every verdict is shaped as it is, the bugs behind each
+                 rule, and the mutation table
 bin/ccwatch      the whole tool (~4900 lines of bash + embedded python3/jq)
 app/Sources/     the macOS menu bar app: the status item, the always-on-top
                  overlay, and the `ccwatch serve` it supervises. Swift, and the
@@ -37,7 +40,7 @@ tests/run.sh     shellcheck + the assertion suite; the only test entry point
 
 `web/camera.js` and `web/plots.js` are **gone** — the pan-and-zoom camera and
 its identity→coordinate placement. Do not reintroduce a camera here without
-reading the "scrolling list of blocks" section of `README.md` first: the
+reading the "scrolling list of blocks" section of `docs/DESIGN.md` first: the
 camera's default view was measured showing 1 of 4 territories and hiding 2 of
 8 sessions off-screen, and the whole suite was green while it did.
 
@@ -305,7 +308,7 @@ produced a specific wrong output that someone believed.
   specific way the assertion describes, confirm the assertion fails, then
   restore. An assertion that passes against a broken implementation is worse
   than none, because it is counted as coverage. Add a row to the mutation table
-  in `README.md`.
+  in `docs/DESIGN.md`.
 - **And mutation-check every check, not just the ones in `tests/run.sh`.** The
   rule above reads as though it were about the suite, and that reading is how a
   whole day's worth of broken checks got trusted. It applies to anything whose
@@ -340,10 +343,13 @@ produced a specific wrong output that someone believed.
 Comments say **why**, and name the failure that motivated the code — the `⚠️`
 comments are the load-bearing ones and should not be trimmed. Prefer the
 concrete number that was measured ("850KB from the end of a real 4.9MB
-transcript") over an adjective. This applies to `README.md` too: it documents
-the reasoning and the bugs found, not just the flags.
+transcript") over an adjective. This applies to `docs/DESIGN.md` too: it
+documents the reasoning and the bugs found, not just the flags. `README.md` is
+the other half and is written for someone installing the tool: what to run,
+what the output means, what to do when it goes wrong. Rationale goes in
+`docs/DESIGN.md`, and the README links to it rather than repeating it.
 
-Keep examples in the README **generic** (`acme/checkout-api`, `web-app`,
+Keep examples in the docs **generic** (`acme/checkout-api`, `web-app`,
 `pricing`). Do not paste real session names, repository slugs, feature ids or
 costs from the machine this is developed on into documentation or fixtures.
 
@@ -362,7 +368,7 @@ nothing.
 
 **Small, logically grouped commits.** One reason-to-change per commit, and
 everything belonging to that reason in it — the implementation, its assertion,
-its `README.md` row. A reviewer should be able to read the subject, then the
+its `docs/DESIGN.md` row. A reviewer should be able to read the subject, then the
 diff, and find nothing in the diff that the subject did not promise.
 
 - Do not batch unrelated changes because they happened in the same sitting; a
@@ -374,7 +380,7 @@ diff, and find nothing in the diff that the subject did not promise.
   behavioural change beside them stays reviewable.
 
 **Commit finished work without being asked.** A change that is complete — its
-implementation, its assertion, its `README.md` row, and a green `./tests/run.sh`
+implementation, its assertion, its `docs/DESIGN.md` row, and a green `./tests/run.sh`
 — gets committed. Leaving it sitting in the working tree is not caution: it
 hands back a dirty tree for somebody else to sort out, it makes the next
 session's `git status` ambiguous about what was deliberate, and it loses the

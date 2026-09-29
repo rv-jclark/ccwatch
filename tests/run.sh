@@ -5118,7 +5118,7 @@ fi
 # reflow the page under a condition. Static, so it holds with no node and no
 # browser. ⚠️ The element ids are what is asserted, not the CSS: a grep for a
 # declaration is the check that once failed on the comment explaining the
-# declaration (see the mutation table in README.md).
+# declaration (see the mutation table in docs/DESIGN.md).
 for _pf in "$ROOT/web/index.html" "$ROOT/web/map.html"; do
   assert_contains "$(cat "$_pf")" '<script src="/alerts.js">' \
     "$_pf loads the shared alert module"

@@ -339,7 +339,7 @@
   //
   // ⚠️ Every frame is a 9-slice for CSS `border-image`, not a picture the
   // layout is fitted into. The board is ordinary flow layout on purpose (see
-  // README, "a scrolling list of blocks"): it cannot lose a session off-screen,
+  // docs/DESIGN.md, "a scrolling list of blocks"): it cannot lose a session off-screen,
   // and a world drawn as a fixed scene would bring back exactly the placement
   // problem the camera had. A border-image decorates whatever box flow layout
   // produced, so the map stays a list that happens to look like a place.

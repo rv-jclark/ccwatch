@@ -76,8 +76,8 @@ may be weakened on the grounds that the other exists. `ccwatch serve
 Messages injected this way arrive in the receiver as an ordinary user turn
 labelled `from: ccwatch`, and Claude Code wraps them with its own warning that a
 peer cannot grant permission escalation. `ccwatch` does not and cannot answer a
-permission prompt or an `AskUserQuestion` dialog on your behalf — see the README
-section on that limitation.
+permission prompt or an `AskUserQuestion` dialog on your behalf — see the
+"You can read the question" section of `docs/DESIGN.md`.
 
 ## Unsupported interfaces
 

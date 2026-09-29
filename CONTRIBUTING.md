@@ -18,10 +18,10 @@ expected to be. That means: break the implementation in the specific way your
 assertion describes, run the suite, confirm your assertion *fails*, then restore
 the code. An assertion that passes against a broken implementation is worse than
 no assertion at all, because it gets counted as coverage. It has happened here
-at least once, and the note in `README.md` about it is a warning, not a boast.
+at least once, and the note in `docs/DESIGN.md` about it is a warning, not a boast.
 
-When you add an assertion, add a row to the mutation table at the bottom of
-`README.md` naming the mutation and how many assertions caught it.
+When you add an assertion, add a row to the mutation table in
+`docs/DESIGN.md` (under Tests) naming the mutation and how many assertions caught it.
 
 ## What a good change looks like
 
@@ -40,7 +40,7 @@ When you add an assertion, add a row to the mutation table at the bottom of
   be clean.
 - **It keeps documentation examples generic.** Please do not paste real session
   names, repository slugs, feature ids or costs from your own machine into the
-  README or into fixtures.
+  docs or into fixtures.
 
 ## Commits
 

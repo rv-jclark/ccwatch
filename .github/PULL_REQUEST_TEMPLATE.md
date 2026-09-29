@@ -12,7 +12,7 @@ failure belongs in a comment next to the code as well, so it does not come back.
 - [ ] New assertions were **mutation-checked**: the implementation was broken in
       the specific way each assertion describes and the assertion was confirmed
       to fail
-- [ ] A row was added to the mutation table in `README.md`
+- [ ] A row was added to the mutation table in `docs/DESIGN.md`
 - [ ] `shellcheck -x -S warning` is clean (the suite runs it)
 - [ ] No bash 4 constructs — macOS ships bash 3.2, and the suite greps for them
 - [ ] Any new output degrades honestly when its signal is unavailable: it says
