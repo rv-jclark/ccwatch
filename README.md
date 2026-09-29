@@ -23,13 +23,19 @@ UNFINISHED RUNS — stopped in the last 24h, and no live session is holding them
 
 ## Install
 
-macOS, and `jq` is the only dependency you may not already have.
+macOS, and `jq` is the only dependency you may not already have. Windows is
+in progress and **does not work yet**: its first real CI run returned no rows
+at all, so do not hand it to someone on Windows.
 
 ```bash
 brew install jq                                   # if you do not have it
 git clone https://github.com/rv-jclark/ccwatch.git
 cd ccwatch && ./bin/ccwatch setup                 # puts ccwatch on your PATH
 ```
+
+Clone it somewhere you mean to keep it. `setup` links to the checkout rather
+than copying out of it, so `git pull` is the upgrade, and moving or deleting
+the checkout breaks the command.
 
 `setup` picks the first writable of `~/.local/bin`, `/opt/homebrew/bin`,
 `/usr/local/bin`, **runs what it installed** to prove the link works, and tells
@@ -48,13 +54,23 @@ ccwatch doctor               # confirm it can read what it needs to read
 ### The menu bar app
 
 ```bash
-./app/build.sh --run         # needs Xcode Command Line Tools
+xcode-select --install            # once, if you have no swiftc
+./app/build.sh --install --run    # build, copy into /Applications, launch
 ```
 
 One app owns the menu bar item, an always-on-top overlay of the map, and the
 `ccwatch serve` behind them. Its menu opens the overlay or the dashboard, and
-`Open at Login` keeps it there. First launch on someone else's machine needs
-**right-click → Open**, because the signature is ad-hoc.
+`Open at Login` keeps it there. Install it rather than running it from
+`app/build/`: `build.sh` wipes and rebuilds that directory, so a login item
+that points there disappears on the next build.
+
+The app records where the checkout is **when it is built**, because a GUI app
+does not get your shell's `PATH`. If you move the checkout, run
+`./app/build.sh --install` again.
+
+Build it on the machine that will run it. A copy built on another Mac has only
+an ad-hoc signature, and on recent macOS Gatekeeper will not open it until you
+allow it under **System Settings → Privacy & Security → Open Anyway**.
 
 ## Usage
 
@@ -97,13 +113,19 @@ ccwatch deploys          # CI/deploy runs you are waiting on
 ccwatch subscribe <wf>   # (run by an agent) tell me when that deploy lands
 ccwatch peers            # which sessions have been talking to each other
 ccwatch kill <who>       # stop a session — refuses when it would cost you work
+ccwatch subs             # current deploy subscriptions (unsubscribe <wf> to drop one)
 ccwatch daemon           # watch deploys and notify subscribers while you are away
 ccwatch log              # recent hook events (needs install-hooks)
 ccwatch setup            # put it on PATH, once, from the checkout
+ccwatch install-hooks    # record prompts that open and close between polls
+ccwatch install-statusline # report rate limits and context fill
 ccwatch doctor           # check that ccwatch's own view is trustworthy
+ccwatch verify-ui        # render the pages in headless Chrome and check them
 ```
 
-`ccwatch serve --read-only` if you would rather the browser could not send.
+`ccwatch serve --read-only` if you would rather the browser could not send, and
+`--allow-kill` if you want the page to be able to stop a session — it cannot by
+default. `ccwatch serve --stop` stops every serve this machine started.
 </details>
 
 `git`/`gh` are optional — without them the deploy panel is absent and says so,
@@ -650,9 +672,11 @@ host intervenes. A stale or hand-typed `sid` opens nothing rather than a panel
 titled `undefined`.
 
 `Open at Login` registers the app with `SMAppService`, and only when you click
-it. Signing is ad-hoc, so the first launch on someone else's machine needs
-**right-click → Open**; notarising is the upgrade and needs an Apple Developer
-account.
+it. Signing is ad-hoc, which is fine for an app built on the machine it runs
+on. A copied build has to be allowed under **System Settings → Privacy &
+Security → Open Anyway**, since right-click → Open no longer overrides
+Gatekeeper on recent macOS. Notarising would remove that step, and it needs an
+Apple Developer account.
 
 <details>
 <summary>SwiftBar/xbar plugin (superseded)</summary>
@@ -1646,17 +1670,13 @@ ccwatch install-statusline    # wrap your statusline to report usage + context
 ccwatch install-hooks         # never miss a prompt that opened between polls
 ```
 
-And for the menu bar item, which `setup` prints the exact command for:
+`setup` deliberately does not run those two for you. Each already shows its own
+change and asks, and a second place asking the same question is a second place
+to keep honest.
 
-```bash
-brew install --cask swiftbar
-ln -s "$PWD/extra/swiftbar/ccwatch.10s.sh" ~/Library/Application\ Support/SwiftBar/
-```
-
-`setup` deliberately does not run those three for you. Each already shows its
-own change and asks, and a second place asking the same question is a second
-place to keep honest; SwiftBar's plugin directory is not one this should guess
-at.
+For the menu bar, build the app ([The menu bar app](#the-menu-bar-app)).
+`setup` still ends by printing the SwiftBar plugin command. That plugin has
+been superseded, and you only need it on a machine that cannot build the app.
 
 ### Requirements
 
@@ -1671,7 +1691,11 @@ at.
 
 ### Uninstall
 
+If you installed the app, untick **Open at Login** in its menu and choose
+**Quit ccwatch** first. Otherwise the login item outlives the app it points at.
+
 ```bash
+ccwatch serve --stop                  # any serve still running
 rm "$(command -v ccwatch)" && rm -rf ~/.claude/ccwatch
 rm -rf /Applications/ccwatch.app      # if you installed the app
 ```
@@ -1712,6 +1736,8 @@ All environment variables, all optional.
 | `CCWATCH_DEPLOY_TTL` | `60` | seconds to cache `gh` results |
 | `CCWATCH_PORT` | `8787` | port for `ccwatch serve`, and the one `ccwatch bar` probes to decide whether to link to a dashboard or offer to start one |
 | `CCWATCH_IDLE_GRACE` | `15` | seconds `/api/state` may go unread before `ccwatch serve` stops collecting |
+| `CCWATCH_SERVE_IDLE_EXIT` | `1800` | seconds `/api/state` may go unread before `ccwatch serve` exits, so a forgotten server does not linger. `0` disables it. A browser tab or the menu bar app keeps it alive |
+| `CCWATCH_CHROME` | | path to a Chrome/Chromium binary for `ccwatch verify-ui`, if it cannot find one |
 | `CCWATCH_SNAPSHOT_TIMEOUT` | `90` | seconds the snapshot collector may run before it is reported as a failed collection |
 | `CCWATCH_TRANSCRIPT_TIMEOUT` | `30` | seconds a transcript read may take before the panel is told it was given up on. Raise it on a slow host rather than lose the panel |
 | `CCWATCH_SNAPSHOT_CADENCE` | `2` | seconds between snapshot collections while the feed is being read; settable so an assertion can make the cadence longer than the exchange it measures |
@@ -1726,12 +1752,16 @@ distinct word, so `ccwatch once | grep HUNG` works, and so does a screen reader.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 188 assertions
+./tests/run.sh          # shellcheck, then the whole assertion suite
 ```
 
-CI runs the same script on macOS and on Windows (under the runner's Git Bash,
+CI runs the same script on macOS and on Windows. The Windows job is
+`continue-on-error` because the Windows read path does not work yet: its first
+real run had 145 failures, nearly all an empty result. What follows is the
+design that job is working towards. It does not describe a platform that works
+today. Windows runs under the runner's Git Bash,
 not WSL — WSL cannot see Windows process ids, which is the corroborating
-signal behind every verdict). Every host-dependent measurement goes through a
+signal behind every verdict. Every host-dependent measurement goes through a
 named probe in the `platform` section: macOS keeps `ps -o lstart=`, `stat -f`,
 `date -r`, `vm_stat` and `sysctl` in their BSD forms unchanged; Windows uses
 `ctypes` (`OpenProcess`/`GetProcessTimes`/`GetProcessMemoryInfo`, with a
@@ -2233,8 +2263,9 @@ point of the tool is to know more than `busy`. `ccwatch doctor` exists so that
 when the trade stops paying off, you find out from a failing check rather than
 from an empty table.
 
-It writes nothing except its own event log, its CPU-sample cache in `$TMPDIR`,
-and — only when you run `install-hooks` and confirm — your `settings.json`.
+It writes nothing except its own event log and caches under
+`~/.claude/ccwatch/`, its CPU-sample cache in `$TMPDIR`, and — only when you run
+`install-hooks` or `install-statusline` and confirm — your `settings.json`.
 The docked agent roster panel (`web/roster.js`) is unrelated despite the
 name-collision: it writes only the browser's own storage, never
 `~/.claude/ccwatch/roster.json` — see [Selecting a row scrolls to the figure
