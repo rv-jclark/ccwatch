@@ -1747,6 +1747,8 @@ implementation broken in the specific way it describes:
 | have `setup` point at the SwiftBar plugin instead of the menu bar app | 2 |
 | offer the macOS app from `setup` on Windows too | 1 |
 | have a Windows `setup` stop before its optional steps (the guard behind the line above) | 1 |
+| drop a dispatched subcommand (`kill`) from `usage()` | 1, naming it |
+| have the dispatch extraction find nothing, so "every subcommand is documented" holds of zero | 1 (the count guard; the main assertion stayed green) |
 | stop toggling `.selected`, so the selected row's figure carries no mark | 1 (verify-ui) |
 | leave the wire overlay unsized, so every wire is clipped to the SVG's default 300x150 | 1 (verify-ui) |
 | draw every edge on the map again, whether or not anything is looked at | 2 node, 9 verify-ui (10 on a machine with live peer traffic) |

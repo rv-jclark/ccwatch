@@ -109,7 +109,8 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # script) and 22 node checks on web/comms.js and the envelope sprite.
 # Raised by 3 for setup's menu bar hint: the SwiftBar line became the app, and
 # gained a Windows half and the guard that keeps that half from passing empty.
-TALLY_FLOOR=505
+# Raised by 2 for `--help` covering every dispatched subcommand, and its guard.
+TALLY_FLOOR=507
 TALLY_FLOOR_NODE=289
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -1069,6 +1070,27 @@ assert_contains "$_none" "install-statusline" "with no feed wired, the header sa
 rm -f "$FH/sessions/9101.json"
 
 # =================================================================== setup ==
+printf '\nhelp\n'
+
+# Every subcommand the dispatch accepts is in `--help`. `kill` — the one
+# destructive command — was dispatched and documented in the README while
+# `ccwatch --help` never mentioned it. The names are read from the dispatch
+# block itself, so a new subcommand without a help line fails here.
+# `hook`, `statusline` and `tick` are internal: Claude Code and the daemon
+# call them, and a person never types them.
+_help=$(NO_COLOR=1 "$CCWATCH" --help 2>&1)
+_subs=$(awk '/^\{$/{f=1} f&&/^  case "\$\{1:-\}" in/{g=1;next} g&&/^  esac/{exit}
+             g&&/^    [a-z][a-z-]*\)/{sub(/^    /,""); sub(/\).*/,""); print}' "$CCWATCH")
+_nsubs=$(printf '%s\n' "$_subs" | grep -c .)
+[ "$_nsubs" -ge 20 ] && t_pass "the dispatch block yields its subcommands ($_nsubs)" \
+  || t_fail "the dispatch block yields its subcommands" "got $_nsubs: $_subs"
+_undoc=""
+for _s in $_subs; do
+  case "$_s" in hook|statusline|tick) continue;; esac
+  case "$_help" in *"ccwatch $_s"*) ;; *) _undoc="$_undoc $_s";; esac
+done
+assert_eq "${_undoc# }" "" "every user-facing subcommand appears in ccwatch --help"
+
 printf '\nsetup\n'
 
 SUB="$WORK/setup-bin"

@@ -6107,6 +6107,11 @@ USAGE
                            running, and watch its transcript to confirm arrival
         --dry-run          print the exact frames instead of sending them
   ccwatch peers [--days N]   which sessions have been talking to each other
+  ccwatch kill <who>         stop a session with SIGTERM, never SIGKILL. The
+                           transcript survives, and the resume command is
+                           printed. Refuses a session mid-turn or mid-phase
+        --force            stop it anyway
+        -y                 skip the confirmation
 
   ccwatch bar                the same verdicts as one line for a macOS menu bar
                            item, in SwiftBar/xbar plugin format
