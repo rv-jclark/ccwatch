@@ -173,14 +173,19 @@ A few things are worth knowing up front:
 - **`send` reports whether the message arrived.** It reads the receiving
   session's transcript to check, then tells you `delivered`, `queued`
   (normal if the session is mid-turn) or `could not deliver`, with the reason.
-- **`revive` types what you would have typed.** Left running, it sends
+- **`revive` types what you would have typed.** Turn it on once with the
+  `revive: off` switch in the dashboard's header (or `ccwatch revive
+  --enable`) and `ccwatch serve` runs it every minute from then on, whether
+  or not a page is open. The switch is remembered across restarts. It sends
   `retry` to a session stopped by an API error once the API answers again,
   `continue` once a session limit has reset, and *"Are you actually done with
   the work and this pause is intentional?"* to one that stopped for ten
   minutes partway through a `spec-roadmap` it was running. It leaves alone a
   session that is waiting on a prompt, ended on a question, was interrupted by
   you, still has its runner going, or has already answered that question.
-  Start with `ccwatch revive --once --dry-run` to see what it would do and why.
+  While it is off, the panel behind the switch shows what it *would* do and
+  why, so you can check it against your own sessions first. `ccwatch revive`
+  in a terminal does the same job without serve.
   The reasoning is in [docs/DESIGN.md](docs/DESIGN.md#unsticking-an-agent-that-stopped-too-early).
 - **`kill` keeps the transcript.** It sends SIGTERM, never SIGKILL, and prints
   the `claude --resume` command for reopening the session. It refuses to stop a
@@ -213,7 +218,9 @@ ccwatch send <who> <msg>   # message a running session, and confirm arrival
 ccwatch revive             # nudge sessions that stopped too early, every 60s
     --once                 #   one pass, then exit
     --dry-run              #   say what it would send, and send nothing
-    --json                 #   the decisions as JSON
+    --json                 #   one pass as JSON; sends only with --send
+    --enable / --disable   #   the switch `ccwatch serve` runs it by
+    --status
 ccwatch kill <who>         # stop a session (--force to override a refusal)
 ccwatch peers [--days N]   # which sessions have been messaging each other
 ccwatch deploys            # CI/deploy runs in flight or finished in the last 24h

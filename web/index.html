@@ -174,7 +174,7 @@
 <header>
   <div class="hleft">
   <h1>ccwatch <span id="counts"></span></h1>
-  <nav><a href="/" class="on">table</a><a href="/map">map</a></nav>
+  <nav><a href="/" class="on">table</a><a href="/map">map</a><span id="reviveslot"></span></nav>
   <!-- role="status" so a condition arriving while you are reading the table is
        announced once, politely; renderAlerts only writes the trigger's text
        when it changes, so a 3-second repaint does not re-announce it. -->
@@ -201,6 +201,7 @@
 <footer id="foot"></footer>
 <script src="/alerts.js"></script>
 <script src="/usage.js"></script>
+<script src="/revive.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 // Injected by the server into the page it serves. A page that cannot read this
@@ -208,6 +209,9 @@ const $ = id => document.getElementById(id);
 // injecting prompts into your agents.
 const SEND_TOKEN = "__CCWATCH_SEND_TOKEN__";
 const CAN_SEND = SEND_TOKEN && !SEND_TOKEN.startsWith("__");
+// The revive switch, from web/revive.js. Mounted once; every state it is
+// handed comes from /api/state, so the page decides nothing about it.
+const REVIVE = CCWATCH_REVIVE.mount($("reviveslot"), {token: SEND_TOKEN, canSend: CAN_SEND});
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const dur = s => { if (s == null) return "-"; s = Math.max(0, s);
   return s < 60 ? Math.floor(s)+"s" : s < 3600 ? Math.floor(s/60)+"m"
@@ -598,6 +602,7 @@ async function tick() {
     lastEtag = res.headers.get("ETag");
     const s = await res.json();
     lastBody = s;
+    REVIVE.update(s.revive);
     // One judgement of the feed, from the module the map reads too
     // (principle XI) — this page used to decide it a second way, in the
     // try/catch below, and two renderings that decide independently whether

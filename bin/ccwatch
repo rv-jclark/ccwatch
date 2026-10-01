@@ -3796,19 +3796,48 @@ revive_plan() { # revive_plan <snapshot> <stops> <roadmaps> <runners|"unreadable
             end ) ]'
 }
 
+# The on/off switch `serve` honours, so that turning revive on is one act that
+# outlives the page, the serve and a reboot. Off until somebody turns it on: a
+# tool that starts messaging your agents because it was installed would be
+# acting on a decision nobody made.
+REVIVE_SWITCH="$CCWATCH_HOME/revive.json"
+
+revive_enabled() { jq -e '.enabled == true' "$REVIVE_SWITCH" >/dev/null 2>&1; }
+
+revive_set() { # revive_set <true|false> <by>
+  mkdir -p "$CCWATCH_HOME" 2>/dev/null || return 1
+  jq -cn --argjson on "$1" --arg by "$2" --arg at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '{enabled:$on, at:$at, by:$by}' >"$REVIVE_SWITCH.tmp" 2>/dev/null \
+    && mv "$REVIVE_SWITCH.tmp" "$REVIVE_SWITCH"
+}
+
 cmd_revive() {
   platform_detect
   [ "$CCWATCH_PLATFORM" = windows ] && die "revive: not available on Windows" \
     "it delivers through ccwatch send, which needs the per-session Unix socket"
-  local dry=0 once=0 as_json=0
+  local dry=0 once=0 as_json=0 send=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --dry-run) dry=1; shift;;
       --once)    once=1; shift;;
-      --json)    as_json=1; once=1; dry=1; shift;;
-      *) die "revive: unrecognised option '$1'" "usage: ccwatch revive [--once] [--dry-run] [--json]";;
+      --json)    as_json=1; once=1; shift;;
+      # --json is for reading; it sends only when told to in so many words,
+      # because `revive --json` typed to have a look must never be the thing
+      # that messages six agents.
+      --send)    send=1; shift;;
+      --enable|--disable)
+        revive_set "$([ "$1" = --enable ] && echo true || echo false)" cli \
+          || die "could not write $REVIVE_SWITCH"
+        say "revive is $([ "$1" = --enable ] && echo "ON" || echo "OFF") for ccwatch serve ${_c_dim}(${REVIVE_SWITCH/#$HOME/~})${_c_reset}"
+        return 0;;
+      --status)
+        if revive_enabled; then say "revive: ON for ccwatch serve"; else say "revive: OFF for ccwatch serve"; fi
+        return 0;;
+      *) die "revive: unrecognised option '$1'" \
+             "usage: ccwatch revive [--once] [--dry-run] [--json [--send]] [--enable|--disable|--status]";;
     esac
   done
+  [ "$as_json" -eq 1 ] && [ "$send" -eq 0 ] && dry=1
   [ "$as_json" -eq 1 ] || {
     say "${_c_bold}ccwatch revive${_c_reset} ${_c_dim}— $([ "$dry" -eq 1 ] && echo "dry run, nothing is sent" || echo "will send")$([ "$once" -eq 1 ] || echo " · every ${CCWATCH_REVIVE_INTERVAL}s, Ctrl-C to stop")${_c_reset}"
   }
@@ -3819,19 +3848,56 @@ cmd_revive() {
   done
 }
 
+# ⚠️ One pass at a time across the whole machine. `serve` runs a pass every
+# minute and a terminal may run `ccwatch revive` beside it; two passes reading
+# the same transcript in the same second both see a stall nobody has answered,
+# and the agent is asked twice. A directory is the lock because mkdir is
+# atomic, and it holds the owner's pid so a pass that was killed does not hold
+# it for ever.
+revive_lock() {
+  local d="$CCWATCH_HOME/revive.lock" owner
+  mkdir -p "$CCWATCH_HOME" 2>/dev/null
+  if mkdir "$d" 2>/dev/null; then printf '%s\n' "$$" > "$d/pid"; return 0; fi
+  owner=$(cat "$d/pid" 2>/dev/null)
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    printf '%s' "$owner"; return 1
+  fi
+  rm -rf "$d" 2>/dev/null
+  mkdir "$d" 2>/dev/null && { printf '%s\n' "$$" > "$d/pid"; return 0; }
+  printf 'unknown'; return 1
+}
+revive_unlock() { rm -rf "$CCWATCH_HOME/revive.lock" 2>/dev/null; }
+
+# revive_tick — one pass. With <as_json> it prints one object:
+#   {at, rows: [...plan rows, each acted-on one with outcome + detail], skipped}
+# `skipped` carries the reason a pass did not run, so a pass that was refused
+# never reads as a pass that found nothing (principle IV).
 revive_tick() { # revive_tick <dry> <as_json>
-  local dry="$1" as_json="$2" snap idle_sids cwds stops roadmaps runners net plan now
+  local dry="$1" as_json="$2" snap idle_sids cwds stops roadmaps runners net plan now owner
   now=$(date '+%s')
+  if ! owner=$(revive_lock); then
+    if [ "$as_json" -eq 1 ]; then
+      jq -cn --argjson at "$now" --arg why "another revive pass is running (pid $owner)" \
+        '{at:$at, rows:[], skipped:$why}'
+    else
+      say "${_c_dim}$(date '+%H:%M:%S') skipped: another revive pass is running (pid $owner)${_c_reset}"
+    fi
+    return 0
+  fi
+  # shellcheck disable=SC2064
+  trap "revive_unlock; cleanup" EXIT
   snap=$(snapshot) || snap=""
-  require_json snapshot "$snap" || return 1
+  require_json snapshot "$snap" || { revive_unlock; return 1; }
   idle_sids=$(printf '%s' "$snap" | jq -r '.sessions[] | select(.entrypoint == "cli" and .status_raw == "idle") | .sid')
   if [ -z "$idle_sids" ]; then
-    [ "$as_json" -eq 1 ] && printf '[]\n' || say "${_c_dim}$(date '+%H:%M:%S') nothing idle${_c_reset}"
+    revive_unlock
+    if [ "$as_json" -eq 1 ]; then jq -cn --argjson at "$now" '{at:$at, rows:[], skipped:null}'
+    else say "${_c_dim}$(date '+%H:%M:%S') nothing idle${_c_reset}"; fi
     return 0
   fi
   # shellcheck disable=SC2086
   stops=$(collect_stops $idle_sids)
-  require_json collect_stops "$stops" || return 1
+  require_json collect_stops "$stops" || { revive_unlock; return 1; }
   local -a cwda=()
   cwds=$(printf '%s' "$snap" | jq -r '[.sessions[] | select(.entrypoint == "cli" and .status_raw == "idle") | .cwd] | unique | .[]')
   while IFS= read -r c; do [ -n "$c" ] && cwda+=("$c"); done <<<"$cwds"
@@ -3847,18 +3913,15 @@ revive_tick() { # revive_tick <dry> <as_json>
     net="unmeasured"
   fi
   plan=$(revive_plan "$snap" "$stops" "$roadmaps" "$runners" "$net" "$now")
-  require_json revive_plan "$plan" || return 1
+  require_json revive_plan "$plan" || { revive_unlock; return 1; }
 
-  if [ "$as_json" -eq 1 ]; then
-    printf '%s\n' "$plan"
-    return 0
-  fi
-  if [ "$(printf '%s' "$plan" | jq 'length')" = "0" ]; then
+  if [ "$as_json" -eq 0 ] && [ "$(printf '%s' "$plan" | jq 'length')" = "0" ]; then
+    revive_unlock
     say "${_c_dim}$(date '+%H:%M:%S') nothing stopped${_c_reset}"
     return 0
   fi
 
-  local row action name sid msg why
+  local row action name sid msg why out rc outcome done_rows=""
   while IFS= read -r row; do
     action=$(printf '%s' "$row" | jq -r '.action // ""')
     name=$(printf '%s' "$row" | jq -r '.name')
@@ -3866,22 +3929,36 @@ revive_tick() { # revive_tick <dry> <as_json>
     msg=$(printf '%s' "$row" | jq -r '.message // ""')
     why=$(printf '%s' "$row" | jq -r '.why')
     if [ -z "$action" ]; then
-      say "  ${_c_dim}wait${_c_reset}      $name  ${_c_dim}$why${_c_reset}"
+      [ "$as_json" -eq 1 ] || say "  ${_c_dim}wait${_c_reset}      $name  ${_c_dim}$why${_c_reset}"
+      done_rows="$done_rows$row"$'\n'
       continue
     fi
     # The word is the verdict and travels without colour (principle VII).
-    say "  ${_c_yellow}$(printf '%-8s' "$(printf '%s' "$action" | tr '[:lower:]' '[:upper:]')")${_c_reset}  $name  $why"
+    [ "$as_json" -eq 1 ] || say "  ${_c_yellow}$(printf '%-8s' "$(printf '%s' "$action" | tr '[:lower:]' '[:upper:]')")${_c_reset}  $name  $why"
     if [ "$dry" -eq 1 ]; then
-      say "            ${_c_dim}would send:${_c_reset} $msg"
+      [ "$as_json" -eq 1 ] || say "            ${_c_dim}would send:${_c_reset} $msg"
+      done_rows="$done_rows$row"$'\n'
       continue
     fi
     # A subshell, because cmd_send ends in `die` on any failure and one bad
     # socket must not end the watch over every other session.
-    local out rc
     out=$( ( CCWATCH_SEND_AS="ccwatch revive" cmd_send "$sid" "$msg" ) 2>&1 ); rc=$?
-    printf '%s\n' "$out" | sed 's/^/            /'
-    revive_record "$row" "$([ "$rc" -eq 0 ] && echo sent || echo failed)"
+    # The same three outcomes `send` itself reports, read off its own words.
+    case "$out" in
+      *"delivered to"*) outcome=delivered;;
+      *"queued for"*)   outcome=queued;;
+      *)                outcome=failed;;
+    esac
+    [ "$rc" -eq 0 ] || outcome=failed
+    [ "$as_json" -eq 1 ] || printf '%s\n' "$out" | sed 's/^/            /'
+    revive_record "$row" "$outcome"
+    done_rows="$done_rows$(printf '%s' "$row" | jq -c --arg o "$outcome" --arg d "$out" \
+      '. + {outcome:$o, detail:($d | gsub("\u001b\\[[0-9;]*m"; "") | .[-300:])}')"$'\n'
   done < <(printf '%s' "$plan" | jq -c '.[]')
+  revive_unlock
+  if [ "$as_json" -eq 1 ]; then
+    printf '%s' "$done_rows" | jq -cs --argjson at "$now" '{at:$at, rows:., skipped:null}'
+  fi
 }
 
 revive_record() { # revive_record <plan-row> <outcome>
@@ -4537,9 +4614,11 @@ cmd_serve() {
   CCWATCH_IDLE_GRACE="$idle_grace" CCWATCH_SNAPSHOT_TIMEOUT="$snapshot_timeout" \
   CCWATCH_TRANSCRIPT_TIMEOUT="${CCWATCH_TRANSCRIPT_TIMEOUT:-30}" \
   CCWATCH_SNAPSHOT_CADENCE="$snapshot_cadence" \
+  CCWATCH_REVIVE_SWITCH="$REVIVE_SWITCH" CCWATCH_EVENTS="$EVENTS" \
+  CCWATCH_REVIVE_INTERVAL="$CCWATCH_REVIVE_INTERVAL" \
   CCWATCH_PLATFORM="$CCWATCH_PLATFORM" CCWATCH_BASH="$CCWATCH_BASH" \
   $CCWATCH_PY -c '
-import hashlib, http.server, json, os, socketserver, subprocess, sys, threading, time
+import calendar, hashlib, http.server, json, os, socketserver, subprocess, sys, threading, time
 from urllib.parse import urlsplit
 
 SELF = os.environ["CCWATCH_SELF"]
@@ -4636,7 +4715,10 @@ def refresh_loop(key, args, timeout, every, transform=None):
             # Checked in the collector loop rather than on a timer of its own,
             # so it costs no extra thread and cannot fire while a collection
             # is in flight.
-            if IDLE_EXIT > 0 and now - LAST_READ > IDLE_EXIT:
+            # Not while revive is on. Revive exists for the hours nobody is
+            # looking, so a serve that shut itself down for want of a reader
+            # would stop revive at exactly the moment it was turned on for.
+            if IDLE_EXIT > 0 and now - LAST_READ > IDLE_EXIT and not revive_on():
                 sys.stderr.write(
                     "ccwatch serve: nothing has read /api/state for %ds; exiting so a "
                     "forgotten server does not accumulate. Set CCWATCH_SERVE_IDLE_EXIT=0 "
@@ -4677,6 +4759,130 @@ def refresh_loop(key, args, timeout, every, transform=None):
             next_due = time.monotonic() + every
     return loop
 
+# ---- revive -----------------------------------------------------------------
+#
+# Revive runs HERE, on its own thread, so that turning it on in the page is the
+# last thing anybody has to do: the menu bar app keeps this process up, and this
+# thread keeps passing whether or not anything is reading /api/state. That is
+# the difference from the three refreshers above, which idle without a reader
+# by design. Revive is FOR the hours nobody is reading.
+#
+# Off, it still runs a dry pass while somebody is looking, so the page can show
+# what it would do before anybody lets it. Each pass is `ccwatch revive --json`,
+# the same decision table the terminal uses (principle XI), and `--send` only
+# when the switch is on.
+REVIVE_SWITCH = os.environ.get("CCWATCH_REVIVE_SWITCH", "")
+EVENTS = os.environ.get("CCWATCH_EVENTS", "")
+REVIVE_EVERY = max(5.0, float(os.environ.get("CCWATCH_REVIVE_INTERVAL", "60")))
+REVIVE_WAKE = threading.Event()
+REVIVE_UNAVAILABLE = (None if SEND_TOKEN else
+                      "this server was started read-only, so it cannot send")
+
+def revive_on():
+    try:
+        with open(REVIVE_SWITCH) as fh:
+            return json.load(fh).get("enabled") is True
+    except Exception:
+        return False
+
+def revive_set(on):
+    tmp = REVIVE_SWITCH + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump({"enabled": bool(on), "by": "page",
+                   "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, fh)
+    os.replace(tmp, REVIVE_SWITCH)
+    try:
+        with open(EVENTS, "a") as fh:
+            fh.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                 "event": "ccwatch.revive.switch",
+                                 "enabled": bool(on), "by": "page"}) + "\n")
+    except OSError:
+        pass
+
+def revive_recent(limit=20, window=86400):
+    # What revive has actually sent, from the event log rather than memory, so
+    # a restarted serve still shows what happened before it.
+    out = []
+    try:
+        with open(EVENTS, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 400000))
+            lines = fh.read().split(b"\n")
+    except OSError:
+        return out
+    cutoff = time.time() - window
+    for raw in reversed(lines):
+        if b"ccwatch.revive" not in raw:
+            continue
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        if ev.get("event") != "ccwatch.revive":
+            continue
+        try:
+            at = calendar.timegm(time.strptime(ev.get("at", ""), "%Y-%m-%dT%H:%M:%SZ"))
+        except ValueError:
+            continue
+        if at < cutoff:
+            break
+        out.append({"at": at, "target": ev.get("target"), "action": ev.get("action"),
+                    "outcome": ev.get("outcome"), "why": ev.get("why")})
+        if len(out) >= limit:
+            break
+    return out
+
+def revive_loop():
+    next_due = 0.0
+    last = {}
+    while True:
+        now = time.monotonic()
+        on = revive_on()
+        reader = (now - LAST_READ) <= GRACE
+        woken = REVIVE_WAKE.is_set()
+        if not woken and (now < next_due or not (on or reader)):
+            REVIVE_WAKE.wait(TICK)
+            continue
+        REVIVE_WAKE.clear()
+        # Published before the pass as well as after it: a pass takes 5-12s
+        # (measured on the suite fixtures), and a switch that still read "off"
+        # that long after it was flipped looked like a switch that had not
+        # taken.
+        revive_publish(dict(STATE.get("revive") or {}, enabled=on, running=True))
+        rec = {"enabled": on, "available": REVIVE_UNAVAILABLE is None,
+               "reason": REVIVE_UNAVAILABLE, "every": REVIVE_EVERY, "running": False}
+        if REVIVE_UNAVAILABLE is None:
+            val = run(["revive", "--json"] + (["--send"] if on else []), 180)
+            if isinstance(val, dict) and isinstance(val.get("rows"), list):
+                last = {"rows": val["rows"], "skipped": val.get("skipped"),
+                        "live": on, "pass_at": time.time(), "error": None}
+            else:
+                # A failed pass keeps the last good rows and says it failed,
+                # rather than replacing them with an empty list that reads as
+                # "nothing stopped" (principle IV).
+                last = dict(last)
+                last["error"] = (val or {}).get("error", "revive pass failed") \
+                    if isinstance(val, dict) else "revive pass failed"
+            rec.update(last)
+        rec["recent"] = revive_recent()
+        revive_publish(rec)
+        # The same floor the three refreshers take from SNAPSHOT_CADENCE, for
+        # the same reason: every publish changes the ETag, and the ETag checks
+        # pin the cadence so that two reads see one collection. A fourth
+        # publisher outside that floor made them fail under load. At the
+        # default cadence of 2s the floor is far below 60s and changes nothing.
+        next_due = time.monotonic() + max(REVIVE_EVERY, SNAPSHOT_CADENCE)
+
+def revive_publish(rec):
+    rec.setdefault("available", REVIVE_UNAVAILABLE is None)
+    rec.setdefault("reason", REVIVE_UNAVAILABLE)
+    rec.setdefault("every", REVIVE_EVERY)
+    with LOCK:
+        STATE["revive"] = rec
+        STATE["revive_at"] = time.time()
+        refresh_etag()
+
 def build_canonical():
     # Assumes LOCK held. Same shape as the /api/state payload minus
     # `ages`/`stale`/`feed` — those are recomputed per request, never
@@ -4693,6 +4899,7 @@ def build_canonical():
         body["unfinished"] = None
     body["deploys"] = STATE.get("deploys")
     body["peers"] = STATE.get("peers")
+    body["revive"] = STATE.get("revive")
     body["can_kill"] = ALLOW_KILL
     body["snapshot_ok"] = STATE.get("snapshot_ok", True)
     body["snapshot_error"] = STATE.get("snapshot_error")
@@ -4701,7 +4908,7 @@ def build_canonical():
         # views footer surfaces a failed collection without a page change.
         body["error"] = body["snapshot_error"]
     body["collected_at"] = {
-        k: STATE.get(k + "_at") for k in ("snapshot", "deploys", "peers")}
+        k: STATE.get(k + "_at") for k in ("snapshot", "deploys", "peers", "revive")}
     return body
 
 def refresh_etag():
@@ -4743,7 +4950,8 @@ class H(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        if not (self.path.startswith("/api/send") or self.path.startswith("/api/kill")):
+        if not (self.path.startswith("/api/send") or self.path.startswith("/api/kill")
+                or self.path.startswith("/api/revive")):
             self.send_error(404)
             return
         if not SEND_TOKEN:
@@ -4773,6 +4981,28 @@ class H(http.server.SimpleHTTPRequestHandler):
             return
         if length > MAX_MESSAGE + 512:
             self.reply_json(413, {"error": "message too long (limit %d characters)" % MAX_MESSAGE})
+            return
+        if self.path.startswith("/api/revive"):
+            # The same token and Origin gate as send, above: turning revive on
+            # is consent to messages being sent on your behalf, and a page that
+            # could flip it could have every idle agent asked a question.
+            try:
+                req = json.loads(self.rfile.read(length))
+                on = req["enabled"]
+                if not isinstance(on, bool):
+                    raise ValueError("enabled must be true or false")
+            except Exception as e:
+                self.reply_json(400, {"error": "bad request: %s" % e})
+                return
+            try:
+                revive_set(on)
+            except OSError as e:
+                self.reply_json(500, {"error": "could not record the switch: %s" % e})
+                return
+            REVIVE_WAKE.set()
+            now_on = revive_on()
+            revive_publish(dict(STATE.get("revive") or {}, enabled=now_on))
+            self.reply_json(200, {"enabled": now_on})
             return
         try:
             req = json.loads(self.rfile.read(length))
@@ -4911,7 +5141,7 @@ class H(http.server.SimpleHTTPRequestHandler):
                 # panel look current.
                 payload["ages"] = {
                     k: (now - STATE[k + "_at"]) if STATE.get(k + "_at") else None
-                    for k in ("snapshot", "deploys", "peers")}
+                    for k in ("snapshot", "deploys", "peers", "revive")}
             payload["stale"] = payload["ages"].get("snapshot")
             # Derived per request, never stored: "warming" if no snapshot has
             # ever succeeded, else "idle" if the read that preceded THIS one
@@ -4973,6 +5203,7 @@ for _key, _args, _to, _every, _tf in (
         ("deploys",  ["deploys", "--json"], 120, max(60, SNAPSHOT_CADENCE), None),
         ("peers",    ["peers", "--days", "2", "--json"], 120, max(45, SNAPSHOT_CADENCE), None)):
     threading.Thread(target=refresh_loop(_key, _args, _to, _every, _tf), daemon=True).start()
+threading.Thread(target=revive_loop, daemon=True).start()
 try:
     with S(("127.0.0.1", PORT), H) as httpd:
         httpd.serve_forever()
@@ -5659,6 +5890,91 @@ function run(doc, win) {
     check("clicking it again closes the panel, leaving nothing rendered",
           !amodal.open && boxOf(amodal).h === 0,
           "open=" + amodal.open + ", height=" + boxOf(amodal).h);
+
+    // ---- the revive switch -------------------------------------------
+    // Forced, like the alerts above: whether revive is on, and what it found,
+    // depends on this machine, and a check that measures whatever it found is
+    // the shape that passes against a broken implementation.
+    var rv = win.CCWATCH_REVIVE && win.CCWATCH_REVIVE.ui;
+    var rbtn = doc.getElementById("revivebtn"), rmodal = doc.getElementById("revivemodal");
+    if (!rv || !rbtn || !rmodal) {
+      bad("the revive switch is on the page",
+          "missing: " + [!rv && "CCWATCH_REVIVE.ui", !rbtn && "#revivebtn",
+                         !rmodal && "#revivemodal"].filter(Boolean).join(", "));
+    } else {
+      var nowS = Date.now() / 1000;
+      var rvOff = {enabled: false, available: true, every: 60, live: false, pass_at: nowS - 20,
+                   rows: [{name: "web-app-fc", action: "ask", why: "paused 46m mid-roadmap checkout 4/5"},
+                          {name: "pricing-7b", action: null, why: "session limit · resets in 14m"}],
+                   recent: []};
+      var rvOn = {enabled: true, available: true, every: 60, live: true, pass_at: nowS - 5,
+                  rows: [{name: "web-app-fc", action: "ask", outcome: "delivered", why: "paused 46m mid-roadmap checkout 4/5"},
+                         {name: "pricing-7b", action: "retry", outcome: "failed", why: "API error 6m ago (ENOTFOUND)"},
+                         {name: "search-9d", action: null, why: "paused 5m mid-roadmap reindex 0/3 · asking at 10m"}],
+                  recent: [{at: nowS - 300, target: "web-app-fc", action: "ask", outcome: "delivered", why: "paused 46m"}]};
+      rv.update(rvOff);
+      var rq = {board: boxOf(board), header: boxOf(header)};
+      var rb = boxOf(rbtn);
+      check("the revive switch says its state in words",
+            /^revive: off/.test(rbtn.textContent || ""), JSON.stringify(rbtn.textContent));
+      check("and is rendered, at a non-zero size, on screen",
+            rb.w > 0 && rb.h > 0 && win.getComputedStyle(rbtn).visibility === "visible" && onScreen(rb, vw, vh),
+            Math.round(rb.w) + "x" + Math.round(rb.h));
+      rv.update(rvOn);
+      check("turning revive on, with sends to report, does not move the board or re-wrap the header",
+            Math.round(boxOf(board).t) === Math.round(rq.board.t)
+              && Math.round(boxOf(header).h) === Math.round(rq.header.h),
+            "board top " + Math.round(rq.board.t) + " -> " + Math.round(boxOf(board).t)
+              + ", header " + Math.round(rq.header.h) + " -> " + Math.round(boxOf(header).h));
+      // ⚠️ The switch itself must not move either. Its label grows when it
+      // turns on, and that once wrapped the header's left half under the
+      // gauges, which set the header's height - so the check above stayed
+      // green while the switch jumped 220px.
+      var rbOn = boxOf(rbtn);
+      check("nor move the switch itself",
+            Math.round(rbOn.l) === Math.round(rb.l) && Math.round(rbOn.t) === Math.round(rb.t),
+            "switch " + Math.round(rb.l) + "," + Math.round(rb.t) + " -> " + Math.round(rbOn.l) + "," + Math.round(rbOn.t));
+      check("and the switch then says it is on, and how many it sent",
+            /^revive: on · 1 sent/.test(rbtn.textContent || ""), JSON.stringify(rbtn.textContent));
+      rbtn.click();
+      check("clicking the switch opens its panel", rmodal.open, "the dialog did not open");
+      var rrows = [].slice.call(rmodal.querySelectorAll("#reviverows .revrow"));
+      check("the panel lists every session the pass decided about",
+            rrows.length === rvOn.rows.length, rrows.length + " rendered vs " + rvOn.rows.length);
+      // The CELLS, not the row: a row is `display:contents` so the list can be
+      // one grid, and has no box of its own to measure - measuring it flagged
+      // every row of a panel that rendered all of them.
+      var rhidden = rrows.filter(function (el) {
+        return [].slice.call(el.children).some(function (c) {
+          var b = boxOf(c); return c.textContent && (b.w === 0 || b.h === 0);
+        });
+      });
+      check("and none of them is collapsed to nothing", rhidden.length === 0,
+            rhidden.map(function (el) { return el.textContent.slice(0, 30); }).join(" | "));
+      var rtext = rmodal.textContent || "";
+      check("the reason behind every decision is in the panel, beside its verdict",
+            rtext.indexOf("mid-roadmap checkout 4/5") !== -1 && rtext.indexOf("ENOTFOUND") !== -1
+              && rtext.indexOf("retried · failed") !== -1 && rtext.indexOf("asking at 10m") !== -1,
+            JSON.stringify(rtext.slice(0, 200)));
+      var rtog = doc.getElementById("revivetoggle");
+      check("and it carries the switch itself, labelled for what it will do",
+            rtog && !rtog.hidden && (rtog.textContent || "") === "turn off",
+            rtog ? JSON.stringify(rtog.textContent) + (rtog.hidden ? " (hidden)" : "") : "no #revivetoggle");
+      var rp = boxOf(rmodal);
+      check("the revive panel is wholly inside the viewport, anchored to its switch",
+            rp.t >= rb.t && rp.l >= 0 && rp.r <= vw + 1 && rp.b <= vh + 1
+              && (Math.abs(rp.l - rb.l) <= 16 || Math.abs(rp.r - (vw - 8)) <= 16),
+            "panel " + [rp.l, rp.t, rp.r, rp.b].map(Math.round).join(",")
+              + ", switch " + Math.round(rb.l) + "-" + Math.round(rb.r) + " in " + vw);
+      rv.update({enabled: true, available: true, every: 60, live: true, pass_at: nowS - 5,
+                 rows: [], recent: [], error: "revive exited 1: snapshot failed"});
+      check("a failed pass is said in words, not left as an empty list",
+            (rmodal.textContent || "").indexOf("last pass failed: revive exited 1") !== -1
+              && (rmodal.textContent || "").indexOf("nothing stopped") === -1,
+            JSON.stringify((rmodal.textContent || "").slice(0, 200)));
+      rmodal.close();
+      rv.update(win.lastBody ? win.lastBody.revive : null);
+    }
 
     // ⚠️ And again at a narrow width, because at this harness's 1180px the
     // header has room to absorb the trigger whether or not its slot reserves
@@ -6699,7 +7015,11 @@ USAGE
                            you actually done?" to one that paused mid-roadmap
         --dry-run          say what it would send, and send nothing
         --once             one pass, then exit
-        --json             the decisions as JSON (implies --once --dry-run)
+        --json             one pass, as JSON. Sends nothing unless --send
+        --enable           turn it on for `ccwatch serve`, which then runs it
+                           every minute whether or not a page is open. The
+                           same switch as the one in the page header
+        --disable / --status
   ccwatch peers [--days N]   which sessions have been talking to each other
   ccwatch kill <who>         stop a session with SIGTERM, never SIGKILL. The
                            transcript survives, and the resume command is

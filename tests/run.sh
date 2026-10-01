@@ -112,8 +112,12 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # Raised by 2 for `--help` covering every dispatched subcommand, and its guard.
 # Raised by 34 for `revive`, all of which always run: they read fabricated
 # transcripts, a fabricated process tree and a faked network answer.
-TALLY_FLOOR=541
-TALLY_FLOOR_NODE=289
+# Then by 11 for its lock, switch and read-only --json, and 4 static checks
+# that both pages load the revive switch; 16 node checks on web/revive.js go
+# on the node floor. The serve-hosted revive checks need a free port and are
+# not counted, for the reason the other serve checks are not.
+TALLY_FLOOR=556
+TALLY_FLOOR_NODE=305
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
 # deadline passes. Returns 0 if it succeeded.
@@ -2328,9 +2332,9 @@ rv_plan() { # rv_plan [env assignments...] — the decisions as JSON
   env CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-rv" CCWATCH_FAKE_PSTREE="$WORK/pstree-rv" \
       CCWATCH_HOME="$WORK/rv-home" CCWATCH_FAKE_NET=up NO_COLOR=1 "$@" "$CCWATCH" revive --json 2>&1
 }
-rv_field() { printf '%s' "$1" | jq -r --arg n "$2" --arg f "$3" '[.[] | select(.name == $n)][0] | if . == null then "absent" else (.[$f] // "null") end' 2>/dev/null; }
+rv_field() { printf '%s' "$1" | jq -r --arg n "$2" --arg f "$3" '[.rows[] | select(.name == $n)][0] | if . == null then "absent" else (.[$f] // "null") end' 2>/dev/null; }
 _rv=$(rv_plan)
-if ! printf '%s' "$_rv" | jq -e 'type == "array"' >/dev/null 2>&1; then
+if ! printf '%s' "$_rv" | jq -e '.rows | type == "array"' >/dev/null 2>&1; then
   t_fail "revive --json produces a decision list" "$(printf '%s' "$_rv" | head -5)"
 else
   assert_eq "$(rv_field "$_rv" rv-paused action)" "ask" \
@@ -2378,6 +2382,34 @@ _rvnops=$(rv_plan CCWATCH_FAKE_PSTREE="$WORK/no-such-pstree")
 assert_eq "$(rv_field "$_rvnops" rv-paused action)" "null" "with no readable process table, nothing is asked"
 assert_contains "$(rv_field "$_rvnops" rv-paused why)" "process table unreadable" "and the reason says why"
 assert_eq "$(rv_field "$_rvnops" rv-apierr action)" "retry" "while a retry, which needs no process table, still goes ahead"
+
+# ⚠️ `--json` is for reading. Everything above ran it against sessions that
+# are due an ask, a retry and a continue, and none of that may have been sent:
+# `revive --json` typed to have a look must never be what messages six agents.
+assert_eq "$(cat "$WORK/rv-home/events.jsonl" 2>/dev/null | grep -c '"ccwatch.revive"')" "0" \
+  "revive --json without --send sends nothing and records nothing"
+
+# One pass at a time. A pass already running (a live pid holds the lock) means
+# this one is skipped and SAYS so — never an empty list that reads as "nothing
+# stopped". A lock left by a pass that died is taken over.
+mkdir -p "$WORK/rv-home/revive.lock"; printf '%s\n' "$$" > "$WORK/rv-home/revive.lock/pid"
+_rvlock=$(rv_plan)
+assert_contains "$(printf '%s' "$_rvlock" | jq -r '.skipped // ""')" "another revive pass is running (pid $$)" \
+  "a pass that finds another one running is skipped, and says so with the owner's pid"
+printf '%s\n' 999999 > "$WORK/rv-home/revive.lock/pid"
+_rvstale=$(rv_plan)
+assert_eq "$(rv_field "$_rvstale" rv-paused action)" "ask" "a lock left by a pass that died is taken over"
+assert_eq "$([ -d "$WORK/rv-home/revive.lock" ] && echo held || echo released)" "released" \
+  "and a finished pass releases the lock"
+
+# The switch serve honours: off until somebody turns it on, and written where
+# serve reads it.
+_rvst=$(CCWATCH_HOME="$WORK/rv-home" NO_COLOR=1 "$CCWATCH" revive --status 2>&1)
+assert_contains "$_rvst" "OFF" "revive is off until somebody turns it on"
+CCWATCH_HOME="$WORK/rv-home" NO_COLOR=1 "$CCWATCH" revive --enable >/dev/null 2>&1
+assert_eq "$(jq -r '.enabled' "$WORK/rv-home/revive.json" 2>/dev/null)" "true" "revive --enable records it in the switch file"
+CCWATCH_HOME="$WORK/rv-home" NO_COLOR=1 "$CCWATCH" revive --disable >/dev/null 2>&1
+assert_eq "$(jq -r '.enabled' "$WORK/rv-home/revive.json" 2>/dev/null)" "false" "and --disable turns it back off"
 
 # A real (not --dry-run) pass to a session with no socket: the failure is
 # reported and recorded as failed, never as sent (principle VIII).
@@ -3136,7 +3168,10 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
            | jq -r '[.warming == false,
                      (.collected_at.snapshot != null),
                      (.collected_at.deploys  != null),
-                     (.collected_at.peers    != null)] | all' 2>/dev/null)" = "true" ]
+                     (.collected_at.peers    != null),
+                     # revive is a fourth publisher: its first pass has to
+                     # have FINISHED, since it publishes at the start too.
+                     (.revive.pass_at != null and .revive.running == false)] | all' 2>/dev/null)" = "true" ]
     }
     _ready=false
     wait_until 60 _all_collected "$SPORT6" && _ready=true
@@ -3685,6 +3720,108 @@ EOF
     reap_serve "$SPORT_IE"
   else
     t_skip "a serve nobody reads exits on its own" "no free port"
+  fi
+
+  # --- revive, hosted by serve ----------------------------------------------
+  #
+  # The switch in the page is token- and Origin-gated like send, because
+  # turning it on is consent to messages being sent on your behalf. It is
+  # recorded where a later serve reads it, and a serve with it on does not
+  # idle-exit: revive is for the hours nobody is reading.
+  srv_jq() { curl -s --max-time 3 "http://127.0.0.1:$1/api/state" 2>/dev/null | jq -r "$2" 2>/dev/null; }
+  srv_jq_is() { [ "$(srv_jq "$1" "$2")" = "$3" ]; }
+  SPORT_RV=$(free_port) || SPORT_RV=""
+  if [ -n "$SPORT_RV" ]; then
+    RVH="$WORK/rvs-home"; RVC="$WORK/rvs-cch"
+    mkdir -p "$RVH/sessions" "$RVC"
+    printf '' > "$WORK/ps-rvs"
+    ( CLAUDE_CONFIG_DIR="$RVH" CCWATCH_FAKE_PS="$WORK/ps-rvs" CCWATCH_HOME="$RVC" \
+      CCWATCH_REVIVE_INTERVAL=5 CCWATCH_SERVE_IDLE_EXIT=0 "$CCWATCH" serve --port "$SPORT_RV" \
+      >"$WORK/rvs-serve.log" 2>&1 & )
+    if wait_until 25 srv_up "$SPORT_RV" && wait_until 30 srv_jq_is "$SPORT_RV" '.revive.pass_at != null' true; then
+      assert_eq "$(srv_jq "$SPORT_RV" '.revive.enabled')" "false" "a serve publishes revive's state, off until somebody turns it on"
+      assert_eq "$(srv_jq "$SPORT_RV" '.revive.live')" "false" "and while off, its pass is a dry one"
+      _rvtok=$(curl -s --max-time 5 "http://127.0.0.1:$SPORT_RV/map" \
+               | grep -oE 'const SEND_TOKEN = "[0-9a-f]+"' | sed 's/.*"\(.*\)"/\1/')
+      _rvno=$(curl -s --max-time 10 -X POST "http://127.0.0.1:$SPORT_RV/api/revive" -d '{"enabled":true}')
+      assert_contains "$_rvno" "bad or missing token" "turning revive on with no token is refused"
+      _rvorg=$(curl -s --max-time 10 -X POST "http://127.0.0.1:$SPORT_RV/api/revive" \
+               -H "X-CCWatch-Token: $_rvtok" -H "Origin: https://evil.example" -d '{"enabled":true}')
+      assert_contains "$_rvorg" "unexpected Origin" "and so is a request from another origin, token or not"
+      assert_eq "$(jq -r '.enabled' "$RVC/revive.json" 2>/dev/null || echo absent)" "absent" \
+        "and neither refusal touched the switch"
+      _rvbad=$(curl -s --max-time 10 -X POST "http://127.0.0.1:$SPORT_RV/api/revive" \
+               -H "X-CCWatch-Token: $_rvtok" -d '{"enabled":"yes"}')
+      assert_contains "$_rvbad" "enabled must be true or false" "a switch value that is not a boolean is refused, not coerced"
+      _rvon=$(curl -s --max-time 10 -X POST "http://127.0.0.1:$SPORT_RV/api/revive" \
+              -H "X-CCWatch-Token: $_rvtok" -H "Origin: http://127.0.0.1:$SPORT_RV" -d '{"enabled":true}')
+      assert_eq "$(printf '%s' "$_rvon" | jq -r '.enabled' 2>/dev/null)" "true" "a gated request turns revive on"
+      assert_eq "$(jq -r '.enabled' "$RVC/revive.json" 2>/dev/null)" "true" "and records it where a later serve will read it"
+      assert_eq "$(srv_jq "$SPORT_RV" '.revive.enabled')" "true" "and the state says so at once, not after the next pass"
+      if wait_until 30 srv_jq_is "$SPORT_RV" '.revive.live' true; then
+        t_pass "once on, serve's passes are live ones"
+      else
+        t_fail "once on, serve's passes are live ones" "revive.live = $(srv_jq "$SPORT_RV" '.revive.live')"
+      fi
+    else
+      t_skip "serve hosts revive" "server did not come up or never finished a revive pass"
+    fi
+    reap_serve "$SPORT_RV"
+
+    # The same home, a new serve: the switch outlives the process that set it,
+    # and with it on the serve does not idle-exit.
+    SPORT_RV2=$(free_port) || SPORT_RV2=""
+    ( CLAUDE_CONFIG_DIR="$RVH" CCWATCH_FAKE_PS="$WORK/ps-rvs" CCWATCH_HOME="$RVC" \
+      CCWATCH_REVIVE_INTERVAL=3 CCWATCH_IDLE_GRACE=1 \
+      CCWATCH_SERVE_IDLE_EXIT=2 "$CCWATCH" serve --port "$SPORT_RV2" \
+      >"$WORK/rvs-serve2.log" 2>&1 & )
+    if [ -n "$SPORT_RV2" ] && wait_until 25 srv_up "$SPORT_RV2"; then
+      # No reads for well past the 2s idle limit. Probed by TCP connect only,
+      # never /api/state, because reading the state is what keeps a serve alive.
+      sleep 12
+      if (exec 3<>"/dev/tcp/127.0.0.1/$SPORT_RV2") 2>/dev/null; then
+        t_pass "with revive on, a serve nobody reads stays up — revive is for exactly then"
+      else
+        t_fail "with revive on, a serve nobody reads stays up — revive is for exactly then" \
+               "gone after 12s with a 2s idle limit: $(tail -1 "$WORK/rvs-serve2.log")"
+      fi
+      # ⚠️ And it kept PASSING through those 12s, which staying up does not
+      # prove: the other refreshers idle a second after the last read, and a
+      # revive loop that did the same would sit in a live serve doing nothing.
+      # This read is the first in 12s, so a recent pass was made unwatched.
+      _rvage=$(srv_jq "$SPORT_RV2" '(now - .revive.pass_at) | floor')
+      if [ -n "$_rvage" ] && [ "$_rvage" != "null" ] && [ "$_rvage" -lt 8 ]; then
+        t_pass "and kept running passes with nobody reading, every 3s here"
+      else
+        t_fail "and kept running passes with nobody reading, every 3s here" "last pass ${_rvage}s ago"
+      fi
+      assert_eq "$(srv_jq "$SPORT_RV2" '.revive.enabled')" "true" "and a new serve reads the switch the last one recorded"
+      jq -cn '{enabled:false}' > "$RVC/revive.json"
+      if wait_until 20 srv_dead "$SPORT_RV2"; then
+        t_pass "and once revive is off again, the idle exit is back"
+      else
+        t_fail "and once revive is off again, the idle exit is back" "still listening"
+      fi
+    else
+      t_skip "the switch outlives the serve that set it" "server did not come up"
+    fi
+    reap_serve "$SPORT_RV2"
+
+    # Read-only cannot send, so revive is unavailable there, and says why.
+    SPORT_RV3=$(free_port) || SPORT_RV3=""
+    ( CLAUDE_CONFIG_DIR="$RVH" CCWATCH_FAKE_PS="$WORK/ps-rvs" CCWATCH_HOME="$RVC" \
+      CCWATCH_REVIVE_INTERVAL=5 CCWATCH_SERVE_IDLE_EXIT=0 "$CCWATCH" serve --read-only --port "$SPORT_RV3" \
+      >"$WORK/rvs-serve3.log" 2>&1 & )
+    if [ -n "$SPORT_RV3" ] && wait_until 25 srv_up "$SPORT_RV3" \
+       && wait_until 20 srv_jq_is "$SPORT_RV3" '.revive != null' true; then
+      assert_eq "$(srv_jq "$SPORT_RV3" '.revive.available')" "false" "a read-only serve offers no revive"
+      assert_contains "$(srv_jq "$SPORT_RV3" '.revive.reason')" "read-only" "and says it is because it cannot send"
+    else
+      t_skip "a read-only serve offers no revive" "server did not come up"
+    fi
+    reap_serve "$SPORT_RV3"
+  else
+    t_skip "serve hosts revive" "no free port"
   fi
 
   # ⚠️ A serve outlives its own script being rewritten underneath it.
@@ -5352,6 +5489,78 @@ assert_contains "$_maphtml" 'CCWATCH_ALERTS.feedCondition' \
 assert_contains "$(cat "$ROOT/web/index.html")" 'CCWATCH_ALERTS.feedCondition' \
   "as does the table view, which used to decide it a second way in its own try/catch"
 
+
+# ============================================================= revive-module ===
+printf '\nrevive-module\n'
+#
+# web/revive.js shapes the revive switch both pages render. Pure parts here,
+# under node; whether the switch can move the board, and whether its panel is
+# on screen, is verify-ui's.
+if command -v node >/dev/null 2>&1; then
+  cat > "$WORK/revive-check.js" <<'REVIVEJS'
+var R = require(process.argv[2]);
+var out = [];
+function check(name, cond, detail) { out.push((cond ? "PASS|" : "FAIL|") + name + "|" + (detail || "")); }
+var NOW = 1800000000;
+var v;
+
+v = R.view(null, true, NOW);
+check("before the first pass, the switch says so rather than claiming off",
+      v.label === "revive: …" && /first pass/.test(v.status), JSON.stringify(v));
+
+v = R.view({available: false, reason: "this server was started read-only, so it cannot send"}, false, NOW);
+check("on a read-only serve it is unavailable, with the reason, and offers no switch",
+      v.label === "revive: unavailable" && /read-only/.test(v.status) && v.toggle === null, JSON.stringify(v));
+
+var off = {enabled: false, available: true, every: 60, live: false, pass_at: NOW - 20,
+           rows: [{name: "web-app-fc", action: "ask", why: "paused 46m"},
+                  {name: "pricing-7b", action: null, why: "resets in 14m"}], recent: []};
+v = R.view(off, true, NOW);
+check("off, it says off and offers to turn on", v.label === "revive: off" && v.toggle.text === "turn on", JSON.stringify(v));
+check("and an action it would take reads as one it WOULD take, not one it took",
+      v.rows[0].word === "would ask", v.rows[0].word);
+check("a session it is leaving alone reads as waiting, with the reason beside it",
+      v.rows[1].word === "waiting" && v.rows[1].why === "resets in 14m", JSON.stringify(v.rows[1]));
+check("and the status says it is only previewing", /showing what it would do/.test(v.status), v.status);
+
+var on = {enabled: true, available: true, every: 60, live: true, pass_at: NOW - 5,
+          rows: [{name: "a", action: "ask", outcome: "delivered", why: "x"},
+                 {name: "b", action: "retry", outcome: "failed", why: "y"},
+                 {name: "c", action: "continue", outcome: "queued", why: "z"}],
+          recent: [{at: NOW - 300, target: "a", action: "ask", outcome: "delivered"},
+                   {at: NOW - 900, target: "b", action: "retry", outcome: "failed"},
+                   {at: NOW - 999, target: "c", action: "continue", outcome: "queued"}]};
+v = R.view(on, true, NOW);
+check("on, it counts what was sent in the last day — delivered and queued, not failed",
+      v.label === "revive: on · 2 sent", v.label);
+check("a delivered send reads in the past tense", v.rows[0].word === "asked", v.rows[0].word);
+check("a failed one says it failed, in words", v.rows[1].word === "retried · failed" && v.rows[1].cls === "bad", JSON.stringify(v.rows[1]));
+check("a queued one says it is queued", v.rows[2].word === "continued · queued", v.rows[2].word);
+check("and the recent list carries how long ago", v.recent[0].ago === "5m ago", v.recent[0].ago);
+
+v = R.view(Object.assign({}, on, {rows: [], error: "revive exited 1: snapshot failed"}), true, NOW);
+check("a failed pass is stated, and is never shown as nothing stopped",
+      /last pass failed: revive exited 1/.test(v.problem || "") && v.empty === "", JSON.stringify(v));
+v = R.view(Object.assign({}, on, {rows: [], skipped: "another revive pass is running (pid 4)"}), true, NOW);
+check("a skipped pass is stated with its reason", /skipped: another revive pass/.test(v.problem || ""), v.problem);
+v = R.view(Object.assign({}, on, {rows: []}), true, NOW);
+check("a pass that found nothing says nothing stopped", v.empty === "nothing stopped", JSON.stringify(v));
+v = R.view(off, false, NOW);
+check("a page with no send token cannot flip the switch", v.toggle.disabled === true && /token/.test(v.toggle.why), JSON.stringify(v.toggle));
+console.log(out.join("\n"));
+REVIVEJS
+  while IFS='|' read -r status name detail; do
+    [ -z "$status" ] && continue
+    if [ "$status" = "PASS" ]; then t_pass "$name"; else t_fail "$name" "$detail"; fi
+  done < <(node "$WORK/revive-check.js" "$ROOT/web/revive.js" 2>&1)
+else
+  t_skip "revive module" "node not installed"
+fi
+# Both pages carry the switch, from the one module.
+for _pf in "$ROOT/web/index.html" "$ROOT/web/map.html"; do
+  assert_contains "$(cat "$_pf")" '<script src="/revive.js">' "$_pf loads the shared revive module"
+  assert_contains "$(cat "$_pf")" 'CCWATCH_REVIVE.mount($("reviveslot")' "and mounts the switch in its header"
+done
 
 # =============================================================== usage-module ===
 printf '\nusage-module\n'

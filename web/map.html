@@ -879,7 +879,7 @@
 <header>
   <div class="hleft">
   <h1>ccwatch <span id="counts"></span></h1>
-  <nav><a href="/">table</a><a href="/map" class="on">map</a><span id="rosternav"></span></nav>
+  <nav><a href="/">table</a><a href="/map" class="on">map</a><span id="reviveslot"></span><span id="rosternav"></span></nav>
   <!-- role="status" so a condition arriving while you are reading the board is
        announced once, politely, rather than only being available to whoever
        happens to look at the header. renderAlerts writes the trigger's text
@@ -960,6 +960,7 @@
 <script src="/usage.js"></script>
 <script src="/sprites.js"></script>
 <script src="/comms.js"></script>
+<script src="/revive.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -968,6 +969,9 @@ const dur = s => { if (s == null) return "-"; s = Math.max(0, s);
        : s < 86400 ? Math.floor(s/3600)+"h" : Math.floor(s/86400)+"d"; };
 const SEND_TOKEN = "__CCWATCH_SEND_TOKEN__";
 const CAN_SEND = SEND_TOKEN && !SEND_TOKEN.startsWith("__");
+// The revive switch, from web/revive.js. Mounted once; every state it is
+// handed comes from /api/state, so the page decides nothing about it.
+const REVIVE = CCWATCH_REVIVE.mount($("reviveslot"), {token: SEND_TOKEN, canSend: CAN_SEND});
 // Set from the server, which only enables it when started with --allow-kill.
 let CAN_KILL = false;
 // The single VOLATILE gate (data-model.md §5, FR-029): true only when the
@@ -2931,6 +2935,7 @@ async function tick() {
     lastEtag = res.headers.get("ETag");
     const s = await res.json();
     lastBody = s;
+    REVIVE.update(s.revive);
     applyFeed(s, CCWATCH_ALERTS.feedCondition(s, null));
   } catch (e) {
     // A dead feed is stated, not left to look like an empty city (R2): the

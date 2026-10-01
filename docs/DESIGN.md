@@ -504,6 +504,59 @@ Delivery goes through `cmd_send`, so it is observed in the receiver's
 transcript rather than assumed. Every action and its outcome goes to the event
 log as `ccwatch.revive`, `failed` included.
 
+### A switch, not a button, and serve runs it
+
+The first version was a command you had to leave running in a terminal, and
+a "run a pass" button in the page would have been the same thing: a manual
+step in a tool whose whole purpose is to remove one. So the page has a
+**switch**, and `ccwatch serve` hosts revive:
+
+- **One thread in serve runs a pass every minute**, as `ccwatch revive --json
+  --send`, which is the same decision table the terminal uses. Unlike the three
+  refreshers beside it, it does not idle when nobody is reading
+  `/api/state`. Those idle by design, and revive exists for exactly the
+  hours nobody is reading.
+- **A serve with revive on does not idle-exit.** The 30-minute exit exists so
+  a forgotten serve does not accumulate. A serve somebody has asked to watch
+  their agents is not a forgotten one, and exiting would stop revive at the
+  moment it was turned on for. The menu bar app keeps serve up across crashes,
+  so on a machine running the app, one click is the whole setup.
+- **The switch is a file**, `~/.claude/ccwatch/revive.json`, read on every
+  pass. So it outlives the page, the serve and a reboot, and `ccwatch revive
+  --enable` writes the same one.
+- **Off by default.** A tool that started messaging your agents because it was
+  installed would be acting on a decision nobody made. While it is off, serve
+  still runs a *dry* pass whenever a page is open, so the panel shows what it
+  would do, against your own sessions, before you let it.
+- **The switch is gated like send** (token and Origin check). Turning it on is
+  consent to messages being sent on your behalf, and a page that could flip
+  it could have every idle agent asked a question. `--read-only` has no
+  token, so revive there is `unavailable` and says why.
+- **One pass at a time, machine-wide.** Serve's loop and a terminal `ccwatch
+  revive` would otherwise both see the same unanswered stall in the same
+  second and ask it twice. The pass takes a `mkdir` lock holding its pid, and a
+  lock whose pid is dead is taken over.
+- **Revive takes the same cadence floor as the other publishers.** Every
+  publish changes the ETag, and the ETag checks pin `CCWATCH_SNAPSHOT_CADENCE`
+  so that two reads see one collection. Revive was a fourth publisher outside
+  that floor, and the checks failed under load until it was inside it.
+- **`--json` sends only with `--send`.** `ccwatch revive --json`, typed to have
+  a look, must never be what messages six agents.
+
+Two layout bugs turned up the first time the panel was rendered, and neither
+was visible to the checks that existed:
+
+- **The switch jumped 220px.** Its label grows from `revive: off` to
+  `revive: on · 3 sent`. With a `min-width`, the nav grew with it and wrapped
+  the header's left half onto a second line. The header's height did not
+  change, because the usage gauges on the right set it, so "the header did not
+  re-wrap" stayed green. The switch now has a fixed width, and `verify-ui`
+  asserts that the switch itself does not move.
+- **The panel opened at x=−385.** Anchored by its right edge, as the alert
+  panel is, a 640px panel under a switch that had wrapped to x=255 opened off
+  the left of the window. It is now anchored by the switch's left edge and
+  clamped into the window.
+
 ## Deploys, and agents that subscribe to them
 
 ```bash
@@ -1985,6 +2038,16 @@ implementation broken in the specific way it describes:
 | `revive`: drop the wait for a limit's reset, or the cap on continues | 2, 1 |
 | `revive`: read every reset as am. Only caught by a fixture pinned to an afternoon: the other two follow the clock, and a morning run cannot tell 3pm from 3am | 1 |
 | `revive`: record every send as `sent` | 1 |
+| `revive`: let `--json` send without `--send` | 1 |
+| `revive`: take no lock, never take over a dead pass's lock, or release it on neither path (either path alone is covered by the other) | 1, 4, 1 |
+| `revive --enable`: write `false` | 1 |
+| `revive-module`: drop the failed-pass line, the rows, or the reason in each row | 1, 2, 1 (verify-ui) |
+| `revive-module`: give the switch a `min-width` instead of a width | 2 (verify-ui) |
+| `revive-module`: anchor the panel by its right edge | 1 (verify-ui) |
+| `serve`: let a serve with revive on idle-exit | 2 |
+| `serve`: drop the `/api/revive` route | 6 |
+| `serve`: idle revive's loop without a reader, as the other refreshers do. It stayed green until a check asserted a pass made with nobody reading: a live serve doing nothing looks exactly like one that is working | 1 |
+| `serve`: publish the switch only after the next pass (both the immediate publish and the pre-pass publish — either alone is masked by the other) | 1 |
 
 The four `app-win` rows above were confirmed by tracing the C# against the
 mutation by hand, not by watching `tests/run.sh` turn red: there is no .NET
