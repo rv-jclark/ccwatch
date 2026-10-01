@@ -415,6 +415,95 @@ That verification earned its place immediately. The first version printed
 program on stdin and so read an empty payload. `sent` was a lie, and only
 checking the receiver caught it.
 
+## Unsticking an agent that stopped too early
+
+`ccwatch revive` watches for a session that stopped when it should not have,
+and sends what you would have typed yourself:
+
+```
+ccwatch revive — dry run, nothing is sent
+  ASK       web-app-fc  paused 46m mid-roadmap checkout 4/5 · next entry cutover is in_progress · no runner, no question pending
+            would send: Are you actually done with the work and this pause is intentional?
+  RETRY     pricing-7b  API error 6m ago (Can't reach the API server …) · API reachable · retry 1 of 6
+  wait      billing-2a  session limit · resets in 14m
+  wait      search-9d   paused 5m mid-roadmap reindex 0/3 · asking at 10m
+```
+
+It exists because both kinds of stop were measured on the machine this was
+built on, over the month before it was written:
+
+- **API errors.** Claude Code records these as an assistant entry with
+  `isApiErrorMessage` and an `error` field: 86 "Can't reach the API server",
+  33 "Connection lost mid-response", 23 "went to sleep mid-response", 19
+  "Request timed out", and about 200 session limits. Typing `retry` once the
+  network is back fixes all of them, and nobody is there to type it.
+- **An update instead of the next step.** 47 messages were some form of
+  "keep going" or "are you done?". 44 were followed straight away by the
+  agent going back to tool calls, and the agent had sat idle for a median of
+  30 minutes first. Asking *"are you actually done with the work and this
+  pause is intentional?"* worked every time it was tried by hand.
+
+### What it will not prod
+
+The hard part is not sending the message, it is not talking an agent out of
+a pause that was right. Every action is gated on the reading that justifies
+it, and a gate that cannot be read refuses (principle VI):
+
+| Gate | Why |
+|---|---|
+| only `idle`, never `waiting` | a permission prompt is your gate, whatever the transcript says |
+| not a turn ending in `?` | it asked you something |
+| not a session you interrupted | you stopped it on purpose |
+| asked once and answered with no tool calls → never again | it has said the pause is intentional, and that is its call |
+| at most 3 asks per stretch since your last message | asking is cheap, asking forever is not |
+| no `spec-run`/`spec-roadmap` process beneath it | it is quiet because it is waiting on its runner |
+| a process table that cannot be read → no ask | `[]` would mean "no runner anywhere", the empty-machine shape again |
+| no live recurring cron of its own | it will be woken by its own schedule |
+| no background subagent still to hand back | the hand-back will wake it |
+| a retry only once the API host accepts a connection | retrying into a DNS outage just records another error |
+| retries back off 1m, 2m, 4m…, and stop at 6 | a persistent failure is a fact to report, not a loop |
+| `continue` only past the reset the limit message states, at most twice | the message names a wall clock and a zone, and is read in that zone |
+
+### The roadmap is the evidence, not a guess about the text
+
+The ask is only for a session that **ran `spec-roadmap` itself** and whose
+directory has a roadmap with entries not yet `done`. It does not try to judge
+from the agent's prose whether it is finished. Both facts are already on disk:
+the commands are in the transcript, and the progress is in
+`.specify/roadmaps/<slug>.state.json`.
+
+Two things went wrong on the way there, and both were caught by measuring
+first:
+
+- **"Mentions spec-roadmap" matched 88% of sessions.** Every session carries
+  the skill listing, which names it, and a byte search found it in 1,952 of
+  2,213 transcripts. Only a `Bash` call to `spec-roadmap run`, a `Skill` call
+  or a slash command now counts.
+- **Two guards blocked the very stalls they were for.** The detector was
+  replayed against a month of real stops, with each transcript cut at the
+  moment it stopped. At first it would have asked in only 21 of the 38 stops
+  that were later nudged by hand. Counting every background `Bash` as pending
+  work blocked 8 of them, because a dev server or a watcher never reports back
+  (11 launches against 2 notifications in one real stretch). Counting every
+  `CronCreate` blocked 5 more, because a one-shot job is spent once it fires
+  and a recurring one expires after seven days. With only subagents counted
+  (each ends in exactly one hand-back) and only recurring crons from the last
+  week, it asks in 33 of 38. The other 5 are 4 turns that ended on a
+  question, which were right to leave, and 1 with a live recurring cron.
+
+What it still cannot tell apart is a turn that is waiting on you without
+ending in a question mark ("if you can get the repo name, I'll add the
+check"). The obvious discriminators were measured and do not separate the two
+groups. Tool calls since your last message have a median of 39 for stops you
+nudged and 36.5 for the rest. Whether your last message was a question is
+much the same for both. So the design accepts the ask in that case and relies
+on the answered-once gate. The same replay puts that at about 180 asks a month
+that you would have answered yourself, each costing one short reply.
+
+Delivery goes through `cmd_send`, so it is observed in the receiver's
+transcript rather than assumed. Every action and its outcome goes to the event
+log as `ccwatch.revive`, `failed` included.
+
 ## Deploys, and agents that subscribe to them
 
 ```bash
@@ -1880,6 +1969,22 @@ implementation broken in the specific way it describes:
 | put `.zones` back to a flex column, so every branch takes its room's full width | 2 (verify-ui: the default width and 470px) |
 | leave `} background:…; }` where `.agent:hover {` was, which also drops `.agent:focus-visible` | 1 (verify-ui) — not a planted mutation: a7b7967 shipped it, and it was found by reading the CSS |
 | stop removing the previous screenshot, and have the browser write nothing, so last run's images are left in place | 2 (verify-ui --shots). Removing the `rm` alone is not a reliable mutation: whether the old code left a stale image or hung for ten minutes in `wait` depended on whether Chrome survived the early TERM, and here it did — so the check needed the browser taken out as well to go red |
+| `revive`: drop the ends-on-a-question gate | 1 |
+| `revive`: drop the answered-once gate | 1 |
+| `revive`: drop the live-runner gate | 2 |
+| `revive`: let a runner's name in an *argument* count (a `tail -f …/spec-roadmap` watcher) | 3 |
+| `revive`: report an unreadable process table as `[]`, or drop the gate on it | 2 each |
+| `revive`: drop the ten-minute delay | 1 |
+| `revive`: ask whatever the roadmap's progress | 1 |
+| `revive`: treat any line containing `spec-roadmap` as having run it | 1 |
+| `revive`: drop the recurring-cron gate, or count one-shot crons | 1 each |
+| `revive`: drop the subagent gate, or count every background `Bash` | 1 each |
+| `revive`: drop the interrupted branch | 1 |
+| `revive`: consider sessions that are `waiting` (both filters — either alone is masked by the other) | 1 |
+| `revive`: drop the retry backoff, the retry cap or the network gate | 2, 1, 2 |
+| `revive`: drop the wait for a limit's reset, or the cap on continues | 2, 1 |
+| `revive`: read every reset as am. Only caught by a fixture pinned to an afternoon: the other two follow the clock, and a morning run cannot tell 3pm from 3am | 1 |
+| `revive`: record every send as `sent` | 1 |
 
 The four `app-win` rows above were confirmed by tracing the C# against the
 mutation by hand, not by watching `tests/run.sh` turn red: there is no .NET

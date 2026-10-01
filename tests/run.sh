@@ -110,7 +110,9 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # Raised by 3 for setup's menu bar hint: the SwiftBar line became the app, and
 # gained a Windows half and the guard that keeps that half from passing empty.
 # Raised by 2 for `--help` covering every dispatched subcommand, and its guard.
-TALLY_FLOOR=507
+# Raised by 34 for `revive`, all of which always run: they read fabricated
+# transcripts, a fabricated process tree and a faked network answer.
+TALLY_FLOOR=541
 TALLY_FLOOR_NODE=289
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -2227,6 +2229,174 @@ assert_not_contains "$_nofeed" "produced no usable JSON" \
   "a collector that legitimately returns null is not reported as having failed"
 
 rm -f "$FH/sessions/9102.json"
+
+# ================================================================= revive ====
+printf '\nrevive\n'
+
+# Every case here is one idle interactive session whose transcript ends in a
+# specific way, and the assertion is on what `revive` decides to do about it.
+# The decisions come from `revive --json`, which never sends: delivery itself
+# is cmd_send's, and is asserted in its own section.
+RV_NOW=$(date '+%s')
+rv_iso() { date -u -r "$(( RV_NOW - $1 ))" '+%Y-%m-%dT%H:%M:%S.000Z'; }
+RV_ASK="Are you actually done with the work and this pause is intentional?"
+# One record per helper, so a fixture reads as the conversation it is.
+rv_human()  { printf '{"type":"user","timestamp":"%s","origin":{"kind":"human"},"message":{"role":"user","content":"%s"}}\n' "$(rv_iso "$1")" "$2"; }
+rv_text()   { printf '{"type":"assistant","timestamp":"%s","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]}}\n' "$(rv_iso "$1")" "$2"; }
+rv_tool()   { printf '{"type":"assistant","timestamp":"%s","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu%s","name":"%s","input":%s}]}}\n' "$(rv_iso "$1")" "$1" "$2" "$3"
+              printf '{"type":"user","timestamp":"%s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu%s","content":"ok"}]}}\n' "$(rv_iso "$1")" "$1"; }
+rv_roadmap() { rv_tool "$1" Bash '{"command":"spec-roadmap run --stream > .runs/x.log 2>&1"}'; }
+rv_peer()   { printf '{"type":"user","timestamp":"%s","isMeta":true,"origin":{"kind":"peer","from":"ccwatch revive","body":"%s"},"message":{"role":"user","content":"Another Claude session sent a message"}}\n' "$(rv_iso "$1")" "$2"; }
+rv_apierr() { printf '{"type":"assistant","timestamp":"%s","isApiErrorMessage":true,"error":"%s","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]}}\n' "$(rv_iso "$1")" "$2" "$3"; }
+rv_netdown="API Error: Cannot reach the API server - check your internet or DNS (ENOTFOUND)"
+
+RVR="$WORK/rv-repo"      # a roadmap with entries left
+RVD="$WORK/rv-done"      # a roadmap that has landed in full
+mkdir -p "$RVR/.specify/roadmaps" "$RVD/.specify/roadmaps"
+printf '{"goal":"g","entries":[{"slug":"one"},{"slug":"two"},{"slug":"three"}]}\n' > "$RVR/.specify/roadmaps/demo.json"
+printf '{"entries":{"one":{"status":"done"},"two":{"status":"in_progress"}}}\n' > "$RVR/.specify/roadmaps/demo.state.json"
+printf '{"goal":"g","entries":[{"slug":"one"}]}\n' > "$RVD/.specify/roadmaps/demo.json"
+printf '{"entries":{"one":{"status":"done"}}}\n' > "$RVD/.specify/roadmaps/demo.state.json"
+
+: > "$WORK/ps-rv"; : > "$WORK/pstree-rv"
+rv_sess() { # rv_sess <n> <name> <cwd> [status]  — transcript on stdin
+  local pid=$((9300 + $1)) sid
+  sid=$(printf 'bbbbbbbb-0000-0000-0000-%012d' "$1")
+  mksess "$pid" "$sid" "$2" "$3" "${4:-idle}" cli
+  cat > "$FH/projects/-fake-repo/$sid.jsonl"
+  mkps "$pid" "0:10.00" >> "$WORK/ps-rv"
+  printf '%s 1 claude\n' "$pid" >> "$WORK/pstree-rv"
+}
+
+# The case the feature is for: it ran the roadmap, gave an update, and stopped.
+{ rv_human 3000 "run the whole roadmap"; rv_roadmap 2900; rv_text 1200 "Entry one is merged."; } | rv_sess 1 rv-paused "$RVR"
+# The same, but its last words were a question to you.
+{ rv_human 3000 "run it"; rv_roadmap 2900; rv_text 1200 "Should I start entry two now?"; } | rv_sess 2 rv-question "$RVR"
+# Asked once already, and it answered without doing anything more.
+{ rv_human 3000 "run it"; rv_roadmap 2900; rv_text 2000 "Entry one is merged."; rv_peer 1300 "$RV_ASK"; rv_text 1200 "Yes - I am waiting on you to rotate the key."; } | rv_sess 3 rv-answered "$RVR"
+# Its runner is still beneath it: quiet because it is waiting, correctly.
+{ rv_human 3000 "run it"; rv_roadmap 2900; rv_text 1200 "Running entry two."; } | rv_sess 4 rv-runner "$RVR"
+printf '%s %s /bin/bash /usr/local/bin/spec-roadmap run --stream\n' 9400 9304 >> "$WORK/pstree-rv"
+# A watcher tailing a runner's log names it in an ARGUMENT, and is not a runner:
+# spec-roadmap's own instructions leave these behind (17 were found orphaned at
+# once), so counting one would hold an agent back for days.
+printf '%s %s tail -f -n +1 /logs/spec-roadmap\n' 9401 9301 >> "$WORK/pstree-rv"
+# Too recent to have stalled: somebody may still be at the keyboard.
+{ rv_human 900 "run it"; rv_roadmap 800; rv_text 120 "Entry one is merged."; } | rv_sess 5 rv-fresh "$RVR"
+# The roadmap it drove has landed in full.
+{ rv_human 3000 "run it"; rv_roadmap 2900; rv_text 1200 "All entries merged."; } | rv_sess 6 rv-finished "$RVD"
+# Never ran spec-roadmap, though it CARRIES the name: every session has the
+# skill listing, which names it. A detector reading raw bytes flags this one.
+{ printf '{"type":"attachment","timestamp":"%s","attachment":{"content":"- speckit-pipeline:spec-roadmap: Plan or execute a roadmap. Run spec-roadmap run"}}\n' "$(rv_iso 3100)"
+  rv_human 3000 "fix the bug"; rv_text 1200 "Fixed."; } | rv_sess 7 rv-unrelated "$RVR"
+# A recurring cron of its own will wake it, so its silence is the schedule.
+{ rv_human 3000 "run it"; rv_roadmap 2900; rv_tool 2800 CronCreate '{"cron":"0 */3 * * *","prompt":"check","recurring":true}'; rv_text 1200 "Checking every 3h."; } | rv_sess 8 rv-cron "$RVR"
+# A one-shot cron is spent once it fires, and must not hold the ask back.
+{ rv_human 3000 "run it"; rv_roadmap 2900; rv_tool 2800 CronCreate '{"cron":"5 4 * * *","prompt":"check","recurring":false}'; rv_text 1200 "Entry one is merged."; } | rv_sess 9 rv-oneshot "$RVR"
+# A background subagent that has not handed back yet.
+{ rv_human 3000 "run it"; rv_roadmap 2900; rv_tool 2800 Agent '{"prompt":"review","run_in_background":true}'; rv_text 1200 "Waiting on the reviewer."; } | rv_sess 10 rv-subagent "$RVR"
+# A background Bash that never reports back (a dev server) is not pending work.
+{ rv_human 3000 "run it"; rv_roadmap 2900; rv_tool 2800 Bash '{"command":"npm run dev","run_in_background":true}'; rv_text 1200 "Entry one is merged."; } | rv_sess 11 rv-devserver "$RVR"
+# You stopped it yourself.
+{ rv_human 3000 "run it"; rv_roadmap 2900; printf '{"type":"user","timestamp":"%s","message":{"role":"user","content":"[Request interrupted by user]"}}\n' "$(rv_iso 1200)"; } | rv_sess 12 rv-interrupted "$RVR"
+# Blocked on a permission prompt: that gate is yours, whatever the transcript says.
+{ rv_human 3000 "run it"; rv_roadmap 2900; rv_text 1200 "Entry one is merged."; } | rv_sess 13 rv-waiting "$RVR" waiting
+# API errors: due for a retry; backing off after two; given up after six.
+{ rv_human 3000 "go"; rv_apierr 300 server_error "$rv_netdown"; } | rv_sess 14 rv-apierr "$RVR"
+{ rv_human 3000 "go"; rv_apierr 900 server_error "$rv_netdown"; rv_peer 800 retry; rv_apierr 700 server_error "$rv_netdown"; rv_peer 600 retry; rv_apierr 180 server_error "$rv_netdown"; } | rv_sess 15 rv-backoff "$RVR"
+{ rv_human 9000 "go"; for _i in 1 2 3 4 5 6; do rv_apierr $((8000 - _i * 1000)) server_error "$rv_netdown"; rv_peer $((7900 - _i * 1000)) retry; done; rv_apierr 600 server_error "$rv_netdown"; } | rv_sess 16 rv-gaveup "$RVR"
+# Session limits: one whose reset is past, one whose reset is still ahead.
+# The reset is stated as a wall clock in the message, as Claude Code writes it.
+rv_reset_in() { python3 -c '
+import sys, datetime, zoneinfo
+t = datetime.datetime.fromtimestamp(int(sys.argv[1]), zoneinfo.ZoneInfo("America/New_York"))
+print(t.strftime("%I:%M%p").lstrip("0").lower())' "$(( RV_NOW + $1 ))"; }
+{ rv_human 9000 "go"; rv_apierr 7200 rate_limit "You have hit your session limit · resets $(rv_reset_in -3600) (America/New_York)"; } | rv_sess 17 rv-limit-over "$RVR"
+{ rv_human 9000 "go"; rv_apierr 600 rate_limit "You have hit your session limit · resets $(rv_reset_in 3600) (America/New_York)"; } | rv_sess 18 rv-limit-ahead "$RVR"
+# Continued twice since your last message and stopped on the limit again.
+{ rv_human 90000 "go"; rv_apierr 80000 rate_limit "You have hit your session limit · resets $(rv_reset_in -70000) (America/New_York)"; rv_peer 60000 continue
+  rv_apierr 50000 rate_limit "You have hit your session limit · resets $(rv_reset_in -40000) (America/New_York)"; rv_peer 30000 continue
+  rv_apierr 7200 rate_limit "You have hit your session limit · resets $(rv_reset_in -3600) (America/New_York)"; } | rv_sess 19 rv-limit-again "$RVR"
+# ⚠️ A fixed afternoon, because the two above sit on whatever time of day the
+# suite runs: a morning run cannot tell 3pm from 3am, and an am/pm parse bug
+# passed every assertion until this one existed. 13:00 EST on 2026-01-15 is
+# 1768500000; "resets 3:00pm" is the same afternoon, 7200s later.
+printf '{"type":"assistant","timestamp":"2026-01-15T18:00:00.000Z","isApiErrorMessage":true,"error":"rate_limit","message":{"role":"assistant","content":[{"type":"text","text":"You have hit your session limit · resets 3:00pm (America/New_York)"}]}}\n' \
+  | rv_sess 20 rv-limit-pm "$RVR"
+
+rv_plan() { # rv_plan [env assignments...] — the decisions as JSON
+  env CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-rv" CCWATCH_FAKE_PSTREE="$WORK/pstree-rv" \
+      CCWATCH_HOME="$WORK/rv-home" CCWATCH_FAKE_NET=up NO_COLOR=1 "$@" "$CCWATCH" revive --json 2>&1
+}
+rv_field() { printf '%s' "$1" | jq -r --arg n "$2" --arg f "$3" '[.[] | select(.name == $n)][0] | if . == null then "absent" else (.[$f] // "null") end' 2>/dev/null; }
+_rv=$(rv_plan)
+if ! printf '%s' "$_rv" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  t_fail "revive --json produces a decision list" "$(printf '%s' "$_rv" | head -5)"
+else
+  assert_eq "$(rv_field "$_rv" rv-paused action)" "ask" \
+    "a session that drove spec-roadmap and stopped 20m ago with entries left is asked whether it is done"
+  assert_eq "$(rv_field "$_rv" rv-paused message)" "$RV_ASK" "with the exact words that worked by hand"
+  assert_contains "$(rv_field "$_rv" rv-paused why)" "demo 1/3" "and the reason states the roadmap and how far through it is"
+  assert_eq "$(rv_field "$_rv" rv-question action)" "null" "a turn that ended on a question to you is left for you"
+  assert_eq "$(rv_field "$_rv" rv-answered action)" "null" \
+    "a session that answered the ask without doing more is not asked again — the pause is its call"
+  assert_eq "$(rv_field "$_rv" rv-runner action)" "null" "a session whose spec-roadmap runner is still beneath it is left waiting"
+  assert_contains "$(rv_field "$_rv" rv-runner why)" "runner is still running" "and says that is why"
+  assert_eq "$(rv_field "$_rv" rv-fresh action)" "null" "a pause shorter than CCWATCH_REVIVE_AFTER is not yet a stall"
+  assert_contains "$(rv_field "$_rv" rv-finished why)" "no unfinished roadmap" "a roadmap that has landed in full is not a reason to ask"
+  assert_eq "$(rv_field "$_rv" rv-unrelated action)" "absent" \
+    "a session that only carries the skill listing never ran spec-roadmap, and is not considered at all"
+  assert_contains "$(rv_field "$_rv" rv-cron why)" "scheduled its own wake-up" "a live recurring cron of its own holds the ask back"
+  assert_eq "$(rv_field "$_rv" rv-oneshot action)" "ask" "but a one-shot cron, spent once it fired, does not"
+  assert_contains "$(rv_field "$_rv" rv-subagent why)" "background task" "a background subagent that has not handed back holds the ask back"
+  assert_eq "$(rv_field "$_rv" rv-devserver action)" "ask" "but a background Bash that never reports back (a dev server) does not"
+  assert_contains "$(rv_field "$_rv" rv-interrupted why)" "you interrupted it" "a session you interrupted yourself is left alone"
+  assert_eq "$(rv_field "$_rv" rv-waiting action)" "absent" "a session waiting on a prompt is never considered — that gate is yours"
+  assert_eq "$(rv_field "$_rv" rv-apierr action)" "retry" "an API error 5m old, with the API reachable, is retried"
+  assert_contains "$(rv_field "$_rv" rv-apierr why)" "ENOTFOUND" "and the reason carries Claude Code's own error text"
+  assert_eq "$(rv_field "$_rv" rv-backoff action)" "null" "after two retries the wait has doubled twice, so 3m is too soon"
+  assert_contains "$(rv_field "$_rv" rv-backoff why)" "retry 3 in" "and it says when the next one is due"
+  assert_contains "$(rv_field "$_rv" rv-gaveup why)" "gave up after 6 retries" "six retries that each failed again are the limit"
+  assert_eq "$(rv_field "$_rv" rv-limit-over action)" "continue" "a session limit whose stated reset has passed is continued"
+  assert_eq "$(rv_field "$_rv" rv-limit-ahead action)" "null" "one whose reset is still ahead is not"
+  assert_contains "$(rv_field "$_rv" rv-limit-ahead why)" "resets in" "and says how long is left"
+  assert_contains "$(rv_field "$_rv" rv-limit-again why)" "continued twice" \
+    "a session continued twice that hit the limit again is not continued a third time"
+  assert_eq "$(rv_field "$_rv" rv-limit-pm resets_at)" "1768507200" \
+    "\"resets 3:00pm\" is read as the afternoon, in the zone the message names"
+fi
+
+# The network gate. The same error, with the API unreachable, is a wait.
+_rvdown=$(rv_plan CCWATCH_FAKE_NET="down: nodename nor servname provided")
+assert_eq "$(rv_field "$_rvdown" rv-apierr action)" "null" "an API error is not retried while the API host is unreachable"
+assert_contains "$(rv_field "$_rvdown" rv-apierr why)" "unreachable: nodename" "and the reason the probe gave is printed"
+
+# ⚠️ An unreadable process table must not read as "no runner anywhere". That
+# is the empty-machine shape again, and here it would prod an agent whose
+# runner is in fact still working.
+_rvnops=$(rv_plan CCWATCH_FAKE_PSTREE="$WORK/no-such-pstree")
+assert_eq "$(rv_field "$_rvnops" rv-paused action)" "null" "with no readable process table, nothing is asked"
+assert_contains "$(rv_field "$_rvnops" rv-paused why)" "process table unreadable" "and the reason says why"
+assert_eq "$(rv_field "$_rvnops" rv-apierr action)" "retry" "while a retry, which needs no process table, still goes ahead"
+
+# A real (not --dry-run) pass to a session with no socket: the failure is
+# reported and recorded as failed, never as sent (principle VIII).
+_rvsend=$(env CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-rv" CCWATCH_FAKE_PSTREE="$WORK/pstree-rv" \
+          CCWATCH_HOME="$WORK/rv-home" CCWATCH_FAKE_NET=up NO_COLOR=1 CCWATCH_SEND_VERIFY=1 \
+          "$CCWATCH" revive --once 2>&1)
+assert_contains "$_rvsend" "has no messaging socket" "a send that cannot be made says why"
+assert_not_contains "$_rvsend" "delivered" "and nothing claims delivery"
+assert_eq "$(jq -r 'select(.event == "ccwatch.revive" and .target == "rv-paused") | .outcome' "$WORK/rv-home/events.jsonl" 2>/dev/null | tail -1)" \
+  "failed" "and the event log records it as failed, not sent"
+
+# ⚠️ The transcripts go too, not only the registry entries. They hold peer
+# messages, and the `peers` section reads every transcript under this home:
+# left behind, they turned its "3 peer messages" into 12.
+for _i in $(seq 1 20); do
+  rm -f "$FH/sessions/$((9300 + _i)).json" \
+        "$FH/projects/-fake-repo/$(printf 'bbbbbbbb-0000-0000-0000-%012d' "$_i").jsonl"
+done
+unset _i
 
 # ================================================================ deploys ====
 printf '\ndeploys\n'

@@ -157,6 +157,7 @@ ccwatch convo <who>          # the recent conversation of one session
 ccwatch resume               # what to reopen after a crash or reboot
 ccwatch resume --cd          #   ...as `cd <dir> && claude --resume <id>` lines to paste
 ccwatch send <who> "<msg>"   # message a session that is already running
+ccwatch revive               # nudge agents that stopped too early (see below)
 ccwatch kill <who>           # stop a session; refuses when that would lose work
 ```
 
@@ -172,6 +173,15 @@ A few things are worth knowing up front:
 - **`send` reports whether the message arrived.** It reads the receiving
   session's transcript to check, then tells you `delivered`, `queued`
   (normal if the session is mid-turn) or `could not deliver`, with the reason.
+- **`revive` types what you would have typed.** Left running, it sends
+  `retry` to a session stopped by an API error once the API answers again,
+  `continue` once a session limit has reset, and *"Are you actually done with
+  the work and this pause is intentional?"* to one that stopped for ten
+  minutes partway through a `spec-roadmap` it was running. It leaves alone a
+  session that is waiting on a prompt, ended on a question, was interrupted by
+  you, still has its runner going, or has already answered that question.
+  Start with `ccwatch revive --once --dry-run` to see what it would do and why.
+  The reasoning is in [docs/DESIGN.md](docs/DESIGN.md#unsticking-an-agent-that-stopped-too-early).
 - **`kill` keeps the transcript.** It sends SIGTERM, never SIGKILL, and prints
   the `claude --resume` command for reopening the session. It refuses to stop a
   session that is mid-turn or running a pipeline phase unless you pass
@@ -200,6 +210,10 @@ ccwatch resume [-n N]      # what to reopen after a crash or reboot
     --all                  #   ignore the 14-day window
 ccwatch send <who> <msg>   # message a running session, and confirm arrival
     --dry-run              #   print the exact frames instead
+ccwatch revive             # nudge sessions that stopped too early, every 60s
+    --once                 #   one pass, then exit
+    --dry-run              #   say what it would send, and send nothing
+    --json                 #   the decisions as JSON
 ccwatch kill <who>         # stop a session (--force to override a refusal)
 ccwatch peers [--days N]   # which sessions have been messaging each other
 ccwatch deploys            # CI/deploy runs in flight or finished in the last 24h
@@ -327,6 +341,14 @@ that an upgrade has broken something.
 | `CCWATCH_UNFINISHED_HOURS` | `24` | how recent an unfinished run must be to appear in the live table |
 | `CCWATCH_SEND_VERIFY` | `10` | seconds to wait for a sent message to appear in the receiver |
 | `CCWATCH_SEND_AS` | `ccwatch` | how sent messages identify themselves |
+| `CCWATCH_REVIVE_AFTER` | `600` | seconds a session that paused mid-roadmap is left before `revive` asks |
+| `CCWATCH_REVIVE_RETRY_AFTER` | `60` | seconds after an API error before the first `retry`; doubles each time |
+| `CCWATCH_REVIVE_MAX_RETRIES` | `6` | retries before `revive` gives up on a session |
+| `CCWATCH_REVIVE_MAX_ASKS` | `3` | how many times one stretch of work may be asked whether it is done |
+| `CCWATCH_REVIVE_LIMIT_GRACE` | `120` | seconds past a session limit's reset before `continue` is sent |
+| `CCWATCH_REVIVE_INTERVAL` | `60` | seconds between `revive` passes |
+| `CCWATCH_REVIVE_ASK` | *Are you actually done…* | the question `revive` asks; also how it recognises its own earlier asks |
+| `CCWATCH_REVIVE_NET` | `api.anthropic.com:443` | what "the API is reachable again" is tested against |
 | `CCWATCH_DEPLOY_PATTERN` | `deploy\|release\|rollback\|publish\|promote` | which workflows count as deploys |
 | `CCWATCH_DEPLOY_TTL` | `60` | seconds to cache `gh` results |
 | `CCWATCH_PORT` | `8787` | port for `ccwatch serve`, and the one `ccwatch bar` probes to decide whether to link to a dashboard or offer to start one |

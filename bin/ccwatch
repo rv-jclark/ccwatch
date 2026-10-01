@@ -787,6 +787,65 @@ probe_posix_path() { # probe_posix_path <path>
   esac
 }
 
+# probe_runners — which of the given session pids has a spec-run or
+# spec-roadmap process somewhere beneath it. Prints a JSON array of those
+# pids, or fails (non-zero, nothing printed) when the process table cannot be
+# read.
+#
+# Only `revive` asks this, and it asks so it can tell an agent that went quiet
+# because it is waiting on its runner from one that went quiet and forgot. The
+# runner's own pid is not enough on its own: `spec-roadmap` records none, and
+# it is the process an agent launches and then waits on.
+#
+# ⚠️ Fails rather than printing `[]` on an unreadable table. `[]` means "no
+# runner under anything", and `revive` would read that as license to prod an
+# agent whose runner is in fact still working — the empty-machine shape this
+# section exists to prevent. Only a pid and a yes/no leave this function; the
+# command lines themselves can carry arguments nobody asked to have copied.
+#
+# CCWATCH_FAKE_PSTREE substitutes `pid ppid command` lines, as CCWATCH_FAKE_PS
+# does for liveness.
+probe_runners() { # probe_runners <pid>...
+  local table
+  if [ -n "${CCWATCH_FAKE_PSTREE:-}" ]; then
+    table=$(cat "$CCWATCH_FAKE_PSTREE" 2>/dev/null) || return 1
+  else
+    case "$CCWATCH_PLATFORM" in
+      macos) table=$(ps -axo pid=,ppid=,command= 2>/dev/null) || return 1 ;;
+      *) return 1 ;;
+    esac
+    # The same cross-check collect_live makes: a table this shell is not in
+    # was refused, not empty.
+    printf '%s\n' "$table" | awk -v me="$$" '$1 == me { found = 1 } END { exit !found }' || return 1
+  fi
+  printf '%s\n' "$table" | $CCWATCH_PY -c '
+import json, re, sys
+want = set(int(p) for p in sys.argv[1:] if p.isdigit())
+parent, runner = {}, set()
+rx = re.compile(r"(^|/)spec-(run|roadmap)(\s|$)")
+for line in sys.stdin:
+    parts = line.split(None, 2)
+    if len(parts) < 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        continue
+    pid, ppid = int(parts[0]), int(parts[1])
+    parent[pid] = ppid
+    # The executable or the script a shell is running, never an argument: a
+    # `grep spec-run` must not count as a runner.
+    words = (parts[2] if len(parts) > 2 else "").split()
+    if any(rx.search(w) for w in words[:2]):
+        runner.add(pid)
+hit = set()
+for pid in runner:
+    seen, p = set(), parent.get(pid)
+    while p and p not in seen:
+        if p in want:
+            hit.add(p)
+        seen.add(p)
+        p = parent.get(p)
+print(json.dumps(sorted(hit)))
+' "$@"
+}
+
 # ============================================================== collection ===
 
 # collect_sessions — the live registry, one JSON object on stdout:
@@ -3303,6 +3362,533 @@ record_send() { # record_send <target-json> <message> <outcome>
     '{at:$at, event:"ccwatch.send", session_id:$sid, cwd:$cwd,
       target:$name, outcome:$outcome, message:$body}' \
     >>"$EVENTS" 2>/dev/null || true
+}
+
+
+# ============================================================== revive ======
+#
+# Unsticking an agent that stopped when it should not have, by saying the one
+# thing you would have typed yourself.
+#
+# Two ways an unattended session stops, both measured in this machine's own
+# transcripts over a month before any of this was written:
+#
+#   It stopped on an API error. Claude Code records these as an assistant
+#   entry with `isApiErrorMessage` and an `error` field — 86 "Can't reach the
+#   API server — check your internet or DNS", 33 "Connection lost
+#   mid-response", 23 "went to sleep mid-response", 19 "Request timed out",
+#   and about 200 session limits. Typing "retry" once the network is back is
+#   the whole fix, and it is a fix nobody is there to make.
+#
+#   It gave an update and did not carry on. 47 messages over that month were
+#   some form of "keep going" or "are you done?", 44 were followed by the
+#   agent going straight back to tool calls, and the agent had sat idle a
+#   median of 30 minutes first. 60 of the 64 that waited ten minutes or more
+#   were in a repository with a spec-roadmap still unfinished at the time.
+#   Asking "are you actually done with the work and this pause is
+#   intentional?" was enough, every time it was tried by hand.
+#
+# What this must NOT do is talk an agent out of a pause that was right. So
+# every nudge is gated on the reading that justifies it, and every gate that
+# cannot be read refuses rather than assumes (principle VI):
+#
+#   ✗ a session waiting on a permission prompt — that gate is yours
+#   ✗ a turn that ended on a question to you
+#   ✗ a session you interrupted yourself
+#   ✗ a session whose spec-run/spec-roadmap runner is still beneath it, or
+#     whose process tree could not be read
+#   ✗ background work launched and not yet reported back
+#   ✗ a session asked once already that answered without doing anything —
+#     it has said the pause is intentional, and that is its call
+#   ✗ a retry while the API host is still unreachable, and more than
+#     CCWATCH_REVIVE_MAX_RETRIES of them, with the wait doubling each time
+#
+# Delivery goes through `cmd_send`, so it is observed in the receiver's
+# transcript rather than assumed (principle VIII), and is recorded in the
+# event log beside every other send.
+
+# How long a turn that ended mid-roadmap is left alone before it is asked.
+# Ten minutes: the measured nudges were a median of 30 minutes late, and under
+# ten most of them were somebody still at the keyboard.
+CCWATCH_REVIVE_AFTER="${CCWATCH_REVIVE_AFTER:-600}"
+# The first wait after an API error; it doubles after each retry.
+CCWATCH_REVIVE_RETRY_AFTER="${CCWATCH_REVIVE_RETRY_AFTER:-60}"
+CCWATCH_REVIVE_MAX_RETRIES="${CCWATCH_REVIVE_MAX_RETRIES:-6}"
+# How many times one stretch of work (everything since your last message) may
+# be asked whether it is done. The ask is cheap; asking forever is not.
+CCWATCH_REVIVE_MAX_ASKS="${CCWATCH_REVIVE_MAX_ASKS:-3}"
+CCWATCH_REVIVE_INTERVAL="${CCWATCH_REVIVE_INTERVAL:-60}"
+# Session limits reset on a clock the message itself states; this is the
+# margin past it before "continue" is sent, so the first request is not early.
+CCWATCH_REVIVE_LIMIT_GRACE="${CCWATCH_REVIVE_LIMIT_GRACE:-120}"
+# The exact words. They double as the marker for "ccwatch already said this",
+# which is why they are compared verbatim and why changing one is a setting
+# rather than an edit.
+CCWATCH_REVIVE_ASK="${CCWATCH_REVIVE_ASK:-Are you actually done with the work and this pause is intentional?}"
+CCWATCH_REVIVE_RETRY="${CCWATCH_REVIVE_RETRY:-retry}"
+CCWATCH_REVIVE_CONTINUE="${CCWATCH_REVIVE_CONTINUE:-continue}"
+# What "the network is back" is measured against.
+CCWATCH_REVIVE_NET="${CCWATCH_REVIVE_NET:-api.anthropic.com:443}"
+
+# collect_stops — how each session's last turn ended, from its transcript.
+#
+# Emits {sid: {...}} for every session whose transcript could be read. Only
+# Claude Code's own records are interpreted: an API error's message (Claude
+# Code wrote it, not the model and not a tool), whether the final text ends in
+# a question mark, and counts. No assistant text, user text or tool output
+# leaves this function (principle X).
+collect_stops() { # collect_stops <sid>...
+  local sid file
+  [ $# -gt 0 ] || { printf '{}'; return 0; }
+  {
+    for sid in "$@"; do
+      file=$(transcript_path "$sid")
+      [ -n "$file" ] || continue
+      printf '%s\t%s\n' "$sid" "$(probe_native_path "$file")"
+    done
+  } | $CCWATCH_PY -c '
+import json, re, sys
+from datetime import datetime, timedelta, timezone
+
+ask, retry, cont = sys.argv[1], sys.argv[2], sys.argv[3]
+ours = {ask: "asks", retry: "retries", cont: "continues"}
+ROADMAP_CMD = re.compile(r"spec-roadmap(\s+run\b|\s*$|\s+--)")
+
+def epoch(s):
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+def text_of(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "") for b in content
+                         if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+def blocks(rec, kind):
+    c = (rec.get("message") or {}).get("content")
+    return [b for b in c if isinstance(b, dict) and b.get("type") == kind] if isinstance(c, list) else []
+
+def said(rec):
+    """What a user record IS, in the terms that matter here."""
+    origin = rec.get("origin") or {}
+    o = origin.get("kind")
+    content = (rec.get("message") or {}).get("content")
+    if blocks(rec, "tool_result"):
+        return ("tool_result", None)
+    if o == "human":
+        return ("human", text_of(content))
+    if o == "peer":
+        # A subagent hand-back arrives as a peer message, but it is the
+        # completion of background work, not somebody speaking.
+        if origin.get("handback"):
+            return ("handback", None)
+        return ("peer", origin.get("body") if isinstance(origin.get("body"), str) else text_of(content))
+    if o == "task-notification":
+        return ("meta", None)
+    if o is not None or rec.get("isMeta"):
+        return ("meta", None)
+    t = text_of(content)
+    if t.startswith("[Request interrupted"):
+        return ("interrupt", None)
+    # Older transcripts carry no origin at all. Plain text with no harness
+    # tag is somebody typing.
+    if t and not t.lstrip().startswith("<"):
+        return ("human", t)
+    return ("meta", None)
+
+def limit_reset(msg, at):
+    # "You have hit your session limit · resets 2:20am (America/New_York)"
+    m = re.search(r"resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)", msg, re.I)
+    if not m or at is None:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(m.group(4))
+    except Exception:
+        return None
+    h = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "pm" else 0)
+    local = datetime.fromtimestamp(at, tz)
+    r = local.replace(hour=h, minute=int(m.group(2) or 0), second=0, microsecond=0)
+    if r <= local:
+        r += timedelta(days=1)
+    return int(r.timestamp())
+
+out = {}
+for line in sys.stdin:
+    sid, _, path = line.rstrip("\n").partition("\t")
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        continue
+
+    # Did this session drive spec-roadmap itself? Read over the WHOLE file,
+    # because the run is usually launched hours before the stall. Only lines
+    # naming it are parsed, and only a command the session ran or a slash
+    # command it was given counts: every session carries the skill listing,
+    # which names spec-roadmap too, and that matched 88% of all sessions.
+    #
+    # Over the same pass: does it have a recurring cron job of its own still
+    # live? A session that set one will be woken by it, so its silence is the
+    # schedule working. Found on the first real run: a session flagged as
+    # paused mid-roadmap had a CronCreate polling every three hours.
+    #
+    # ⚠️ Recurring only, and only for a week. Replayed against a month of real
+    # stops, counting every CronCreate blocked 5 that were then nudged by hand:
+    # one-shot jobs (`recurring: false`) fire once and are spent, and a
+    # recurring job expires after seven days, so a week-old one schedules
+    # nothing. A CronDelete cancels the newest live one, since the id it names
+    # is only in a tool result.
+    roadmap = False
+    crons = []
+    for raw in data.split(b"\n"):
+        if b"spec-roadmap" not in raw and b"Cron" not in raw:
+            continue
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        if rec.get("isSidechain"):
+            continue
+        if rec.get("type") == "assistant":
+            for b in blocks(rec, "tool_use"):
+                inp = b.get("input") or {}
+                if b.get("name") == "Bash" and ROADMAP_CMD.search(str(inp.get("command", ""))):
+                    roadmap = True
+                elif b.get("name") == "Skill" and "spec-roadmap" in str(inp.get("skill", "")):
+                    roadmap = True
+                elif b.get("name") == "CronCreate" and inp.get("recurring") is not False:
+                    crons.append(epoch(rec.get("timestamp")) or 0)
+                elif b.get("name") == "CronDelete" and crons:
+                    crons.pop()
+        elif rec.get("type") == "user":
+            c = (rec.get("message") or {}).get("content")
+            if isinstance(c, str) and re.search(r"<command-name>/?(speckit-pipeline:)?spec-roadmap<", c):
+                roadmap = True
+
+    recs = []
+    for raw in data[-600000:].split(b"\n"):
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        if rec.get("isSidechain") or rec.get("type") not in ("user", "assistant"):
+            continue
+        recs.append(rec)
+    if not recs:
+        continue
+
+    last = recs[-1]
+    at = epoch(last.get("timestamp"))
+    row = {"kind": "none", "at": int(at) if at else None, "error": None, "label": None,
+           "resets_at": None, "ends_q": False, "asks": 0, "retries": 0,
+           "continues": 0, "answered_ask": False, "bg_pending": 0, "roadmap": roadmap,
+           "scheduled": any(at and 0 <= at - c < 7 * 86400 for c in crons)}
+
+    if last["type"] == "assistant":
+        if last.get("isApiErrorMessage"):
+            row["error"] = last.get("error") or "unknown"
+            msg = text_of((last.get("message") or {}).get("content"))
+            row["label"] = msg.replace("API Error: ", "").split("\n")[0][:80]
+            if row["error"] == "rate_limit":
+                row["kind"] = "limit"
+                row["resets_at"] = limit_reset(msg, at)
+            else:
+                row["kind"] = "api_error"
+        elif blocks(last, "tool_use"):
+            row["kind"] = "mid_turn"
+        else:
+            row["kind"] = "end_turn"
+            # The final words of the turn, which may span several records.
+            for rec in reversed(recs):
+                if rec["type"] != "assistant":
+                    break
+                t = text_of((rec.get("message") or {}).get("content")).strip()
+                if t:
+                    row["ends_q"] = t.endswith("?")
+                    break
+    else:
+        k, _ = said(last)
+        row["kind"] = {"interrupt": "interrupted", "tool_result": "mid_turn"}.get(k, "unanswered")
+
+    # Everything since the last thing YOU typed: how often ccwatch has spoken
+    # in that stretch, whether its last ask was answered with no work done,
+    # and how many background subagents have not yet handed back.
+    #
+    # ⚠️ Subagents only. Background Bash and Monitor were counted too, and the
+    # replay showed that count to be noise: a dev server or a watcher never
+    # reports back (11 launches against 2 notifications in one real stretch),
+    # so the guard blocked 8 of the stops that were then nudged by hand. A
+    # subagent always ends in exactly one hand-back, so that pairing is exact.
+    launched = finished = tools_since_real = 0
+    last_real = None
+    for rec in reversed(recs):
+        if rec["type"] == "assistant":
+            for b in blocks(rec, "tool_use"):
+                if last_real is None:
+                    tools_since_real += 1
+                inp = b.get("input") or {}
+                if b.get("name") == "ScheduleWakeup" and not inp.get("stop") and last_real is None:
+                    row["scheduled"] = True
+                if b.get("name") in ("Agent", "Task") and inp.get("run_in_background"):
+                    launched += 1
+            continue
+        k, t = said(rec)
+        if k == "handback":
+            finished += 1
+        elif k == "human":
+            if last_real is None:
+                last_real = "human"
+            break
+        elif k == "peer":
+            key = ours.get((t or "").strip())
+            if key:
+                row[key] += 1
+            if last_real is None:
+                last_real = (t or "").strip()
+    row["answered_ask"] = (last_real == ask and tools_since_real == 0)
+    row["bg_pending"] = max(0, launched - finished)
+    out[sid] = row
+print(json.dumps(out))
+' "$CCWATCH_REVIVE_ASK" "$CCWATCH_REVIVE_RETRY" "$CCWATCH_REVIVE_CONTINUE" 2>/dev/null
+}
+
+# collect_roadmaps — every spec-roadmap in the given directories, and how far
+# through it the recorded state says it is.
+#
+# The definition and the progress are separate files, written by different
+# hands (.specify/roadmaps/<slug>.json is authored, <slug>.state.json is the
+# runner's), so a roadmap with no state yet is "0 of N", not absent.
+collect_roadmaps() { # collect_roadmaps <cwd>...
+  [ $# -gt 0 ] || { printf '[]'; return 0; }
+  $CCWATCH_PY -c '
+import glob, json, os, sys
+out = []
+for cwd in sys.argv[1:]:
+    for f in sorted(glob.glob(os.path.join(cwd, ".specify", "roadmaps", "*.json"))):
+        if f.endswith(".state.json"):
+            continue
+        slug = os.path.basename(f)[:-5]
+        try:
+            with open(f) as fh:
+                entries = [e.get("slug") for e in (json.load(fh).get("entries") or [])]
+        except (OSError, ValueError, AttributeError):
+            continue
+        state = {}
+        try:
+            with open(f[:-5] + ".state.json") as fh:
+                state = json.load(fh).get("entries") or {}
+        except (OSError, ValueError, AttributeError):
+            pass
+        done = [s for s in entries if (state.get(s) or {}).get("status") == "done"]
+        current = next((s for s in entries if s not in done), None)
+        out.append({"cwd": cwd, "slug": slug, "total": len(entries), "done": len(done),
+                    "current": current,
+                    "current_status": ((state.get(current) or {}).get("status") or "not started")
+                                      if current else None})
+print(json.dumps(out))
+' "$@" 2>/dev/null || printf '[]'
+}
+
+# revive_net — can the API host be reached? Prints "up", or "down: <reason>".
+revive_net() {
+  case "${CCWATCH_FAKE_NET:-}" in
+    up) printf 'up'; return 0;;
+    down*) printf 'down: %s' "$(printf '%s' "${CCWATCH_FAKE_NET#down}" | sed 's/^:* *//')"; return 0;;
+  esac
+  $CCWATCH_PY -c '
+import socket, sys
+host, _, port = sys.argv[1].rpartition(":")
+try:
+    socket.create_connection((host, int(port)), timeout=3).close()
+    print("up", end="")
+except OSError as e:
+    print("down: %s" % (e.strerror or e), end="")
+' "$CCWATCH_REVIVE_NET" 2>/dev/null || printf 'down: no python to test with'
+}
+
+# revive_plan — what to do about each stopped session, and why.
+#
+# Pure: everything it decides on is passed in, so the whole decision table can
+# be asserted against fixtures without a socket, a network or a clock.
+revive_plan() { # revive_plan <snapshot> <stops> <roadmaps> <runners|"unreadable"> <net> <now>
+  local runners="$4"
+  [ "$runners" = "unreadable" ] && runners='null'
+  printf '%s' "$1" | jq -c \
+    --argjson stops "$2" --argjson roadmaps "$3" --argjson runners "$runners" \
+    --arg net "$5" --argjson now "$6" \
+    --argjson after "$CCWATCH_REVIVE_AFTER" \
+    --argjson retry_after "$CCWATCH_REVIVE_RETRY_AFTER" \
+    --argjson max_retries "$CCWATCH_REVIVE_MAX_RETRIES" \
+    --argjson max_asks "$CCWATCH_REVIVE_MAX_ASKS" \
+    --argjson grace "$CCWATCH_REVIVE_LIMIT_GRACE" \
+    --arg ask "$CCWATCH_REVIVE_ASK" --arg retry "$CCWATCH_REVIVE_RETRY" \
+    --arg cont "$CCWATCH_REVIVE_CONTINUE" '
+    def dur(s): if s < 90 then "\(s|floor)s" elif s < 5400 then "\(s/60|floor)m"
+                else "\(s/3600*10|floor/10)h" end;
+    [ .sessions[]
+      # Only an interactive session that says it is idle. `waiting` is a gate
+      # that belongs to you; `busy` is not stopped.
+      | select(.entrypoint == "cli" and .status_raw == "idle")
+      | . as $s
+      | ($stops[.sid]) as $st
+      | select($st != null)
+      | (if $st.at == null then null else ([$now - $st.at, 0] | max) end) as $since
+      | ([ $roadmaps[] | select(.cwd == $s.cwd and .done < .total) ] | first) as $rm
+      | { sid, name, pid, cwd, kind: $st.kind, since: $since,
+          resets_at: $st.resets_at }
+        + ( if $st.kind == "api_error" then
+              ($retry_after * pow(2; $st.retries)) as $wait
+              | ( "API error \(dur($since // 0)) ago (\($st.label // $st.error))" ) as $m
+              | if $st.retries >= $max_retries then
+                  { action: null, why: "\($m) · gave up after \($st.retries) retries" }
+                elif ($since // 0) < $wait then
+                  { action: null, why: "\($m) · retry \($st.retries + 1) in \(dur($wait - $since))" }
+                elif ($net | startswith("up") | not) then
+                  { action: null, why: "\($m) · API still unreachable: \($net | sub("^down: "; ""))" }
+                else
+                  { action: "retry", message: $retry,
+                    why: "\($m) · API reachable · retry \($st.retries + 1) of \($max_retries)" }
+                end
+            elif $st.kind == "limit" then
+              if $st.resets_at == null then
+                { action: null, why: "session limit · reset time unreadable: \($st.label // "")" }
+              elif $now < ($st.resets_at + $grace) then
+                { action: null, why: "session limit · resets in \(dur($st.resets_at - $now))" }
+              elif $st.continues >= 2 then
+                { action: null, why: "session limit · continued twice since your last message, and it stopped again" }
+              else
+                { action: "continue", message: $cont,
+                  why: "session limit reset \(dur($now - $st.resets_at)) ago" }
+              end
+            elif $st.kind == "end_turn" and $st.roadmap then
+              ( "paused \(dur($since // 0))"
+                + (if $rm == null then "" else " mid-roadmap \($rm.slug) \($rm.done)/\($rm.total)" end) ) as $m
+              | if $rm == null then
+                  { action: null, why: "\($m) · no unfinished roadmap in \($s.cwd)" }
+                elif $st.answered_ask then
+                  { action: null, why: "\($m) · already asked, and it answered without doing more — its call" }
+                elif $st.asks >= $max_asks then
+                  { action: null, why: "\($m) · asked \($st.asks) times since your last message" }
+                elif $st.ends_q then
+                  { action: null, why: "\($m) · its last turn ended on a question to you" }
+                elif $st.scheduled then
+                  { action: null, why: "\($m) · it scheduled its own wake-up" }
+                elif $st.bg_pending > 0 then
+                  { action: null, why: "\($m) · waiting on \($st.bg_pending) background task(s)" }
+                elif $runners == null then
+                  { action: null, why: "\($m) · process table unreadable, so a live runner cannot be ruled out" }
+                elif ($runners | index($s.pid)) != null then
+                  { action: null, why: "\($m) · its spec-run/spec-roadmap runner is still running" }
+                elif ($since // 0) < $after then
+                  { action: null, why: "\($m) · asking at \(dur($after))" }
+                else
+                  { action: "ask", message: $ask,
+                    why: "\($m) · next entry \($rm.current) is \($rm.current_status) · no runner, no question pending" }
+                end
+            elif $st.kind == "interrupted" and $st.roadmap then
+              { action: null, why: "you interrupted it — left alone" }
+            else empty
+            end ) ]'
+}
+
+cmd_revive() {
+  platform_detect
+  [ "$CCWATCH_PLATFORM" = windows ] && die "revive: not available on Windows" \
+    "it delivers through ccwatch send, which needs the per-session Unix socket"
+  local dry=0 once=0 as_json=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) dry=1; shift;;
+      --once)    once=1; shift;;
+      --json)    as_json=1; once=1; dry=1; shift;;
+      *) die "revive: unrecognised option '$1'" "usage: ccwatch revive [--once] [--dry-run] [--json]";;
+    esac
+  done
+  [ "$as_json" -eq 1 ] || {
+    say "${_c_bold}ccwatch revive${_c_reset} ${_c_dim}— $([ "$dry" -eq 1 ] && echo "dry run, nothing is sent" || echo "will send")$([ "$once" -eq 1 ] || echo " · every ${CCWATCH_REVIVE_INTERVAL}s, Ctrl-C to stop")${_c_reset}"
+  }
+  while :; do
+    revive_tick "$dry" "$as_json"
+    [ "$once" -eq 1 ] && return 0
+    sleep "$CCWATCH_REVIVE_INTERVAL"
+  done
+}
+
+revive_tick() { # revive_tick <dry> <as_json>
+  local dry="$1" as_json="$2" snap idle_sids cwds stops roadmaps runners net plan now
+  now=$(date '+%s')
+  snap=$(snapshot) || snap=""
+  require_json snapshot "$snap" || return 1
+  idle_sids=$(printf '%s' "$snap" | jq -r '.sessions[] | select(.entrypoint == "cli" and .status_raw == "idle") | .sid')
+  if [ -z "$idle_sids" ]; then
+    [ "$as_json" -eq 1 ] && printf '[]\n' || say "${_c_dim}$(date '+%H:%M:%S') nothing idle${_c_reset}"
+    return 0
+  fi
+  # shellcheck disable=SC2086
+  stops=$(collect_stops $idle_sids)
+  require_json collect_stops "$stops" || return 1
+  local -a cwda=()
+  cwds=$(printf '%s' "$snap" | jq -r '[.sessions[] | select(.entrypoint == "cli" and .status_raw == "idle") | .cwd] | unique | .[]')
+  while IFS= read -r c; do [ -n "$c" ] && cwda+=("$c"); done <<<"$cwds"
+  roadmaps=$(collect_roadmaps "${cwda[@]}")
+  # shellcheck disable=SC2046
+  runners=$(probe_runners $(printf '%s' "$snap" | jq -r '.sessions[] | select(.status_raw == "idle") | .pid')) \
+    || runners="unreadable"
+  # Only measured when something is waiting on it: a connection attempt every
+  # minute to say nothing is wanted is not free.
+  if printf '%s' "$stops" | jq -e 'any(.[]; .kind == "api_error")' >/dev/null 2>&1; then
+    net=$(revive_net)
+  else
+    net="unmeasured"
+  fi
+  plan=$(revive_plan "$snap" "$stops" "$roadmaps" "$runners" "$net" "$now")
+  require_json revive_plan "$plan" || return 1
+
+  if [ "$as_json" -eq 1 ]; then
+    printf '%s\n' "$plan"
+    return 0
+  fi
+  if [ "$(printf '%s' "$plan" | jq 'length')" = "0" ]; then
+    say "${_c_dim}$(date '+%H:%M:%S') nothing stopped${_c_reset}"
+    return 0
+  fi
+
+  local row action name sid msg why
+  while IFS= read -r row; do
+    action=$(printf '%s' "$row" | jq -r '.action // ""')
+    name=$(printf '%s' "$row" | jq -r '.name')
+    sid=$(printf '%s' "$row" | jq -r '.sid')
+    msg=$(printf '%s' "$row" | jq -r '.message // ""')
+    why=$(printf '%s' "$row" | jq -r '.why')
+    if [ -z "$action" ]; then
+      say "  ${_c_dim}wait${_c_reset}      $name  ${_c_dim}$why${_c_reset}"
+      continue
+    fi
+    # The word is the verdict and travels without colour (principle VII).
+    say "  ${_c_yellow}$(printf '%-8s' "$(printf '%s' "$action" | tr '[:lower:]' '[:upper:]')")${_c_reset}  $name  $why"
+    if [ "$dry" -eq 1 ]; then
+      say "            ${_c_dim}would send:${_c_reset} $msg"
+      continue
+    fi
+    # A subshell, because cmd_send ends in `die` on any failure and one bad
+    # socket must not end the watch over every other session.
+    local out rc
+    out=$( ( CCWATCH_SEND_AS="ccwatch revive" cmd_send "$sid" "$msg" ) 2>&1 ); rc=$?
+    printf '%s\n' "$out" | sed 's/^/            /'
+    revive_record "$row" "$([ "$rc" -eq 0 ] && echo sent || echo failed)"
+  done < <(printf '%s' "$plan" | jq -c '.[]')
+}
+
+revive_record() { # revive_record <plan-row> <outcome>
+  mkdir -p "$CCWATCH_HOME" 2>/dev/null || return 0
+  printf '%s' "$1" | jq -c --arg at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --arg outcome "$2" \
+    '{at:$at, event:"ccwatch.revive", session_id:.sid, cwd, target:.name,
+      action, outcome:$outcome, why}' >>"$EVENTS" 2>/dev/null || true
 }
 
 
@@ -6106,6 +6692,14 @@ USAGE
   ccwatch send <who> <msg>   put a message into a session that is ALREADY
                            running, and watch its transcript to confirm arrival
         --dry-run          print the exact frames instead of sending them
+  ccwatch revive             watch for agents that stopped when they should not
+                           have, and say what you would have typed: "retry"
+                           after an API error once the API answers again,
+                           "continue" after a session limit resets, and "are
+                           you actually done?" to one that paused mid-roadmap
+        --dry-run          say what it would send, and send nothing
+        --once             one pass, then exit
+        --json             the decisions as JSON (implies --once --dry-run)
   ccwatch peers [--days N]   which sessions have been talking to each other
   ccwatch kill <who>         stop a session with SIGTERM, never SIGKILL. The
                            transcript survives, and the resume command is
@@ -6432,7 +7026,8 @@ need awk
     install-statusline) cmd_install_statusline;;
     bar)             shift; cmd_bar "$@";;
     send)            shift; cmd_send "$@";;
-    kill)            shift; cmd_kill "$@";;
+    revive)          shift; cmd_revive "$@";;
+    kill)          shift; cmd_kill "$@";;
     deploys)         shift; cmd_deploys "$@";;
     subscribe)       shift; cmd_subscribe "$@";;
     unsubscribe)     shift; cmd_unsubscribe "$@";;
