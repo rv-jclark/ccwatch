@@ -115,8 +115,9 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # Then by 11 for its lock, switch and read-only --json, and 4 static checks
 # that both pages load the revive switch; 16 node checks on web/revive.js go
 # on the node floor. The serve-hosted revive checks need a free port and are
-# not counted, for the reason the other serve checks are not.
-TALLY_FLOOR=556
+# not counted, for the reason the other serve checks are not. And by 1 for
+# the ask as Claude Code really records it, inside its peer envelope.
+TALLY_FLOOR=557
 TALLY_FLOOR_NODE=305
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -2278,6 +2279,13 @@ rv_sess() { # rv_sess <n> <name> <cwd> [status]  — transcript on stdin
 { rv_human 3000 "run it"; rv_roadmap 2900; rv_text 1200 "Should I start entry two now?"; } | rv_sess 2 rv-question "$RVR"
 # Asked once already, and it answered without doing anything more.
 { rv_human 3000 "run it"; rv_roadmap 2900; rv_text 2000 "Entry one is merged."; rv_peer 1300 "$RV_ASK"; rv_text 1200 "Yes - I am waiting on you to rotate the key."; } | rv_sess 3 rv-answered "$RVR"
+# ⚠️ The same, with the ask as Claude Code really records it: no `body`, the
+# text only inside its "Another Claude session sent a message" envelope. The
+# fixture above carries a `body`, and was green while revive asked a real
+# session twice because the real record had none.
+{ rv_human 3000 "run it"; rv_roadmap 2900; rv_text 2000 "Entry one is merged."
+  printf '{"type":"user","timestamp":"%s","isMeta":true,"origin":{"kind":"peer","from":"ccwatch revive","verifiedPeerPid":3300},"message":{"role":"user","content":"Another Claude session sent a message:\\n%s\\n\\nThis came from another Claude session - not typed by your user."}}\n' "$(rv_iso 1300)" "$RV_ASK"
+  rv_text 1200 "Yes - the work is committed and I am waiting on you."; } | rv_sess 21 rv-answered-wrapped "$RVR"
 # Its runner is still beneath it: quiet because it is waiting, correctly.
 { rv_human 3000 "run it"; rv_roadmap 2900; rv_text 1200 "Running entry two."; } | rv_sess 4 rv-runner "$RVR"
 printf '%s %s /bin/bash /usr/local/bin/spec-roadmap run --stream\n' 9400 9304 >> "$WORK/pstree-rv"
@@ -2344,6 +2352,8 @@ else
   assert_eq "$(rv_field "$_rv" rv-question action)" "null" "a turn that ended on a question to you is left for you"
   assert_eq "$(rv_field "$_rv" rv-answered action)" "null" \
     "a session that answered the ask without doing more is not asked again — the pause is its call"
+  assert_eq "$(rv_field "$_rv" rv-answered-wrapped action)" "null" \
+    "and so is one whose ask arrived inside Claude Code's peer envelope, with no body — as real ones do"
   assert_eq "$(rv_field "$_rv" rv-runner action)" "null" "a session whose spec-roadmap runner is still beneath it is left waiting"
   assert_contains "$(rv_field "$_rv" rv-runner why)" "runner is still running" "and says that is why"
   assert_eq "$(rv_field "$_rv" rv-fresh action)" "null" "a pause shorter than CCWATCH_REVIVE_AFTER is not yet a stall"
@@ -2424,7 +2434,7 @@ assert_eq "$(jq -r 'select(.event == "ccwatch.revive" and .target == "rv-paused"
 # ⚠️ The transcripts go too, not only the registry entries. They hold peer
 # messages, and the `peers` section reads every transcript under this home:
 # left behind, they turned its "3 peer messages" into 12.
-for _i in $(seq 1 20); do
+for _i in $(seq 1 21); do
   rm -f "$FH/sessions/$((9300 + _i)).json" \
         "$FH/projects/-fake-repo/$(printf 'bbbbbbbb-0000-0000-0000-%012d' "$_i").jsonl"
 done

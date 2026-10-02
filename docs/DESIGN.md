@@ -491,6 +491,29 @@ first:
   week, it asks in 33 of 38. The other 5 are 4 turns that ended on a
   question, which were right to leave, and 1 with a live recurring cron.
 
+**Its first real ask was asked twice.** The first session revive asked
+answered "yes, intentional", and ten minutes later it was asked again, so the
+answered-once gate did nothing. The transcripts sampled while designing it
+had peer messages carrying an `origin.body`. Revive's own messages carry
+none: the text is only in `content`, inside Claude Code's envelope
+("Another Claude session sent a message:", the text, then a paragraph about
+peers). Compared whole, that never equalled the ask, so revive never saw it
+had asked. It now finds its own text as a line within the envelope, and the
+fixture records an ask exactly as the real one was recorded.
+
+**"Ran spec-roadmap" is read from command text, and that has a known false
+positive.** A session whose commands merely *contain* `spec-roadmap run`
+(in a `grep`, a `pgrep`, a test fixture) counts as having run it. The session
+that built revive was flagged this way, because its fixtures contain the
+string and its repository has a roadmap with no state. Two tighter rules
+were measured against a month of transcripts and rejected. "At command
+position" lost 4 of 27 real roadmap sessions (`SPEC_RUN_CLAUDE_BIN=claude
+spec-roadmap run …`, prefixed absolute paths). "Not inside a quoted string"
+lost a real run whose quote closes after the path, and still flagged the
+builder session. Requiring an explicit `/spec-roadmap` or `Skill` call would
+lose 20 of 27, because most roadmaps are launched from Bash. The cost of the
+false positive is one ask, which the answered-once gate holds to one.
+
 What it still cannot tell apart is a turn that is waiting on you without
 ending in a question mark ("if you can get the repo name, I'll add the
 check"). The obvious discriminators were measured and do not separate the two
@@ -2044,6 +2067,7 @@ implementation broken in the specific way it describes:
 | `revive-module`: drop the failed-pass line, the rows, or the reason in each row | 1, 2, 1 (verify-ui) |
 | `revive-module`: give the switch a `min-width` instead of a width | 2 (verify-ui) |
 | `revive-module`: anchor the panel by its right edge | 1 (verify-ui) |
+| `revive`: compare a peer message's whole `content` rather than finding the ask as a line inside Claude Code's envelope | 1 |
 | `serve`: let a serve with revive on idle-exit | 2 |
 | `serve`: drop the `/api/revive` route | 6 |
 | `serve`: idle revive's loop without a reader, as the other refreshers do. It stayed green until a check asserted a pass made with nobody reading: a live serve doing nothing looks exactly like one that is working | 1 |

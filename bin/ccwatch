@@ -3486,7 +3486,21 @@ def said(rec):
         # completion of background work, not somebody speaking.
         if origin.get("handback"):
             return ("handback", None)
-        return ("peer", origin.get("body") if isinstance(origin.get("body"), str) else text_of(content))
+        if isinstance(origin.get("body"), str):
+            return ("peer", origin.get("body"))
+        # ⚠️ No `body` is the common case, not the odd one: the first real
+        # ask revive sent arrived with only `content`, wrapped in Claude Code
+        # own envelope ("Another Claude session sent a message:", the text,
+        # then a paragraph about peers). Compared whole, that never equalled
+        # the ask, so revive never saw it had asked, and asked the same
+        # session again ten minutes after it had answered. The text it sent
+        # is a line of its own inside the envelope, so it is found as one.
+        t = text_of(content)
+        lines = [ln.strip() for ln in t.split("\n")]
+        for mine in ours:
+            if mine in lines:
+                return ("peer", mine)
+        return ("peer", t)
     if o == "task-notification":
         return ("meta", None)
     if o is not None or rec.get("isMeta"):
