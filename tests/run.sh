@@ -2003,6 +2003,8 @@ rm -f "$BH/sessions/9310.json"
 # the reset entirely.
 python3 -c "import json,time; n=int(time.time()); print(json.dumps({'at':n,'five_hour':{'used_percentage':37.0,'resets_at':n+7500}}))" \
   > "$BCH/usage.json"
+# Kept, so the cross-renderer check below can put back this exact instant.
+cp "$BCH/usage.json" "$WORK/bar-usage-7500.json"
 _barreset=$(bar_run)
 assert_contains "$_barreset" "resets in 2h" "the menu prints how long is left on the window"
 # ⚠️ And a whole hour as "2h", not "2.0h". 7500s is 2.08h, which floors to 2.0.
@@ -2014,8 +2016,11 @@ python3 -c "import json,time; n=int(time.time()); print(json.dumps({'at':n,'five
   > "$BCH/usage.json"
 assert_contains "$(bar_run --title)" "resets in 2.5h" "the title gives the hours to one decimal"
 assert_contains "$(bar_run)" "resets in 2.5h ·" "and so does the dropdown"
-python3 -c "import json,time; n=int(time.time()); print(json.dumps({'at':n,'five_hour':{'used_percentage':37.0,'resets_at':n+7500}}))" \
-  > "$BCH/usage.json"
+# ⚠️ The SAME instant `_barreset` was rendered from, not a fresh `now + 7500`.
+# Recomputed, the reset moved by however long the suite took to get here, and
+# the clock comparison below failed whenever that crossed a minute: measured
+# 12:55 AM against 12:54 AM on a run at load average 200.
+cp "$WORK/bar-usage-7500.json" "$BCH/usage.json"
 assert_contains "$_barreset" "EDT" "and the wall clock it resets at, with the zone"
 # A bare percentage does not say whether it is what you have spent or what is
 # left, and the dropdown has room to say which.
