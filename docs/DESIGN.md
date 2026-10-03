@@ -501,6 +501,13 @@ peers). Compared whole, that never equalled the ask, so revive never saw it
 had asked. It now finds its own text as a line within the envelope, and the
 fixture records an ask exactly as the real one was recorded.
 
+**And then a third time, for a different reason.** With the envelope read,
+a session that had answered was still re-asked until the cap. Its answer had
+been a `SendMessage` back to the asker followed by its closing text, and the
+gate was "answered with no tool calls since", so the reply counted as more
+work. Tools that only talk to other sessions (`SendMessage`, `ListAgents`)
+are no longer counted.
+
 **"Ran spec-roadmap" is read from command text, and that has a known false
 positive.** A session whose commands merely *contain* `spec-roadmap run`
 (in a `grep`, a `pgrep`, a test fixture) counts as having run it. The session
@@ -2068,6 +2075,7 @@ implementation broken in the specific way it describes:
 | `revive-module`: give the switch a `min-width` instead of a width | 2 (verify-ui) |
 | `revive-module`: anchor the panel by its right edge | 1 (verify-ui) |
 | `revive`: compare a peer message's whole `content` rather than finding the ask as a line inside Claude Code's envelope | 1 |
+| `revive`: count a `SendMessage` reply as work | 1 |
 | `serve`: let a serve with revive on idle-exit | 2 |
 | `serve`: drop the `/api/revive` route | 6 |
 | `serve`: idle revive's loop without a reader, as the other refreshers do. It stayed green until a check asserted a pass made with nobody reading: a live serve doing nothing looks exactly like one that is working | 1 |

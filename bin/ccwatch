@@ -3453,6 +3453,8 @@ from datetime import datetime, timedelta, timezone
 ask, retry, cont = sys.argv[1], sys.argv[2], sys.argv[3]
 ours = {ask: "asks", retry: "retries", cont: "continues"}
 ROADMAP_CMD = re.compile(r"spec-roadmap(\s+run\b|\s*$|\s+--)")
+# Tools whose only effect is talking to other sessions. They do no work.
+TALK_ONLY = {"SendMessage", "ListAgents"}
 
 def epoch(s):
     try:
@@ -3643,7 +3645,12 @@ for line in sys.stdin:
     for rec in reversed(recs):
         if rec["type"] == "assistant":
             for b in blocks(rec, "tool_use"):
-                if last_real is None:
+                # ⚠️ Replying is not working. An agent asked whether it is done
+                # very often answers by MESSAGING back (SendMessage), and that
+                # is a tool call: counted, the answer read as "it did more
+                # work", the answered-once gate never closed, and a session
+                # that had said "intentional" was asked three times running.
+                if last_real is None and b.get("name") not in TALK_ONLY:
                     tools_since_real += 1
                 inp = b.get("input") or {}
                 if b.get("name") == "ScheduleWakeup" and not inp.get("stop") and last_real is None:
