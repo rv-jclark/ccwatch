@@ -519,6 +519,20 @@ the gate is now `CCWATCH_REVIVE_RESUMED` (10) tool calls since the most
 recent ask. Fewer is an answer, and the session is not asked again until you
 next write in it.
 
+**And it asked about other sessions' roadmaps.** One repository here holds
+13 roadmaps driven by different sessions. Revive asked a session about the
+first unfinished roadmap in its directory, which belonged to another session.
+Its own roadmap had landed, and it was asked four times about one it had
+never touched. The slug is now read from the session's own commands
+(`spec-roadmap run --slug x`, `run x`), and the ask is about that roadmap
+only. Measured over a month: 20 of the 28 roadmap sessions named one, and
+nearly all of the commands that did not were `--help` and `grep`. A session
+that never named its roadmap is asked only when its directory has exactly
+one unfinished roadmap, because with several, picking one is a guess. A
+"slug" counts only if it names a roadmap file there: the matcher also picks
+up prose after `spec-roadmap run`, and the first live run read "for, instead,
+roadmap" as three slugs.
+
 **"Ran spec-roadmap" is read from command text, and that has a known false
 positive.** A session whose commands merely *contain* `spec-roadmap run`
 (in a `grep`, a `pgrep`, a test fixture) counts as having run it. The session
@@ -2087,6 +2101,9 @@ implementation broken in the specific way it describes:
 | `revive-module`: anchor the panel by its right edge | 1 (verify-ui) |
 | `revive`: compare a peer message's whole `content` rather than finding the ask as a line inside Claude Code's envelope | 1 |
 | `revive`: count a `SendMessage` reply as work | 1 |
+| `revive`: ask about the first unfinished roadmap in the directory, not the session's own | 1 |
+| `revive`: count a "slug" that names no roadmap file here | 1 |
+| `revive`: guess one roadmap when an unnamed session's directory has several unfinished | 1 |
 | `revive`: treat any tool call after an ask as resumed work (threshold 1), or never (threshold huge) | 1, 1 |
 | `serve`: let a serve with revive on idle-exit | 2 |
 | `serve`: drop the `/api/revive` route | 6 |

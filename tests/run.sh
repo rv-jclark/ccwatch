@@ -117,8 +117,9 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # on the node floor. The serve-hosted revive checks need a free port and are
 # not counted, for the reason the other serve checks are not. And by 1 for
 # the ask as Claude Code really records it, inside its peer envelope, and 1
-# for an ask answered by a SendMessage, and 2 for the resumed-work threshold.
-TALLY_FLOOR=560
+# for an ask answered by a SendMessage, 2 for the resumed-work threshold, and
+# 6 for asking about the roadmap the session itself ran.
+TALLY_FLOOR=566
 TALLY_FLOOR_NODE=305
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -2268,6 +2269,15 @@ printf '{"goal":"g","entries":[{"slug":"one"},{"slug":"two"},{"slug":"three"}]}\
 printf '{"entries":{"one":{"status":"done"},"two":{"status":"in_progress"}}}\n' > "$RVR/.specify/roadmaps/demo.state.json"
 printf '{"goal":"g","entries":[{"slug":"one"}]}\n' > "$RVD/.specify/roadmaps/demo.json"
 printf '{"entries":{"one":{"status":"done"}}}\n' > "$RVD/.specify/roadmaps/demo.state.json"
+# A repository shared by several roadmaps, as a real one is (13 in one): two
+# unfinished, one landed. Asking about "the first unfinished roadmap here"
+# asked a session four times about one it had never touched.
+RVM="$WORK/rv-multi"
+mkdir -p "$RVM/.specify/roadmaps"
+for _r in alpha beta gamma; do
+  printf '{"goal":"g","entries":[{"slug":"x"},{"slug":"y"}]}\n' > "$RVM/.specify/roadmaps/$_r.json"
+done
+printf '{"entries":{"x":{"status":"done"},"y":{"status":"done"}}}\n' > "$RVM/.specify/roadmaps/beta.state.json"
 
 : > "$WORK/ps-rv"; : > "$WORK/pstree-rv"
 rv_sess() { # rv_sess <n> <name> <cwd> [status]  — transcript on stdin
@@ -2309,6 +2319,13 @@ rv_sess() { # rv_sess <n> <name> <cwd> [status]  — transcript on stdin
 { rv_human 9000 "run it"; rv_roadmap 8900; rv_text 8000 "Entry one is merged."; rv_peer 7300 "$RV_ASK"
   for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do rv_tool $((7200 - _i * 10)) Bash '{"command":"npm test"}'; done
   rv_text 1200 "Entry two is merged."; } | rv_sess 24 rv-resumed-then-stopped "$RVR"
+# In the shared repository: it named an unfinished roadmap; it named the one
+# that has landed; it named none; and, in the one-roadmap repo, it wrote
+# prose after the command, which must not count as naming one.
+{ rv_human 3000 "run it"; rv_tool 2900 Bash '{"command":"spec-roadmap run --slug alpha --stream"}'; rv_text 1200 "Entry x is merged."; } | rv_sess 25 rv-named-open "$RVM"
+{ rv_human 3000 "run it"; rv_tool 2900 Bash '{"command":"spec-roadmap run --slug beta"}'; rv_text 1200 "All of beta is merged."; } | rv_sess 26 rv-named-landed "$RVM"
+{ rv_human 3000 "run it"; rv_roadmap 2900; rv_text 1200 "Entry x is merged."; } | rv_sess 27 rv-unnamed-shared "$RVM"
+{ rv_human 3000 "run it"; rv_tool 2900 Bash '{"command":"spec-roadmap run for the next entry"}'; rv_text 1200 "Entry one is merged."; } | rv_sess 28 rv-prose-after "$RVR"
 # Its runner is still beneath it: quiet because it is waiting, correctly.
 { rv_human 3000 "run it"; rv_roadmap 2900; rv_text 1200 "Running entry two."; } | rv_sess 4 rv-runner "$RVR"
 printf '%s %s /bin/bash /usr/local/bin/spec-roadmap run --stream\n' 9400 9304 >> "$WORK/pstree-rv"
@@ -2383,6 +2400,15 @@ else
     "and so is one that checked with a couple of commands before answering — checking is not resuming"
   assert_eq "$(rv_field "$_rv" rv-resumed-then-stopped action)" "ask" \
     "but one that resumed the work for real (12 tool calls) and stopped again is a new stall, and is asked"
+  assert_eq "$(rv_field "$_rv" rv-named-open action)" "ask" "a session that ran a named roadmap still unfinished is asked"
+  assert_contains "$(rv_field "$_rv" rv-named-open why)" "mid-roadmap alpha 0/2" "about THAT roadmap, not the first unfinished one in the directory"
+  assert_eq "$(rv_field "$_rv" rv-named-landed action)" "null" \
+    "a session whose own roadmap has landed is not asked about another session's"
+  assert_contains "$(rv_field "$_rv" rv-named-landed why)" "beta) has landed in full" "and says it is its own that has landed"
+  assert_eq "$(rv_field "$_rv" rv-unnamed-shared action)" "null" \
+    "a session that never named its roadmap, in a directory with several unfinished, is not asked — picking one is a guess"
+  assert_eq "$(rv_field "$_rv" rv-prose-after action)" "ask" \
+    "and words after the command that name no roadmap file do not count as naming one"
   assert_eq "$(rv_field "$_rv" rv-runner action)" "null" "a session whose spec-roadmap runner is still beneath it is left waiting"
   assert_contains "$(rv_field "$_rv" rv-runner why)" "runner is still running" "and says that is why"
   assert_eq "$(rv_field "$_rv" rv-fresh action)" "null" "a pause shorter than CCWATCH_REVIVE_AFTER is not yet a stall"
@@ -2463,7 +2489,7 @@ assert_eq "$(jq -r 'select(.event == "ccwatch.revive" and .target == "rv-paused"
 # ⚠️ The transcripts go too, not only the registry entries. They hold peer
 # messages, and the `peers` section reads every transcript under this home:
 # left behind, they turned its "3 peer messages" into 12.
-for _i in $(seq 1 24); do
+for _i in $(seq 1 28); do
   rm -f "$FH/sessions/$((9300 + _i)).json" \
         "$FH/projects/-fake-repo/$(printf 'bbbbbbbb-0000-0000-0000-%012d' "$_i").jsonl"
 done

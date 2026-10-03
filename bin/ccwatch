@@ -3458,6 +3458,10 @@ ask, retry, cont = sys.argv[1], sys.argv[2], sys.argv[3]
 resumed = int(sys.argv[4])
 ours = {ask: "asks", retry: "retries", cont: "continues"}
 ROADMAP_CMD = re.compile(r"spec-roadmap(\s+run\b|\s*$|\s+--)")
+# The roadmap a spec-roadmap command names: `run --slug x`, or `run x`. Words
+# that are the runner own flags are not slugs; anything else that matches no
+# roadmap file is dropped by the join, so a stray word costs nothing.
+SLUG = re.compile(r"spec-roadmap[\"\x27]?\s+(?:run|show)\b[^\n|;&]*?(?:--slug[ =]+|\s)([a-z0-9][a-z0-9-]{2,})")
 # Tools whose only effect is talking to other sessions. They do no work.
 TALK_ONLY = {"SendMessage", "ListAgents"}
 
@@ -3566,6 +3570,11 @@ for line in sys.stdin:
     # is only in a tool result.
     roadmap = False
     crons = []
+    # WHICH roadmaps it ran, by slug. A repository can hold a dozen roadmaps
+    # driven by different sessions - one real one holds 13 - and asking a
+    # session about whichever unfinished roadmap comes first asked it, four
+    # times, about one it had never touched: its own had landed in full.
+    slugs = set()
     for raw in data.split(b"\n"):
         if b"spec-roadmap" not in raw and b"Cron" not in raw:
             continue
@@ -3580,8 +3589,10 @@ for line in sys.stdin:
                 inp = b.get("input") or {}
                 if b.get("name") == "Bash" and ROADMAP_CMD.search(str(inp.get("command", ""))):
                     roadmap = True
+                    slugs.update(SLUG.findall(str(inp.get("command", ""))))
                 elif b.get("name") == "Skill" and "spec-roadmap" in str(inp.get("skill", "")):
                     roadmap = True
+                    slugs.update(SLUG.findall("spec-roadmap " + str(inp.get("args", ""))))
                 elif b.get("name") == "CronCreate" and inp.get("recurring") is not False:
                     crons.append(epoch(rec.get("timestamp")) or 0)
                 elif b.get("name") == "CronDelete" and crons:
@@ -3608,7 +3619,8 @@ for line in sys.stdin:
     row = {"kind": "none", "at": int(at) if at else None, "error": None, "label": None,
            "resets_at": None, "ends_q": False, "asks": 0, "retries": 0,
            "continues": 0, "answered_ask": False, "bg_pending": 0, "roadmap": roadmap,
-           "scheduled": any(at and 0 <= at - c < 7 * 86400 for c in crons)}
+           "scheduled": any(at and 0 <= at - c < 7 * 86400 for c in crons),
+           "roadmap_slugs": sorted(slugs)}
 
     if last["type"] == "assistant":
         if last.get("isApiErrorMessage"):
@@ -3777,7 +3789,18 @@ revive_plan() { # revive_plan <snapshot> <stops> <roadmaps> <runners|"unreadable
       | ($stops[.sid]) as $st
       | select($st != null)
       | (if $st.at == null then null else ([$now - $st.at, 0] | max) end) as $since
-      | ([ $roadmaps[] | select(.cwd == $s.cwd and .done < .total) ] | first) as $rm
+      # The roadmap THIS session ran. Named by slug when its commands named
+      # one; otherwise only when its directory has exactly one unfinished
+      # roadmap, because with several, picking one is a guess (principle VI).
+      | ([ $roadmaps[] | select(.cwd == $s.cwd and .done < .total) ]) as $open
+      | ([ $roadmaps[] | select(.cwd == $s.cwd) ]) as $here
+      # Only slugs that name a roadmap file here count: the matcher also picks
+      # up prose that follows `spec-roadmap run`, and junk must not stop the
+      # one-roadmap fallback from applying.
+      | ([ $here[].slug ] - ([ $here[].slug ] - ($st.roadmap_slugs // []))) as $mine
+      | (($mine | length) > 0) as $named
+      | (if $named then [ $open[] | select(.slug as $x | $mine | index($x)) ] | first
+         elif ($open | length) == 1 then $open[0] else null end) as $rm
       | { sid, name, pid, cwd, kind: $st.kind, since: $since,
           resets_at: $st.resets_at }
         + ( if $st.kind == "api_error" then
@@ -3807,7 +3830,11 @@ revive_plan() { # revive_plan <snapshot> <stops> <roadmaps> <runners|"unreadable
             elif $st.kind == "end_turn" and $st.roadmap then
               ( "paused \(dur($since // 0))"
                 + (if $rm == null then "" else " mid-roadmap \($rm.slug) \($rm.done)/\($rm.total)" end) ) as $m
-              | if $rm == null then
+              | if $rm == null and $named then
+                  { action: null, why: "\($m) · the roadmap it ran (\($mine | join(", "))) has landed in full" }
+                elif $rm == null and ($open | length) > 1 then
+                  { action: null, why: "\($m) · it never named its roadmap, and \($s.cwd) has \($open | length) unfinished ones" }
+                elif $rm == null then
                   { action: null, why: "\($m) · no unfinished roadmap in \($s.cwd)" }
                 elif $st.answered_ask then
                   { action: null, why: "\($m) · already asked, and it answered without resuming the work — its call" }
