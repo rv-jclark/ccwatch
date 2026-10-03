@@ -352,6 +352,7 @@ that an upgrade has broken something.
 | `CCWATCH_REVIVE_RETRY_AFTER` | `60` | seconds after an API error before the first `retry`; doubles each time |
 | `CCWATCH_REVIVE_MAX_RETRIES` | `6` | retries before `revive` gives up on a session |
 | `CCWATCH_REVIVE_MAX_ASKS` | `3` | how many times one stretch of work may be asked whether it is done |
+| `CCWATCH_REVIVE_RESUMED` | `10` | tool calls after an ask that count as the work resuming; fewer means it answered, and is not asked again until you write |
 | `CCWATCH_REVIVE_LIMIT_GRACE` | `120` | seconds past a session limit's reset before `continue` is sent |
 | `CCWATCH_REVIVE_INTERVAL` | `60` | seconds between `revive` passes |
 | `CCWATCH_REVIVE_ASK` | *Are you actually done…* | the question `revive` asks; also how it recognises its own earlier asks |

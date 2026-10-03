@@ -3417,6 +3417,10 @@ CCWATCH_REVIVE_MAX_RETRIES="${CCWATCH_REVIVE_MAX_RETRIES:-6}"
 # How many times one stretch of work (everything since your last message) may
 # be asked whether it is done. The ask is cheap; asking forever is not.
 CCWATCH_REVIVE_MAX_ASKS="${CCWATCH_REVIVE_MAX_ASKS:-3}"
+# How many tool calls after an ask count as the work having resumed, so that
+# the next stop is a new stall worth asking about. Fewer is an agent that
+# checked and answered. See collect_stops for the measurement behind 10.
+CCWATCH_REVIVE_RESUMED="${CCWATCH_REVIVE_RESUMED:-10}"
 CCWATCH_REVIVE_INTERVAL="${CCWATCH_REVIVE_INTERVAL:-60}"
 # Session limits reset on a clock the message itself states; this is the
 # margin past it before "continue" is sent, so the first request is not early.
@@ -3451,6 +3455,7 @@ import json, re, sys
 from datetime import datetime, timedelta, timezone
 
 ask, retry, cont = sys.argv[1], sys.argv[2], sys.argv[3]
+resumed = int(sys.argv[4])
 ours = {ask: "asks", retry: "retries", cont: "continues"}
 ROADMAP_CMD = re.compile(r"spec-roadmap(\s+run\b|\s*$|\s+--)")
 # Tools whose only effect is talking to other sessions. They do no work.
@@ -3640,7 +3645,17 @@ for line in sys.stdin:
     # reports back (11 launches against 2 notifications in one real stretch),
     # so the guard blocked 8 of the stops that were then nudged by hand. A
     # subagent always ends in exactly one hand-back, so that pairing is exact.
-    launched = finished = tools_since_real = 0
+    #
+    # ⚠️ "Answered" means fewer than CCWATCH_REVIVE_RESUMED tool calls since
+    # the most recent ask, not none. Asked whether it is done, an agent
+    # usually CHECKS before it answers - a `git status`, a `spec-roadmap show`,
+    # one to three commands - and a gate of "no tool calls since" read that
+    # check as the work resuming, so ten minutes later it was a new stall:
+    # measured over one day, one session asked 20 times in runs of three. The
+    # agents that really did resume ran 16 to 438 tool calls before stopping
+    # again; the ones answering ran 0 to 3.
+    launched = finished = since_ask = 0
+    seen_ask = False
     last_real = None
     for rec in reversed(recs):
         if rec["type"] == "assistant":
@@ -3650,8 +3665,8 @@ for line in sys.stdin:
                 # is a tool call: counted, the answer read as "it did more
                 # work", the answered-once gate never closed, and a session
                 # that had said "intentional" was asked three times running.
-                if last_real is None and b.get("name") not in TALK_ONLY:
-                    tools_since_real += 1
+                if not seen_ask and b.get("name") not in TALK_ONLY:
+                    since_ask += 1
                 inp = b.get("input") or {}
                 if b.get("name") == "ScheduleWakeup" and not inp.get("stop") and last_real is None:
                     row["scheduled"] = True
@@ -3669,13 +3684,16 @@ for line in sys.stdin:
             key = ours.get((t or "").strip())
             if key:
                 row[key] += 1
+            if key == "asks":
+                seen_ask = True
             if last_real is None:
                 last_real = (t or "").strip()
-    row["answered_ask"] = (last_real == ask and tools_since_real == 0)
+    row["answered_ask"] = seen_ask and since_ask < resumed
     row["bg_pending"] = max(0, launched - finished)
     out[sid] = row
 print(json.dumps(out))
-' "$CCWATCH_REVIVE_ASK" "$CCWATCH_REVIVE_RETRY" "$CCWATCH_REVIVE_CONTINUE" 2>/dev/null
+' "$CCWATCH_REVIVE_ASK" "$CCWATCH_REVIVE_RETRY" "$CCWATCH_REVIVE_CONTINUE" \
+    "$CCWATCH_REVIVE_RESUMED" 2>/dev/null
 }
 
 # collect_roadmaps — every spec-roadmap in the given directories, and how far
@@ -3792,7 +3810,7 @@ revive_plan() { # revive_plan <snapshot> <stops> <roadmaps> <runners|"unreadable
               | if $rm == null then
                   { action: null, why: "\($m) · no unfinished roadmap in \($s.cwd)" }
                 elif $st.answered_ask then
-                  { action: null, why: "\($m) · already asked, and it answered without doing more — its call" }
+                  { action: null, why: "\($m) · already asked, and it answered without resuming the work — its call" }
                 elif $st.asks >= $max_asks then
                   { action: null, why: "\($m) · asked \($st.asks) times since your last message" }
                 elif $st.ends_q then
@@ -4870,9 +4888,12 @@ def revive_loop():
         # (measured on the suite fixtures), and a switch that still read "off"
         # that long after it was flipped looked like a switch that had not
         # taken.
-        revive_publish(dict(STATE.get("revive") or {}, enabled=on, running=True))
+        started = time.time()
+        revive_publish(dict(STATE.get("revive") or {}, enabled=on, running=True,
+                            started_at=started))
         rec = {"enabled": on, "available": REVIVE_UNAVAILABLE is None,
-               "reason": REVIVE_UNAVAILABLE, "every": REVIVE_EVERY, "running": False}
+               "reason": REVIVE_UNAVAILABLE, "every": REVIVE_EVERY, "running": False,
+               "started_at": started}
         if REVIVE_UNAVAILABLE is None:
             val = run(["revive", "--json"] + (["--send"] if on else []), 180)
             if isinstance(val, dict) and isinstance(val.get("rows"), list):

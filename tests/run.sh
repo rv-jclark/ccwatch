@@ -117,8 +117,8 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # on the node floor. The serve-hosted revive checks need a free port and are
 # not counted, for the reason the other serve checks are not. And by 1 for
 # the ask as Claude Code really records it, inside its peer envelope, and 1
-# for an ask answered by a SendMessage.
-TALLY_FLOOR=558
+# for an ask answered by a SendMessage, and 2 for the resumed-work threshold.
+TALLY_FLOOR=560
 TALLY_FLOOR_NODE=305
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
@@ -2298,6 +2298,17 @@ rv_sess() { # rv_sess <n> <name> <cwd> [status]  — transcript on stdin
 { rv_human 3000 "run it"; rv_roadmap 2900; rv_text 2000 "Entry one is merged."; rv_peer 1300 "$RV_ASK"
   rv_tool 1290 SendMessage '{"to":"ccwatch","message":"Yes - intentional, waiting on my user."}'
   rv_text 1200 "Replied: the pause is intentional."; } | rv_sess 22 rv-answered-by-message "$RVR"
+# ⚠️ Asked, it CHECKED before answering - two commands - which is what real
+# agents do. Those are not the work resuming; the gate that read them as
+# such asked one session 20 times in a day.
+{ rv_human 3000 "run it"; rv_roadmap 2900; rv_text 2000 "Entry one is merged."; rv_peer 1300 "$RV_ASK"
+  rv_tool 1290 Bash '{"command":"git status"}'; rv_tool 1280 Bash '{"command":"spec-roadmap show"}'
+  rv_text 1200 "Yes - checked, it is intentional."; } | rv_sess 23 rv-answered-after-check "$RVR"
+# Asked, and it really did resume - 12 tool calls - then stopped again: a new
+# stall, and asking again is right.
+{ rv_human 9000 "run it"; rv_roadmap 8900; rv_text 8000 "Entry one is merged."; rv_peer 7300 "$RV_ASK"
+  for _i in 1 2 3 4 5 6 7 8 9 10 11 12; do rv_tool $((7200 - _i * 10)) Bash '{"command":"npm test"}'; done
+  rv_text 1200 "Entry two is merged."; } | rv_sess 24 rv-resumed-then-stopped "$RVR"
 # Its runner is still beneath it: quiet because it is waiting, correctly.
 { rv_human 3000 "run it"; rv_roadmap 2900; rv_text 1200 "Running entry two."; } | rv_sess 4 rv-runner "$RVR"
 printf '%s %s /bin/bash /usr/local/bin/spec-roadmap run --stream\n' 9400 9304 >> "$WORK/pstree-rv"
@@ -2368,6 +2379,10 @@ else
     "and so is one whose ask arrived inside Claude Code's peer envelope, with no body — as real ones do"
   assert_eq "$(rv_field "$_rv" rv-answered-by-message action)" "null" \
     "and so is one that answered by messaging back — a reply is not more work"
+  assert_eq "$(rv_field "$_rv" rv-answered-after-check action)" "null" \
+    "and so is one that checked with a couple of commands before answering — checking is not resuming"
+  assert_eq "$(rv_field "$_rv" rv-resumed-then-stopped action)" "ask" \
+    "but one that resumed the work for real (12 tool calls) and stopped again is a new stall, and is asked"
   assert_eq "$(rv_field "$_rv" rv-runner action)" "null" "a session whose spec-roadmap runner is still beneath it is left waiting"
   assert_contains "$(rv_field "$_rv" rv-runner why)" "runner is still running" "and says that is why"
   assert_eq "$(rv_field "$_rv" rv-fresh action)" "null" "a pause shorter than CCWATCH_REVIVE_AFTER is not yet a stall"
@@ -2448,7 +2463,7 @@ assert_eq "$(jq -r 'select(.event == "ccwatch.revive" and .target == "rv-paused"
 # ⚠️ The transcripts go too, not only the registry entries. They hold peer
 # messages, and the `peers` section reads every transcript under this home:
 # left behind, they turned its "3 peer messages" into 12.
-for _i in $(seq 1 22); do
+for _i in $(seq 1 24); do
   rm -f "$FH/sessions/$((9300 + _i)).json" \
         "$FH/projects/-fake-repo/$(printf 'bbbbbbbb-0000-0000-0000-%012d' "$_i").jsonl"
 done
@@ -3802,22 +3817,30 @@ EOF
     if [ -n "$SPORT_RV2" ] && wait_until 25 srv_up "$SPORT_RV2"; then
       # No reads for well past the 2s idle limit. Probed by TCP connect only,
       # never /api/state, because reading the state is what keeps a serve alive.
-      sleep 12
+      _rvt0=$(date '+%s')
+      sleep 30
       if (exec 3<>"/dev/tcp/127.0.0.1/$SPORT_RV2") 2>/dev/null; then
         t_pass "with revive on, a serve nobody reads stays up — revive is for exactly then"
       else
         t_fail "with revive on, a serve nobody reads stays up — revive is for exactly then" \
-               "gone after 12s with a 2s idle limit: $(tail -1 "$WORK/rvs-serve2.log")"
+               "gone after 30s with a 2s idle limit: $(tail -1 "$WORK/rvs-serve2.log")"
       fi
-      # ⚠️ And it kept PASSING through those 12s, which staying up does not
+      # ⚠️ And it kept PASSING through those 30s, which staying up does not
       # prove: the other refreshers idle a second after the last read, and a
       # revive loop that did the same would sit in a live serve doing nothing.
-      # This read is the first in 12s, so a recent pass was made unwatched.
-      _rvage=$(srv_jq "$SPORT_RV2" '(now - .revive.pass_at) | floor')
-      if [ -n "$_rvage" ] && [ "$_rvage" != "null" ] && [ "$_rvage" -lt 8 ]; then
-        t_pass "and kept running passes with nobody reading, every 3s here"
+      # Nothing has read the state since the serve started, so a pass that
+      # STARTED after the 1s grace was started with nobody reading.
+      #
+      # ⚠️ Its start, not its finish. The first version asserted the last pass
+      # had finished under 8s ago, and at load average 200 one pass took
+      # longer than that - "last pass 12s ago" on a revive working correctly.
+      # When a pass begins does not depend on how long it takes.
+      _rvstart=$(srv_jq "$SPORT_RV2" '.revive.started_at // 0 | floor')
+      if [ -n "$_rvstart" ] && [ "$_rvstart" -gt $(( _rvt0 + 2 )) ]; then
+        t_pass "and kept starting passes with nobody reading"
       else
-        t_fail "and kept running passes with nobody reading, every 3s here" "last pass ${_rvage}s ago"
+        t_fail "and kept starting passes with nobody reading" \
+               "newest pass started at ${_rvstart}, the unread window began at ${_rvt0}"
       fi
       assert_eq "$(srv_jq "$SPORT_RV2" '.revive.enabled')" "true" "and a new serve reads the switch the last one recorded"
       jq -cn '{enabled:false}' > "$RVC/revive.json"

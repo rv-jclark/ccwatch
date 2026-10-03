@@ -454,7 +454,7 @@ it, and a gate that cannot be read refuses (principle VI):
 | only `idle`, never `waiting` | a permission prompt is your gate, whatever the transcript says |
 | not a turn ending in `?` | it asked you something |
 | not a session you interrupted | you stopped it on purpose |
-| asked once and answered with no tool calls → never again | it has said the pause is intentional, and that is its call |
+| asked once and answered with fewer than 10 tool calls → not again until you write | it has said the pause is intentional, and that is its call. Checking before answering is not resuming |
 | at most 3 asks per stretch since your last message | asking is cheap, asking forever is not |
 | no `spec-run`/`spec-roadmap` process beneath it | it is quiet because it is waiting on its runner |
 | a process table that cannot be read → no ask | `[]` would mean "no runner anywhere", the empty-machine shape again |
@@ -507,6 +507,17 @@ been a `SendMessage` back to the asker followed by its closing text, and the
 gate was "answered with no tool calls since", so the reply counted as more
 work. Tools that only talk to other sessions (`SendMessage`, `ListAgents`)
 are no longer counted.
+
+**And then, in use, every session was asked two or three times in a row.**
+Over one day, one session was asked 20 times. Asked whether it is done, an
+agent usually *checks* before answering: a `git status`, a `spec-roadmap
+show`, one to three commands, then "yes, intentional". The gate was "no tool
+calls since the ask", so the check read as the work resuming, and ten minutes
+later the same session was a new stall, until the cap of three. The agents
+that really had resumed ran 16 to 438 tool calls before stopping again. So
+the gate is now `CCWATCH_REVIVE_RESUMED` (10) tool calls since the most
+recent ask. Fewer is an answer, and the session is not asked again until you
+next write in it.
 
 **"Ran spec-roadmap" is read from command text, and that has a known false
 positive.** A session whose commands merely *contain* `spec-roadmap run`
@@ -2076,9 +2087,10 @@ implementation broken in the specific way it describes:
 | `revive-module`: anchor the panel by its right edge | 1 (verify-ui) |
 | `revive`: compare a peer message's whole `content` rather than finding the ask as a line inside Claude Code's envelope | 1 |
 | `revive`: count a `SendMessage` reply as work | 1 |
+| `revive`: treat any tool call after an ask as resumed work (threshold 1), or never (threshold huge) | 1, 1 |
 | `serve`: let a serve with revive on idle-exit | 2 |
 | `serve`: drop the `/api/revive` route | 6 |
-| `serve`: idle revive's loop without a reader, as the other refreshers do. It stayed green until a check asserted a pass made with nobody reading: a live serve doing nothing looks exactly like one that is working | 1 |
+| `serve`: idle revive's loop without a reader, as the other refreshers do. It stayed green until a check asserted a pass made with nobody reading: a live serve doing nothing looks exactly like one that is working. That check first measured when the last pass *finished* and failed at load average 200 on a working revive; it now measures when one *started* | 1 |
 | `serve`: publish the switch only after the next pass (both the immediate publish and the pre-pass publish — either alone is masked by the other) | 1 |
 
 The four `app-win` rows above were confirmed by tracing the C# against the
