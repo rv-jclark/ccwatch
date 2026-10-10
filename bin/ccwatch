@@ -5407,9 +5407,23 @@ except OSError as e:
 # The checks are those bugs restated as numbers a script can read. None of them
 # is clever; they did not exist because the suite is entirely browserless, so
 # nobody reached for a browser.
-CHROME_CANDIDATES='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+# ⚠️ Windows paths belong here too. While this list was macOS-only,
+# `verify-ui` skipped with "no Chrome found" on a Windows host that had Chrome
+# installed at the fourth path below -- an honest-looking skip standing in for
+# a capability that was merely unreachable, which makes rule 13 (a change
+# under web/ is not done until it has been rendered and looked at)
+# unsatisfiable on that platform. Double-quoted so $HOME expands: the per-user
+# install lives under %LOCALAPPDATA%, and $HOME reaches it as an MSYS path
+# that `[ -x ]` can actually test.
+CHROME_CANDIDATES="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
 /Applications/Chromium.app/Contents/MacOS/Chromium
-/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
+/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge
+/c/Program Files/Google/Chrome/Application/chrome.exe
+/c/Program Files (x86)/Google/Chrome/Application/chrome.exe
+$HOME/AppData/Local/Google/Chrome/Application/chrome.exe
+/c/Program Files/Chromium/Application/chrome.exe
+/c/Program Files/Microsoft/Edge/Application/msedge.exe
+/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
 
 find_chrome() {
   if [ -n "${CCWATCH_CHROME:-}" ] && [ -x "${CCWATCH_CHROME}" ]; then
@@ -6878,6 +6892,15 @@ EOF
   # newer page, which is visible. The suite checks their freshness.
   if [ -n "$shots" ]; then
     mkdir -p "$shots"
+    # ⚠️ Made ABSOLUTE before it reaches Chrome. `--shots .screens` is the
+    # documented spelling, and a relative --screenshot path wrote no file at
+    # all on Windows: Chrome there is a native binary, so MSYS rewrites an
+    # absolute argument path to C:/... for it but has nothing to rewrite in a
+    # relative one. Measured side by side -- `--screenshot=rel.png` produced
+    # nothing, the same run with an absolute path produced 8966 bytes -- and it
+    # failed as "the screenshot was written by this run", which reads as a
+    # renderer problem rather than a path one.
+    shots=$(cd "$shots" && pwd)
     local p
     # A screenshot is only evidence if this run wrote it; see the check below.
     # The sleep is because `-nt` compares whole seconds under bash 3.2, and a
