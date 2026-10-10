@@ -498,7 +498,17 @@ def filetime_to_epoch(ft):
 def filetime_to_seconds(ft):
     return ((ft.dwHighDateTime << 32) | ft.dwLowDateTime) / 10000000.0
 
-k32 = ctypes.windll.kernel32
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+psapi = ctypes.WinDLL("psapi", use_last_error=True)
+# Declared, not inferred: the default restype is c_int, which would truncate a
+# HANDLE, and an undeclared argtype passes one back as 32 bits.
+k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+k32.OpenProcess.restype = ctypes.c_void_p
+k32.CloseHandle.argtypes = [ctypes.c_void_p]
+k32.GetProcessTimes.argtypes = [ctypes.c_void_p] + [ctypes.POINTER(FILETIME)] * 4
+psapi.GetProcessMemoryInfo.argtypes = [ctypes.c_void_p,
+                                       ctypes.POINTER(PROCESS_MEMORY_COUNTERS),
+                                       wintypes.DWORD]
 records, denied = [], 0
 for pid in [int(p) for p in sys.argv[1].split(",") if p]:
     h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
@@ -518,11 +528,11 @@ for pid in [int(p) for p in sys.argv[1].split(",") if p]:
                "cpu": round(filetime_to_seconds(kernel) + filetime_to_seconds(user), 2)}
         counters = PROCESS_MEMORY_COUNTERS()
         counters.cb = ctypes.sizeof(counters)
-        if ctypes.windll.psapi.GetProcessMemoryInfo(h, ctypes.byref(counters), counters.cb):
+        if psapi.GetProcessMemoryInfo(h, ctypes.byref(counters), counters.cb):
             rec["rss_mb"] = round(counters.WorkingSetSize / 1048576)
         records.append(rec)
     finally:
-        k32.CloseHandle(h)
+        k32.CloseHandle(ctypes.c_void_p(h))
 print(json.dumps({"records": records, "denied": denied}))
 ' "$pids" 2>/dev/null)
 
