@@ -7403,6 +7403,27 @@ platform_detect
 need jq "install with: brew install jq"
 need awk
 
+# ⚠️ On Windows, jq is usually a NATIVE build (a PE binary from scoop,
+# winget or a release download), and a native jq opens its streams in text
+# mode: every line it writes ends CRLF. MSYS bash's `$(...)` strips the
+# trailing CRLF but nothing strips the interior ones, so a multi-line capture
+# came back with a stray CR on every element BUT THE LAST -- measured here as
+# `git -C 'C:/Users/killc/Code/docket\r'` failing, which made four of five
+# real repositories report as `no repo` while the fifth, being last in the
+# sorted list, resolved correctly. That shape is the reason this is a wrapper
+# and not a `tr -d '\r'` at the call sites: the bug is invisible in any
+# single-value capture and in the last row of every list, so it reads as "some
+# repos are odd" rather than as a decoding fault, and there are far too many
+# call sites to keep honest one at a time.
+#
+# `-b` is jq's own binary-mode flag, so the fix is the decoder's and the exit
+# status still comes straight from jq -- `jq -e` is load-bearing in
+# collect_repos and a pipe through `tr` would have replaced it with tr's.
+# Probed rather than assumed: a jq too old for `-b` keeps the plain call.
+if [ "$CCWATCH_PLATFORM" = windows ] && command jq -b -n true >/dev/null 2>&1; then
+  jq() { command jq -b "$@"; }
+fi
+
 # ⚠️ The dispatch is ONE `{ ... }` block that ends in `exit`, and both halves
 # are load-bearing. Bash reads a script incrementally and remembers a byte
 # offset into the file; when it needs the next command it seeks back to that
