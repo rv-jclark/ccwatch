@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Build ccwatch-tray.exe — the Windows taskbar tray and the overlay.
 
@@ -39,8 +39,8 @@ if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
 
 $sdks = & dotnet --list-sdks 2>$null
 if (-not ($sdks | Where-Object { $_ -match '^8\.' })) {
-    Write-Error ".NET 8 SDK not found (only: $($sdks -join ', ')). " +
-        "Install it from https://dotnet.microsoft.com/download/dotnet/8.0"
+    Write-Error (".NET 8 SDK not found (only: $($sdks -join ', ')). " +
+        "Install it from https://dotnet.microsoft.com/download/dotnet/8.0")
     exit 1
 }
 
@@ -50,8 +50,14 @@ if (($Run -or $SelfContained) -and -not $SelfTest) {
     # -SelfTest alone.
     $webview2Key = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
     if (-not (Test-Path $webview2Key) -and -not (Test-Path ($webview2Key -replace 'WOW6432Node\\', ''))) {
-        Write-Warning "WebView2 runtime not detected — the overlay will not navigate. " +
-            "Install it from https://developer.microsoft.com/microsoft-edge/webview2/"
+        # The concatenation is PARENTHESISED. `Write-Warning "a" + "b"` does not
+        # continue a line in PowerShell: the `+` is read as another argument to
+        # the cmdlet, and the parser then fails at the end of the enclosing
+        # block with `Missing closing '}'`, pointing dozens of lines away from
+        # the real fault. This script had never been run, so it had never been
+        # parsed, and the whole file was unusable for that one pair of quotes.
+        Write-Warning ("WebView2 runtime not detected — the overlay will not navigate. " +
+            "Install it from https://developer.microsoft.com/microsoft-edge/webview2/")
     }
 }
 
