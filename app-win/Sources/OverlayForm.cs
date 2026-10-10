@@ -81,10 +81,24 @@ internal sealed class OverlayForm : Form
     {
         var handle = form.Handle;
         var exStyle = GetWindowLong(handle, GWL_EXSTYLE);
-        exStyle |= WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+        exStyle |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
         SetWindowLong(handle, GWL_EXSTYLE, exStyle);
         form.TopMost = true;
         form.ShowInTaskbar = false;
+
+        // ⚠️ Topmost is set with SetWindowPos, NOT by OR-ing WS_EX_TOPMOST into
+        // the extended style. Windows ignores that bit when it arrives through
+        // SetWindowLong - the write appears to succeed and the bit is simply
+        // not there when you read it back - and `form.TopMost = true` does not
+        // supply it either while the form has a handle but has never been
+        // shown. The overlay was therefore correct in every visible respect
+        // and sat UNDER the window it exists to float over.
+        //
+        // This is the Windows twin of the NSPanel level on macOS, and it fails
+        // the same way: invisibly, until something covers it. It was caught the
+        // first run where --selftest's output could be read at all, as
+        // `✗ the overlay stays above other windows (WS_EX_TOPMOST)`.
+        ReassertTopmost(form);
     }
 
     /// Re-asserted on show and on foreground change — `WS_EX_TOPMOST` alone
