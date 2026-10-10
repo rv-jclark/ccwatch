@@ -4110,6 +4110,30 @@ DEPLOY_SEEN="$CCWATCH_HOME/deploys-seen.json"
 #
 # The remote is the identity. The branch is carried separately, because that is
 # what distinguishes two worktrees of one repo.
+# _jq_rawpath — jq, with MSYS's argument path rewriting switched off.
+#
+# ⚠️ MSYS rewrites any ARGUMENT that looks like a POSIX path before a
+# native Windows jq sees it: `--arg c /tmp/x` arrives as
+# `C:/Users/<user>/AppData/Local/Temp/x`. The same string arriving on STDIN is
+# left exactly as written. So this cache was KEYED by the rewritten path while
+# the join downstream looks each entry up by the session's own `.cwd`, which
+# came through stdin unrewritten -- the two never matched, and every session
+# whose cwd was in MSYS form reported `no repo` for a repository `git -C`
+# resolved perfectly by hand.
+#
+# It hid from every manual check, because Claude Code records `C:/...` already
+# and the rewrite is a no-op on a path that is native to begin with. It
+# surfaced only in the hermetic suite, whose fixtures live under /tmp.
+#
+# Only safe where jq takes NO file argument -- here it is `-n`, or reads
+# stdin. A blanket disable would stop jq opening the files it is handed, which
+# is the same rewrite doing its actual job. Both spellings are set:
+# Git-for-Windows reads MSYS_NO_PATHCONV, MSYS2 reads MSYS2_ARG_CONV_EXCL. A
+# subshell keeps them off the rest of the run.
+_jq_rawpath() {
+  ( export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'; jq "$@" )
+}
+
 collect_repos() { # collect_repos <cwd>...
   local cwd cached fresh now
   now=$(date '+%s')
@@ -4126,13 +4150,13 @@ collect_repos() { # collect_repos <cwd>...
   fresh=$( for cwd in "$@"; do
       [ -n "$cwd" ] || continue
       # Already known and still fresh: no subprocess at all.
-      printf '%s' "$cached" | jq -e --arg c "$cwd" 'has($c)' >/dev/null 2>&1 && continue
+      printf '%s' "$cached" | _jq_rawpath -e --arg c "$cwd" 'has($c)' >/dev/null 2>&1 && continue
       local slug branch root
       root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) || root=""
       slug=$(git -C "$cwd" remote get-url origin 2>/dev/null \
              | sed -E 's#^git@[^:]+:##; s#^ssh://[^/]+/##; s#^https?://[^/]+/##; s#\.git$##') || slug=""
       branch=$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null) || branch=""
-      jq -cn --arg c "$cwd" --arg slug "$slug" --arg branch "$branch" \
+      _jq_rawpath -cn --arg c "$cwd" --arg slug "$slug" --arg branch "$branch" \
              --arg root "$root" --argjson at "$now" \
         '{key: $c, value: {slug: $slug, branch: $branch, root: $root, at: $at}}'
     done | jq -s 'from_entries' )

@@ -4062,7 +4062,16 @@ assert_eq "$(printf '%s' "$_rj2" | jq -r '.sessions[] | select(.name=="gamma") |
 # The identity is cached, because it costs two git subprocesses per directory.
 [ -f "$RH/repos.json" ] && t_pass "the repo lookup is cached" \
   || t_fail "the repo lookup is cached" "no repos.json written"
-assert_eq "$(jq -r --arg c "$WORK/localdirname" '.[$c].slug' "$RH/repos.json")" \
+# ⚠️ The rewriting is off for this lookup, and the file arrives by REDIRECT
+# rather than as an argument. collect_repos keys this cache by the session's
+# cwd exactly as the registry spells it, so the lookup has to spell it the same
+# way -- and a plain `--arg c "$WORK/..."` is rewritten to `C:/...` before jq
+# sees it, which is the very defect the key now avoids. Written the obvious
+# way, this assertion went red against the FIXED implementation. The redirect
+# keeps the one path that does need rewriting -- the file jq opens -- out of
+# argv, so turning the rewriting off cannot break it.
+assert_eq "$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+  jq -r --arg c "$WORK/localdirname" '.[$c].slug' < "$RH/repos.json")" \
   "acme/actual-repo-name" "with the resolved slug keyed by directory"
 
 # Unfinished runs carry it too, so a crashed run can be attributed to a repo.
