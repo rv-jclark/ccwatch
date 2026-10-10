@@ -1838,7 +1838,19 @@ if [ ! -x "$WINBIN" ]; then
 elif [ "$(uname -s)" = Darwin ]; then
   t_skip "the Windows tray app's own checks" "a Windows binary cannot run on macOS"
 else
-  _winst=$("$WINBIN" --selftest 2>&1; echo "rc=$?")
+  # ⚠️ Bounded, because this can HANG. The selftest's window-property block
+  # intermittently never returns on a real Windows host -- measured 4 runs in
+  # 12 printing every check and then stopping dead on
+  # "answers WM_MOUSEACTIVATE with MA_NOACTIVATE" -- and an unbounded call here
+  # stalled the whole suite for fourteen minutes with no output at all. A stall
+  # is worse than a failure: a failure is read, a stall is only waited on. The
+  # race is in the app and is NOT fixed; see the app-win section of
+  # docs/DESIGN.md for what was ruled out.
+  if command -v timeout >/dev/null 2>&1; then
+    _winst=$(timeout 60 "$WINBIN" --selftest 2>&1; echo "rc=$?")
+  else
+    _winst=$("$WINBIN" --selftest 2>&1; echo "rc=$?")
+  fi
   assert_contains "$_winst" "all checks passed" "the Windows app's selftest passes"
   assert_contains "$_winst" "rc=0" "and reports success as an exit code"
   # ⚠️ Named individually, per contracts/tray-app.md's claim table — a
