@@ -119,8 +119,27 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # the ask as Claude Code really records it, inside its peer envelope, and 1
 # for an ask answered by a SendMessage, 2 for the resumed-work threshold, and
 # 6 for asking about the roadmap the session itself ran.
+# The host's REAL platform, read once and before anything exports
+# CCWATCH_PLATFORM to pose the other one. A section that exercises a command
+# this host refuses outright skips against this, never against
+# CCWATCH_PLATFORM -- which is a statement about what is being simulated.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) _host_platform=windows ;;
+  *)                    _host_platform=macos ;;
+esac
+
 TALLY_FLOOR=566
 TALLY_FLOOR_NODE=305
+# ⚠️ Windows refuses send/kill/peers/revive outright -- they need POSIX
+# signals and the per-session Unix socket -- so those four sections cannot run
+# there at all and the floor has to come down by exactly what they contribute.
+# Otherwise the guard against "assertions ran but were never counted" fires on
+# every Windows run and means "this host is Windows", which costs the same
+# attention as a real regression (rule 14). Counted, not estimated:
+# 12 send + 52 revive + 7 peers + 16 kill, plus the 5 inside `serve` and
+# `collectors` that those same refusals take with them. Measured from a
+# full Windows run, not estimated: the floor said 779 counted against 784.
+TALLY_FLOOR_POSIX=92
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
 # deadline passes. Returns 0 if it succeeded.
@@ -190,6 +209,20 @@ assert_not_contains() { case "$1" in *"$2"*) t_fail "$3" "should NOT contain: $2
 assert_eq() { [ "$1" = "$2" ] && t_pass "$3" || t_fail "$3" "expected '$2', got '$1'"; }
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/ccwatch-tests.XXXXXX")
+
+# Does `chmod -x` actually clear the executable bit on this filesystem?
+# ⚠️ On an MSYS mount without ACL support it does not: the file comes
+# back -rwxr-xr-x and still runs. Two sections pose "the thing it installed
+# cannot run" exactly that way, and neither question can be asked where the
+# bit does not stick -- they skip with the reason instead of failing (rule
+# 14). Probed by doing it and READING THE BIT BACK, never by testing a
+# platform name: this is a property of the mount, not of the OS.
+_chmodx_sticks=0
+printf "#!/bin/sh\n" > "$WORK/.chmodx-probe"
+chmod +x "$WORK/.chmodx-probe" 2>/dev/null
+chmod -x "$WORK/.chmodx-probe" 2>/dev/null
+[ -x "$WORK/.chmodx-probe" ] || _chmodx_sticks=1
+rm -f "$WORK/.chmodx-probe"
 # The serve tests start real servers. Reaping them on exit is not optional:
 # a leaked one holds a port that a later run may pick, and then that run tests
 # the leaked binary instead of its own.
@@ -1138,15 +1171,40 @@ setup_run() { # setup_run <bin-dir> [stdin]
     NO_COLOR=1 "$CCWATCH" setup --bin-dir "$1" 2>&1
 }
 
+# ⚠️ Whether `ln -s` produces a symlink is a property of the host, not a
+# preference: on Windows without admin rights or Developer Mode, MSYS silently
+# COPIES the target and still exits 0, which is why cmd_setup checks the result
+# with `-L` and falls back to a two-line `exec` shim (D24). The shim holds the
+# same "never a copy" property by a different mechanism, so the assertions
+# below follow the mechanism the host actually got. Probed by trying it,
+# because `ln -s`'s exit code cannot tell the two apart.
+_symok=0
+if ln -s "$CCWATCH" "$WORK/.symprobe" 2>/dev/null && [ -L "$WORK/.symprobe" ]; then
+  _symok=1
+fi
+rm -f "$WORK/.symprobe"
+_sverb=linked
+[ "$_symok" -eq 1 ] || _sverb=shimmed
+t_note "setup: this host reports ln -s as $([ "$_symok" -eq 1 ] && echo 'a real symlink' || echo 'a copy, so the D24 shim path is under test')"
+
 mkdir -p "$SUB"
 _su=$(setup_run "$SUB")
-assert_contains "$_su" "linked" "setup links ccwatch into the directory it was given"
+assert_contains "$_su" "$_sverb" "setup links ccwatch into the directory it was given"
 # ⚠️ A symlink, never a copy. `git pull` is the documented upgrade path and a
 # copy silently stops receiving it — still working, at whatever version it was
 # copied at. It also breaks `serve`: bin/ccwatch finds web/ relative to its own
 # RESOLVED path, so a copy alone in a bin directory cannot find the pages.
-assert_eq "$(readlink "$SUB/ccwatch")" "$CCWATCH" \
-  "and it is a symlink to the checkout, not a copy of it"
+if [ "$_symok" -eq 1 ]; then
+  assert_eq "$(readlink "$SUB/ccwatch")" "$CCWATCH" \
+    "and it is a symlink to the checkout, not a copy of it"
+else
+  # The shim's whole point: it names the checkout and execs it, so `git pull`
+  # still reaches it and `serve` still resolves web/ against the checkout.
+  assert_contains "$(cat "$SUB/ccwatch")" "exec " \
+    "and it is a shim that execs the checkout, not a copy of it"
+  assert_contains "$(cat "$SUB/ccwatch")" "$CCWATCH" \
+    "and the shim names the checkout it was built from"
+fi
 
 # ⚠️ Delivery is observed, not assumed (constitution VIII). A symlink that
 # exists proves nothing — it can point at a moved path, a file that lost its
@@ -1167,18 +1225,35 @@ SUC="$WORK/setup-noexec-checkout"
 mkdir -p "$SUC/bin"
 cp "$CCWATCH" "$SUC/bin/ccwatch"
 chmod -x "$SUC/bin/ccwatch"
+# ⚠️ chmod -x does not stick on an MSYS mount without ACL support: the file
+# comes back `-rwxr-xr-x` and still runs, so the question this poses cannot be
+# asked here. Skipped with the reason rather than failed (rule 14) -- and
+# checked by READING the bit back, never by testing the platform name.
+_noexec_posed=1
+[ -x "$SUC/bin/ccwatch" ] && _noexec_posed=0
 SUB4="$WORK/setup-noexec-bin"
 mkdir -p "$SUB4"
 _sunoexec=$(printf '' | CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$WORK/setup-cch" \
             NO_COLOR=1 bash "$SUC/bin/ccwatch" setup --bin-dir "$SUB4" 2>&1; echo "rc=$?")
-assert_contains "$_sunoexec" "does not run" \
-  "setup runs what it installed, and says so when the link cannot"
-assert_contains "$_sunoexec" "rc=1" "and that is a failure, not a note"
-assert_contains "$_sunoexec" "chmod +x" "with the fix named"
+if [ "$_noexec_posed" -eq 1 ]; then
+  assert_contains "$_sunoexec" "does not run" \
+    "setup runs what it installed, and says so when the link cannot"
+  assert_contains "$_sunoexec" "rc=1" "and that is a failure, not a note"
+  assert_contains "$_sunoexec" "chmod +x" "with the fix named"
+else
+  _nxwhy="chmod -x is a no-op on this filesystem, so a checkout that lost its executable bit cannot be posed"
+  t_skip "setup runs what it installed, and says so when the link cannot" "$_nxwhy"
+  t_skip "and that is a failure, not a note" "$_nxwhy"
+  t_skip "with the fix named" "$_nxwhy"
+fi
 
 # Running it again must not be an error, and must not stack a second install.
 _su2=$(setup_run "$SUB")
-assert_contains "$_su2" "already linked" "running setup twice reports the existing link"
+# A shim host has no symlink to recognise, so cmd_setup's `grep -qF "$self"`
+# exemption applies and it simply re-shims -- same one entry, same target.
+_su2exp="already linked"
+[ "$_symok" -eq 1 ] || _su2exp="$_sverb"
+assert_contains "$_su2" "$_su2exp" "running setup twice reports the existing link"
 assert_eq "$(find "$SUB" -name 'ccwatch*' | wc -l | tr -d ' ')" "1" \
   "and leaves exactly one entry behind, not two"
 
@@ -1211,19 +1286,30 @@ assert_eq "$(cat "$SUB2/ccwatch")" "not a symlink" "and the file is left untouch
 # A symlink pointing somewhere else is a question, not a refusal — it is most
 # likely an older checkout of this same tool — but answering no has to leave it
 # exactly as it was.
-SUB3="$WORK/setup-elsewhere"
-mkdir -p "$SUB3"
-ln -s /bin/echo "$SUB3/ccwatch"
-_suelse=$(setup_run "$SUB3" 'n
+if [ "$_symok" -eq 1 ]; then
+  SUB3="$WORK/setup-elsewhere"
+  mkdir -p "$SUB3"
+  ln -s /bin/echo "$SUB3/ccwatch"
+  _suelse=$(setup_run "$SUB3" 'n
 ')
-assert_contains "$_suelse" "points somewhere else" "a link to another target is reported"
-assert_eq "$(readlink "$SUB3/ccwatch")" "/bin/echo" "and declining leaves it alone"
-# ⚠️ And accepting actually repoints it. Without this the assertion above would
-# pass against a setup that could never repoint anything at all.
-_suyes=$(setup_run "$SUB3" 'y
+  assert_contains "$_suelse" "points somewhere else" "a link to another target is reported"
+  assert_eq "$(readlink "$SUB3/ccwatch")" "/bin/echo" "and declining leaves it alone"
+  # ⚠️ And accepting actually repoints it. Without this the assertion above
+  # would pass against a setup that could never repoint anything at all.
+  _suyes=$(setup_run "$SUB3" 'y
 ')
-assert_eq "$(readlink "$SUB3/ccwatch")" "$CCWATCH" "while accepting repoints it"
-assert_contains "$_suyes" "relinked" "and says so"
+  assert_eq "$(readlink "$SUB3/ccwatch")" "$CCWATCH" "while accepting repoints it"
+  assert_contains "$_suyes" "relinked" "and says so"
+else
+  # The branch under test is `[ -L "$link" ]`, and this host cannot create the
+  # symlink that enters it. A shim pointing elsewhere takes the refusal path
+  # instead, which the "plain file in the way" assertions above already cover.
+  _rpwhy="this host cannot create a symlink, so cmd_setup's -L branch cannot be entered"
+  t_skip "a link to another target is reported" "$_rpwhy"
+  t_skip "and declining leaves it alone" "$_rpwhy"
+  t_skip "while accepting repoints it" "$_rpwhy"
+  t_skip "and says so" "$_rpwhy"
+fi
 
 # --- an absent optional tool costs something, and the line says what --------
 # ⚠️ "gh: not found" is not an answer; "no deploy panel" is. A dependency list
@@ -1237,9 +1323,17 @@ assert_contains "$_suyes" "relinked" "and says so"
 # failed for a reason that had nothing to do with gh.
 _ghdir=""
 command -v gh >/dev/null 2>&1 && _ghdir=$(dirname "$(command -v gh)")
-_needdirs=$(for _t in jq awk python3 git sed date readlink cksum tr head cut od; do
+# ⚠️ `bash` and `env` are in this list, and the directory holding bash
+# goes FIRST, because the shebang is `#!/usr/bin/env bash`. A sorted PATH on
+# Windows put %LOCALAPPDATA%/Microsoft/WindowsApps ahead of /usr/bin, `env`
+# found WSL's bash.exe launcher there, and ccwatch never started at all:
+# `WSL ERROR: execvpe /bin/bash failed` on stderr, nothing on stdout, rc=1 --
+# an assertion about gh failing for a reason with nothing to do with gh, which
+# is the same trap the note above records being caught by once already.
+_needdirs=$(for _t in jq awk python3 git sed date readlink cksum tr head cut od bash env; do
               _p=$(command -v "$_t" 2>/dev/null) && dirname "$_p"
             done | sort -u)
+_needpath="$(dirname "$(command -v bash)"):$(printf '%s\n' "$_needdirs" | tr '\n' ':')"
 if [ -z "$_ghdir" ]; then
   # An absence is the default here, so it is the PRESENT case that cannot be
   # posed. Assert the half this host can show and skip the other with why.
@@ -1251,7 +1345,7 @@ elif printf '%s\n' "$_needdirs" | grep -qx "$_ghdir"; then
          "gh shares a directory with a tool ccwatch needs, so no PATH omits only gh"
   assert_contains "$_su" "deploy panel available" "and a present one is confirmed"
 else
-  _sunogh=$(printf '' | PATH="$(printf '%s\n' "$_needdirs" | tr '\n' ':')" \
+  _sunogh=$(printf '' | PATH="$_needpath" \
             CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$WORK/setup-cch" NO_COLOR=1 \
             "$CCWATCH" setup --bin-dir "$SUB" 2>&1)
   assert_contains "$_sunogh" "no deploy panel" \
@@ -1649,6 +1743,14 @@ TMPH="$WORK/tmpdir-home"
 mkdir -p "$TMPH/projects/-t"
 printf '{"type":"user","sessionId":"dddd","cwd":"/t"}\n' > "$TMPH/projects/-t/dddd.jsonl"
 for _sub in resume peers; do
+  # peers refuses on Windows before it ever reaches mktemp, so the question
+  # this asks -- "does the temp directory come from $TMPDIR" -- cannot be put
+  # to it there. resume is available on both and still carries the claim.
+  if [ "$_host_platform" = windows ] && [ "$_sub" = peers ]; then
+    t_skip "ccwatch peers takes its temp directory from \$TMPDIR"            "peers refuses on Windows: it needs the per-session Unix socket"
+    t_skip "and says so rather than half-running"            "peers refuses on Windows: it needs the per-session Unix socket"
+    continue
+  fi
   _tout=$(TMPDIR="$WORK/no-such-tmpdir-xyz" CLAUDE_CONFIG_DIR="$TMPH" \
           CCWATCH_HOME="$WORK/tmpdir-cch" CCWATCH_FAKE_PS=/dev/null NO_COLOR=1 \
           "$CCWATCH" "$_sub" 2>&1; echo "rc=$?")
@@ -2207,6 +2309,16 @@ fine" "and a ccwatch that printed is passed through verbatim, with nothing added
 
 # =================================================================== send ====
 printf '\nsend\n'
+# ⚠️ Guarded as one section, and the body below is deliberately NOT
+# re-indented: this command refuses outright on Windows, so every assertion in
+# here is unposeable there rather than failing, and keeping the body at its
+# original indentation keeps the diff that introduced the guard readable as a
+# guard. A whole section that cannot run says so once, the way the shellcheck
+# and node sections already do -- it does not report N separate failures that
+# all mean "this host is Windows".
+if [ "$_host_platform" = windows ]; then
+  t_skip "send: the whole section" "ccwatch send refuses on Windows: delivery needs the per-session Unix socket"
+else
 
 # Injecting into a session that is already running, rather than resuming a copy
 # of its conversation. Claude Code exports CLAUDE_CODE_MESSAGING_SOCKET and
@@ -2293,7 +2405,19 @@ assert_not_contains "$_nofeed" "produced no usable JSON" \
 rm -f "$FH/sessions/9102.json"
 
 # ================================================================= revive ====
+fi
+
 printf '\nrevive\n'
+# ⚠️ Guarded as one section, and the body below is deliberately NOT
+# re-indented: this command refuses outright on Windows, so every assertion in
+# here is unposeable there rather than failing, and keeping the body at its
+# original indentation keeps the diff that introduced the guard readable as a
+# guard. A whole section that cannot run says so once, the way the shellcheck
+# and node sections already do -- it does not report N separate failures that
+# all mean "this host is Windows".
+if [ "$_host_platform" = windows ]; then
+  t_skip "revive: the whole section" "ccwatch revive refuses on Windows: it delivers through ccwatch send, which needs the per-session Unix socket"
+else
 
 # Every case here is one idle interactive session whose transcript ends in a
 # specific way, and the assertion is on what `revive` decides to do about it.
@@ -2546,6 +2670,8 @@ done
 unset _i
 
 # ================================================================ deploys ====
+fi
+
 printf '\ndeploys\n'
 
 # gh is a network call, so the cache is the seam: these assertions are about the
@@ -2653,6 +2779,16 @@ rm -f "$FH/sessions/9104.json"
 
 # ================================================================== peers ====
 printf '\npeers\n'
+# ⚠️ Guarded as one section, and the body below is deliberately NOT
+# re-indented: this command refuses outright on Windows, so every assertion in
+# here is unposeable there rather than failing, and keeping the body at its
+# original indentation keeps the diff that introduced the guard readable as a
+# guard. A whole section that cannot run says so once, the way the shellcheck
+# and node sections already do -- it does not report N separate failures that
+# all mean "this host is Windows".
+if [ "$_host_platform" = windows ]; then
+  t_skip "peers: the whole section" "ccwatch peers refuses on Windows: it needs the per-session Unix socket"
+else
 
 # A message from another session is recorded in the RECEIVER's transcript as a
 # user entry with origin.kind == "peer". That is the only place it is written,
@@ -2699,6 +2835,8 @@ assert_eq "$(peers --days 1 --json | jq '.messages')" "4" \
   "a subagent transcript one level deeper is not counted as peer traffic"
 
 # ================================================================== serve ====
+fi
+
 printf '\nserve\n'
 
 # FR-020-FR-022: no animation loop, and every periodic thing on a page routes
@@ -2968,6 +3106,11 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
   # the web root at /usr/local: `serve` died for everyone who installed it the
   # documented way, while working perfectly from the checkout. A chain of two
   # links, because Homebrew and dotfiles repos both produce one.
+  # ⚠️ Guarded, and the body is deliberately NOT re-indented, so the diff
+  # that added the guard still reads as a guard rather than as a rewrite.
+  if [ "$_symok" -ne 1 ]; then
+    t_skip "serve finds its web assets when installed as a symlink" "this host cannot create a symlink, so the documented symlink install cannot be posed"
+  else
   SPORT4=$(free_port) || SPORT4=""
   mkdir -p "$WORK/link1" "$WORK/link2"
   ln -sf "$CCWATCH" "$WORK/link1/ccwatch"
@@ -2981,7 +3124,13 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
   assert_eq "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$SPORT4/")" "200" \
     "and actually serves the dashboard through the link"
   reap_serve "$SPORT4"
+  fi
 
+  # ⚠️ Guarded, and the body is deliberately NOT re-indented, so the diff
+  # that added the guard still reads as a guard rather than as a rewrite.
+  if [ "$_host_platform" = windows ]; then
+    t_skip "the send and kill endpoints over HTTP" "serve is read-only on Windows: the write endpoints refuse, so their gates cannot be posed"
+  else
   # --- the send endpoint, which is the part with teeth ---------------------
   #
   # Binding to loopback is NOT a security boundary for this: any page open in
@@ -3072,6 +3221,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
     rm -f "$FH/sessions/9501.json"
   else
     t_skip "kill over HTTP" "no free port"
+  fi
   fi
 
   # --- and the read-only mode, for anyone who wants no endpoint at all -----
@@ -3434,6 +3584,11 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
   # empty collection would. Forced by making the running server's own copy of
   # the tool briefly unexecutable, so every subsequent collection attempt
   # fails — a private copy, so this cannot affect any other test in the suite.
+  # ⚠️ Guarded, and the body is deliberately NOT re-indented, so the diff
+  # that added the guard still reads as a guard rather than as a rewrite.
+  if [ "$_chmodx_sticks" -eq 0 ]; then
+    t_skip "a failed collection retains the prior snapshot" "chmod -x is a no-op on this filesystem, so the running server cannot be made to fail a collection"
+  else
   SPORT9=$(free_port) || SPORT9=""
   if [ -n "$SPORT9" ]; then
     TC="$WORK/toolcopy"
@@ -3475,6 +3630,7 @@ if [ "$FAST" -eq 0 ] && command -v curl >/dev/null 2>&1; then
     rm -f "$FH/sessions/9801.json"
   else
     t_skip "a failed collection retains the prior snapshot" "no free port"
+  fi
   fi
 else
   if [ "$FAST" -eq 1 ]; then
@@ -3837,6 +3993,11 @@ EOF
     t_skip "a serve nobody reads exits on its own" "no free port"
   fi
 
+  # ⚠️ Guarded, and the body is deliberately NOT re-indented, so the diff
+  # that added the guard still reads as a guard rather than as a rewrite.
+  if [ "$_host_platform" = windows ]; then
+    t_skip "revive hosted by serve" "revive refuses on Windows: it delivers through ccwatch send, which needs the per-session Unix socket"
+  else
   # --- revive, hosted by serve ----------------------------------------------
   #
   # The switch in the page is token- and Origin-gated like send, because
@@ -3945,6 +4106,7 @@ EOF
     reap_serve "$SPORT_RV3"
   else
     t_skip "serve hosts revive" "no free port"
+  fi
   fi
 
   # ⚠️ A serve outlives its own script being rewritten underneath it.
@@ -4371,6 +4533,16 @@ assert_not_contains "$_lo" "host under memory pressure" \
 
 # =================================================================== kill ====
 printf '\nkill\n'
+# ⚠️ Guarded as one section, and the body below is deliberately NOT
+# re-indented: this command refuses outright on Windows, so every assertion in
+# here is unposeable there rather than failing, and keeping the body at its
+# original indentation keeps the diff that introduced the guard readable as a
+# guard. A whole section that cannot run says so once, the way the shellcheck
+# and node sections already do -- it does not report N separate failures that
+# all mean "this host is Windows".
+if [ "$_host_platform" = windows ]; then
+  t_skip "kill: the whole section" "ccwatch kill refuses on Windows: it needs POSIX signals"
+else
 
 # The one destructive thing the tool does, so the assertions are mostly about
 # what it REFUSES. A real process is never killed here: the fixtures use pids
@@ -4475,6 +4647,8 @@ assert_contains "$_rm" "claude --resume $MSID" \
 
 
 # ============================================================ roster-module ===
+fi
+
 printf '\nroster-module\n'
 #
 # web/roster.js is the pure roster-row-shaping module for the docked agent
@@ -6516,6 +6690,9 @@ printf '\n'
 floor="$TALLY_FLOOR"
 if command -v node >/dev/null 2>&1; then
   floor=$((floor + TALLY_FLOOR_NODE))
+fi
+if [ "$_host_platform" = windows ]; then
+  floor=$((floor - TALLY_FLOOR_POSIX))
 fi
 # ⚠️ The floor is a guard against assertions that run without being counted,
 # so it can only mean anything on a full run. Under --fast the count is
