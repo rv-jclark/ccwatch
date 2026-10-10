@@ -361,11 +361,28 @@ mksess() { # mksess <pid> <sid> <name> <cwd> <status|-> <entrypoint> [waitingFor
  "kind":"interactive","entrypoint":"$6","name":"$3","version":"9.9.9"$extra}
 EOF
 }
+# epochfmt <epoch> <+format> - format an instant, on either host's `date`.
+#
+# `date -r EPOCH` is the BSD/macOS spelling; GNU `date` spells it
+# `date -d @EPOCH` and reads `-r` as "take the mtime of this FILE". On Windows
+# that difference is silent and expensive: `date -r 1791647162` looked for a
+# file of that name, printed nothing, and `touch -t ""` then failed with
+# `touch: invalid date format ''`. Every fixture transcript kept the mtime of
+# its own creation, so the silence each assertion was written to measure read
+# as 0s - with no assertion naming the cause. Probed by asking `date` to
+# round-trip an epoch rather than by testing `uname`: it is the behaviour that
+# matters, and a host with a file named `86400` would flip a name-based test.
+if [ "$(date -r 86400 '+%s' 2>/dev/null)" = "86400" ]; then
+  epochfmt() { date -r "$1" "$2"; }
+else
+  epochfmt() { date -d "@$1" "$2"; }
+fi
+
 # <sid> <seconds-ago>: a transcript last written that long ago. The mtime IS the
 # assertion input, so it is set explicitly rather than left to write order.
-mktrans() { touch -t "$(date -r "$(( $(date '+%s') - $2 ))" '+%Y%m%d%H%M.%S')" "$FH/projects/-fake-repo/$1.jsonl"; }
+mktrans() { touch -t "$(epochfmt "$(( $(date '+%s') - $2 ))" '+%Y%m%d%H%M.%S')" "$FH/projects/-fake-repo/$1.jsonl"; }
 # <pid> <cpu-seconds>: what ps would have reported.
-mkps() { printf '%s %s %s\n' "$1" "$(date -r "$(( $(date '+%s') - 3600 ))" '+%a %b %e %T %Y')" "$2"; }
+mkps() { printf '%s %s %s\n' "$1" "$(epochfmt "$(( $(date '+%s') - 3600 ))" '+%a %b %e %T %Y')" "$2"; }
 
 # ⚠️ CCWATCH_CPU_MIN_GAP is lowered from its 1.5s default to 0.2s. The CPU
 # delta is only believed when two samples are far enough apart to mean
@@ -505,7 +522,7 @@ rm -f "$FH/sessions/9006.json"
 # pid looks. Without this guard an unrelated process resurrects a dead row.
 mksess 9007 aaaaaaaa-0000-0000-0000-000000000007 impostor /fake/repo busy cli
 mktrans aaaaaaaa-0000-0000-0000-000000000007 30
-printf '%s %s %s\n' 9007 "$(date -r "$(( $(date '+%s') - 172800 ))" '+%a %b %e %T %Y')" "5:00.00" > "$WORK/ps-r"
+printf '%s %s %s\n' 9007 "$(epochfmt "$(( $(date '+%s') - 172800 ))" '+%a %b %e %T %Y')" "5:00.00" > "$WORK/ps-r"
 assert_eq "$(printf '%s' "$(ccwatch_json "$WORK/ps-r")" | jq '.sessions | length')" "0" \
   "a registry file whose pid was recycled is not reported as a live session"
 # Mutation check: the same fixture with a start time that MATCHES does appear, so
@@ -587,7 +604,15 @@ assert_eq "$(printf '%s' "$_cr" | jq -r '.sessions[] | select(.name=="owner") | 
   "the session severity is left alone, so 'idle' and 'crashed' stay two separate claims"
 
 # --- needs_input: the pipeline's own record of being blocked on you ----------
-sed -i '' 's/"status":"running"/"status":"needs_input"/' "$FSPEC/state.json"
+# ⚠️ Not `sed -i ''`: that empty backup-suffix argument is the BSD/macOS
+# spelling, and GNU sed takes no argument for -i -- it read the '' as the
+# script (a no-op) and the s/// as a FILENAME, printing `sed: can't read
+# s/"status":"running"/...` while leaving state.json untouched. The phase
+# stayed `running`, so this fixture could not pose needs_input at all, and the
+# assertion below measured psev 3 against the 4 it names. A temp file and a mv
+# is the one in-place form both seds agree on.
+sed 's/"status":"running"/"status":"needs_input"/' "$FSPEC/state.json" >"$FSPEC/state.json.ni" \
+  && mv "$FSPEC/state.json.ni" "$FSPEC/state.json"
 assert_eq "$(printf '%s' "$(ccwatch_json "$WORK/ps-cr")" | jq -r '.sessions[] | select(.name=="owner") | .psev')" "4" \
   "a phase that stopped to ask you something ranks with a session that is waiting"
 rm -f "$FH/sessions/9010.json" "$FH/sessions/9011.json"
@@ -956,7 +981,7 @@ cat > "$UAH/sessions/9951.json" <<EOF
  "name":"usage-one","version":"9.9.9","status":"idle",
  "statusUpdatedAt":$(( (_uanow - 240) * 1000 ))}
 EOF
-touch -t "$(date -r "$((_uanow - 30))" '+%Y%m%d%H%M.%S')" \
+touch -t "$(epochfmt "$((_uanow - 30))" '+%Y%m%d%H%M.%S')" \
   "$UAH/projects/-fake-repo/dd000001-0000-0000-0000-000000000001.jsonl"
 mkps 9951 "1:00.00" > "$WORK/ps-ua"
 
@@ -1062,12 +1087,17 @@ rm -f "$UAC/usage.json"
 # A mixed install: an older statusline writes only usage.json, and ignoring it
 # would report "not reporting" on a machine that plainly is.
 rm -f "$UAC/usage"/*.json
+# ⚠️ The path goes in as an ARGUMENT, not inside the program text. MSYS
+# rewrites argument paths for a native child (`/c/x` becomes `C:/x`) but leaves
+# the program text alone, so a native python3 read '/c/.../usage.json' as a
+# path on the current drive and raised FileNotFoundError. The fixture was never
+# written, so the reading it stands for read as absent.
 python3 -c "
-import json, time
+import json, sys, time
 n = int(time.time())
 json.dump({'at': n, 'session': 'legacy',
            'five_hour': {'used_percentage': 44.0, 'resets_at': n + 7000}},
-          open('$UAC/usage.json', 'w'))"
+          open(sys.argv[1], 'w'))" "$UAC/usage.json"
 assert_contains "$(ua_run bar --title)" "44%" \
   "a legacy single-file reading is still read when no per-reporter file exists"
 rm -f "$UAC/usage.json"
@@ -1739,7 +1769,7 @@ bar_sess() { # bar_sess <pid> <sid> <name> <cwd> <status|-> <entrypoint> [waitin
  "kind":"interactive","entrypoint":"$6","name":$(printf '%s' "$3" | jq -Rs .),"version":"9.9.9"$extra}
 EOF
 }
-bar_trans() { touch -t "$(date -r "$(( $(date '+%s') - $2 ))" '+%Y%m%d%H%M.%S')" "$BH/projects/-fake-repo/$1.jsonl"; }
+bar_trans() { touch -t "$(epochfmt "$(( $(date '+%s') - $2 ))" '+%Y%m%d%H%M.%S')" "$BH/projects/-fake-repo/$1.jsonl"; }
 # A port nothing is listening on, so the dashboard item has a known state to
 # assert against rather than whatever this machine happens to be running.
 #
@@ -4399,7 +4429,7 @@ rm -f "$FH/sessions/9401.json" "$FH/sessions/9402.json" "$FH/sessions/9403.json"
 mksess 9405 kkkkkkkk-0000-0000-0000-000000000005 heavy "$WORK/other" idle cli
 mktrans kkkkkkkk-0000-0000-0000-000000000005 10
 # ps reports RSS in KB as its last column.
-printf '%s %s %s %s\n' 9405 "$(date -r "$(( $(date '+%s') - 3600 ))" '+%a %b %e %T %Y')" "0:10.00" 204800 \
+printf '%s %s %s %s\n' 9405 "$(epochfmt "$(( $(date '+%s') - 3600 ))" '+%a %b %e %T %Y')" "0:10.00" 204800 \
   > "$WORK/ps-mem"
 _mem=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-mem" CCWATCH_HOME="$KH" \
        NO_COLOR=1 "$CCWATCH" --json 2>/dev/null)
