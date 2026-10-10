@@ -95,6 +95,7 @@ is the same expression the table's `LAST` column uses.
 ```bash
 ./tests/run.sh                  # everything: shellcheck, then the assertions
 ./app/build.sh --selftest       # build the menu bar app and run its own checks
+powershell -File ./app-win/build.ps1 -SelfTest   # the Windows tray app (needs the .NET 8 SDK)
 ./app/build.sh --run            # build it and launch it
 ./bin/ccwatch once              # one paint against the real ~/.claude
 ./bin/ccwatch doctor            # is ccwatch's own view still trustworthy
@@ -270,26 +271,96 @@ produced a specific wrong output that someone believed.
   with no hedge — a probe that cannot measure now reports `failed` with a
   reason, never an empty result standing in for zero.
 
-  ⚠️ **The Windows read path does not work yet, and this is measured, not
-  feared.** It has now run once on a real `windows-latest` host: **607
-  passed, 145 failed, 8 skipped**, in 36m31s against macOS's 1m29s. Nearly
-  every failure reads `got ''` — the read path returns no rows at all, so
-  `busy`, `waiting`, `HUNG?` and the repo column all come back empty. The
-  irony is worth keeping: this feature exists so an unmeasurable host cannot
-  read as an empty one, and its first real run reproduces that shape.
+  ⚠️ **The Windows read path works, and this is measured on a real host**
+  (Windows 11, MINGW64, bash 5.2, Python 3.10.11, jq 1.8.2): `ccwatch once`
+  reports the whole fleet with repo, branch, age, CPU and silence filled in,
+  and `doctor` says it agrees with `claude agents --json` exactly. The earlier
+  note here said the break was probably `probe_mtimes` or path translation.
+  **It was neither** — `probe_mtimes` was `ok` on the first run. Read the
+  "Windows, and text mode" section of `docs/DESIGN.md` before touching any of
+  this; the three real causes were:
 
-  What that run did establish as working: platform detection
-  (`platform: windows (MINGW64_NT-10.0-26100)`), the bash locator
-  (`C:\msys64\usr\bin\bash.exe`), `CCWATCH_FAKE_PS` parity across both
-  platforms, and the guard that no platform tool is called outside the seam.
-  So the break is downstream of detection — `probe_mtimes` or the
-  native/POSIX path translation are the first places to look, since a
-  transcript that is never found drops its whole row.
+  1. `_probe_proc_windows` read its control pid from `/proc/self/winpid`,
+     which inside `$(cat ...)` is the **forked `cat`'s** pid — already exited,
+     so `OpenProcess` answered `ERROR_INVALID_PARAMETER` every time and the
+     probe refused on every host. It is `/proc/$$/winpid`.
+  2. A native (PE) `jq` writes **CRLF**, and `$(...)` strips only the trailing
+     one — so every multi-line capture carried a stray `\r` on every element
+     **but the last**. One wrapper beside `need jq` passes `-b`. Native
+     `python3` does the same and no flag stops it, so **pass paths to python
+     as arguments, never interpolated into the program text**: MSYS rewrites
+     argument paths for a native child and leaves program text alone.
+  3. The fixture builders in `tests/run.sh` used BSD spellings GNU reads
+     differently — `date -r EPOCH` (GNU: a reference FILE) and `sed -i ''`
+     (GNU: `-i` takes no argument). Both printed to stderr on every run and
+     were invisible anyway, because they printed between assertion lines.
 
-  `app-win/` has still never been compiled; no host here has the .NET SDK.
-  The `windows-latest` job is deliberately `continue-on-error` until the read
-  path reports a fleet. Treat "runs on both" as a design intention with a
-  known-failing implementation behind it, not a measurement.
+  **How a path reaches a native child decides whether it survives**, and this
+  is the rule to carry around — it cost the most time of anything here:
+
+  | reaches the child as | MSYS does | so |
+  |---|---|---|
+  | an **argument** | rewrites `/tmp/x` to `C:/.../Temp/x` | good for a file it must OPEN, silently wrong for a path that is DATA |
+  | **program text** (`-c '...'`) | nothing | the child resolves `/tmp/x` against the current drive and fails |
+  | **stdin** | nothing | survives exactly as written |
+
+  So: pass a path python must OPEN as an argument, never inside the program;
+  and where a path is DATA (`jq --arg c "$cwd"`), turn the rewriting off —
+  `_jq_rawpath` does, and only for calls that hand jq no file. Getting this
+  wrong keyed `collect_repos`'s cache by a rewritten path while the join looked
+  it up by the unrewritten one, so every fixture repo read `no repo`; real
+  sessions were fine because Claude Code records `C:/...` already, which is why
+  it hid from every manual check.
+
+  Three more that only bite on Windows, all now handled: native jq **cannot
+  open a process-substitution path** (`/proc/<pid>/fd/63`) — pass a real file;
+  a `powershell.exe` launch **sometimes returns nothing at all**, so
+  `probe_clock` asks its two fixed instants in one spawn and retries an EMPTY
+  answer (never a wrong one); and `bash` on a sparse PATH can resolve to
+  **WSL's launcher** in `WindowsApps`, which makes `#!/usr/bin/env bash` fail
+  with `WSL ERROR: execvpe /bin/bash failed` and no stdout at all.
+  `_ccwatch_resolve_bash` already excludes it by verifying `uname -s`; a test
+  that builds its own PATH has to keep bash's directory on it, first.
+
+  What the host cannot pose, it skips with the reason (rule 14): `chmod -x`
+  does not stick under MSYS, so the lost-executable-bit assertions cannot be
+  posed, and `ln -s` without admin rights or Developer Mode falls back to the
+  D24 shim, so the symlink assertions assert the shim's `exec` target instead.
+  `revive` refuses on Windows by design (delivery needs the Unix socket), so
+  its section forces `CCWATCH_PLATFORM=macos` — what those 45 assertions test
+  is the decision, which has no platform in it.
+
+  `app-win/` **has now been compiled**, with the .NET 8 SDK, and
+  `--selftest` reports 20 checks all passing. It had never been handed to a
+  compiler before, and four defects were waiting: `build.ps1` did not parse
+  (a `+` string continuation in command-argument position, twice), then still
+  did not parse (no UTF-8 BOM, so Windows PowerShell 5.1 read the file as ANSI
+  and an em-dash decoded into a smart quote that closed a string early),
+  `--selftest` printed nothing at all (a `WinExe` has no console, so every
+  `Console.WriteLine` was discarded while the exit code stayed correct), and
+  the overlay was never actually topmost (`WS_EX_TOPMOST` is ignored when set
+  through `SetWindowLong` — it needs `SetWindowPos`). `docs/DESIGN.md` has the
+  order they had to be fixed in, because each hid the next.
+
+  ⚠️ **Its selftest still hangs about a third of the time**, on the one block
+  that builds a real `OverlayForm`. Five plausible causes were measured and
+  none moved the rate (`docs/DESIGN.md` lists them so they are not retried);
+  the experiments were reverted rather than kept. `tests/run.sh` calls it under
+  `timeout 60` so a hang is a bounded failure instead of a silent fourteen
+  minute stall — do not remove that bound while the race is open.
+
+  ⚠️ **`app-win/Sources/BuildInfo.cs` is tracked AND generated.** `build.ps1`
+  overwrites it just before `dotnet publish`, and the committed state must stay
+  the empty fallback, so every build dirties the tree:
+  `git checkout -- app-win/Sources/BuildInfo.cs` belongs after each one. What
+  it records is the bash the tray will launch — "the candidate that normally
+  wins", since a GUI process started from Explorer inherits no PATH — so it
+  mirrors `BashLocator`'s exclusions and its `uname -s` check. A bare
+  `Get-Command bash.exe` recorded **WSL's** bash here, which sees no Windows
+  process ids and would have shown an empty fleet for ever.
+
+  The `windows-latest` job stays `continue-on-error` until a green run is
+  routine rather than new.
 - `python3` is used for the socket client, date parsing and the HTTP server.
   Pass programs with `python3 -c`, never on stdin — a heredoc on stdin collides
   with the payload the program is trying to read, which cost a whole debugging

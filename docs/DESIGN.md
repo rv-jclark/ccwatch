@@ -1759,11 +1759,13 @@ fallback, while the app it had been replaced by went unmentioned.
 ./tests/run.sh          # shellcheck, then the whole assertion suite
 ```
 
-CI runs the same script on macOS and on Windows. The Windows job is
-`continue-on-error` because the Windows read path does not work yet: its first
-real run had 145 failures, nearly all an empty result. What follows is the
-design that job is working towards. It does not describe a platform that works
-today. Windows runs under the runner's Git Bash,
+CI runs the same script on macOS and on Windows. The Windows read path now
+reads a real fleet: on a Windows 11 host (MINGW64, bash 5.2, Python 3.10,
+jq 1.8.2) `ccwatch once` reports all nine live sessions with their repo,
+branch, age, CPU and silence filled in. Getting there took three fixes, none
+of them in the probe layer the first failing run pointed at -- see "Windows,
+and text mode" below, because all three share one shape and the next one will
+too. Windows runs under the runner's Git Bash,
 not WSL — WSL cannot see Windows process ids, which is the corroborating
 signal behind every verdict. Every host-dependent measurement goes through a
 named probe in the `platform` section: macOS keeps `ps -o lstart=`, `stat -f`,
@@ -2042,6 +2044,24 @@ implementation broken in the specific way it describes:
 | keep that reservation at phone width, making the header wider than the window | 1 (verify-ui) |
 | write the narrow-width override as `.gauges` rather than `header .gauges`, so it loses to a later rule | 1 (verify-ui) |
 | turn `_probe_proc_windows`'s "winpid missing → fail" branch into "winpid missing → absent, print `[]`" | 3 |
+| read the proc probe's control pid from `/proc/self/winpid` instead of `/proc/$$/winpid`, so it is the forked `cat`'s pid | 1 — not a planted mutation: this was the implementation, and it refused on every real Windows host |
+| build the win32 proc query on `ctypes.windll` rather than `WinDLL(..., use_last_error=True)`, so `get_last_error()` is always 0 | 1 — run against pid 4 (System): `denied` falls from 1 to 0 and an access-denied process reads as "not running", which is rule 4 inverted |
+| drop `-b` from the Windows `jq` wrapper | 1 — four of five repositories regress to `no repo`; the fifth, last in sort order, stays correct, which is why this needs a whole-list check and not a spot check |
+| spell the fixture clock `date -r EPOCH` (BSD) where the host has GNU `date` | 1 — fixture mtimes stop being set at all, so silence reads 0s |
+| spell the fixture edit `sed -i ''` (BSD) where the host has GNU `sed` | 1 |
+| leave `CHROME_CANDIDATES` macOS-only, so `verify-ui` skips on a Windows host that has Chrome | 1 — a skip, not a failure: the capability goes missing without the suite going red |
+| hand Chrome a relative `--screenshot` path on Windows | 2 (verify-ui) — not a planted mutation: this was the implementation, and it reported the screenshots as unwritten with the page itself rendering perfectly |
+| feed a native jq a process substitution instead of a real file (`--slurpfile live <(...)`) | 1 — not planted either: `resume` printed `jq: error: writing output failed: Invalid argument` and dropped the whole LAST KNOWN ROSTER block, with the heading above it looking normal |
+| restore the `export CCWATCH_PLATFORM=macos` leak out of the collectors section | 42 revive + 23 serve + 9 roster + 3 bar on a Windows host, and **0** on macOS — the mutation that proves a leaked export is invisible on the platform it names |
+| drop bash's own directory from the gh assertion's constructed PATH | 1 on Windows, 0 on macOS |
+| leave TALLY_FLOOR unadjusted on a host that refuses send/revive/peers/kill | 1 — the floor fires and reports "assertions are running but not registering" when what actually happened is that four sections honestly skipped |
+| key `collect_repos` with a plain `jq --arg c "$cwd"` on Windows, letting MSYS rewrite the path | 4 — not a planted mutation: this was the implementation, and it reported `no repo` for every fixture repository while real sessions, whose cwds are already native, stayed correct |
+| ask `probe_clock`'s two fixed instants in two powershell spawns instead of one | intermittent — 2 bar assertions in 8 runs, 0 in the other 6; the mutation that only fails sometimes, and the reason the fix is measured over 15 runs rather than 1 |
+| retry a WRONG powershell clock answer as well as an empty one | 0 today, but it would let a candidate that answers consistently wrongly be accepted on a retry — recorded because "retry on failure" is the obvious generalisation and it is the wrong one here |
+| set the overlay's topmost state by OR-ing `WS_EX_TOPMOST` into `SetWindowLong` | 1 (app-win --selftest) — not a planted mutation: this was the implementation, and it was caught by the first run whose output could be read |
+| strip the UTF-8 BOM from `app-win/build.ps1` | the whole file stops parsing under Windows PowerShell 5.1, with the error pointing at a brace dozens of lines from the em-dash that caused it |
+| drop `AttachConsole` from the `--selftest` path | 0 — and that is the point: the selftest still exits 0/1 correctly while printing nothing, so every assertion in tests/run.sh that reads its text goes quiet rather than red |
+| record the build-time bash with a bare `Get-Command bash.exe` | 0 in any suite — it compiles, runs, and reports an empty fleet for ever, because the recorded WSL bash cannot see Windows process ids |
 | collapse `_probe_proc_bsd_parse`'s `absent`/`ok` branches into a single unconditional `ok` | 1 |
 | drop `probe_mtimes`'s control-query guard, so an unreadable root reports `ok` with an empty listing instead of `failed` | 3 |
 | report `load1: 0` in `_probe_host_windows`'s jq transform instead of `null` | 2 |
@@ -2249,6 +2269,306 @@ later run picked at random, so that run's own server failed to bind and the
 stale one — predating the route under test — answered `404`. The suite now
 picks a port nothing is listening on, asserts it got the port it asked for,
 and reaps its servers on every exit path; `serve` reaps its own child.
+
+## Windows, and text mode
+
+Three defects kept the Windows read path returning nothing, and the useful
+thing about them is not any one fix: it is that all three were **a tool
+behaving as documented on its own platform**, where the code had encoded the
+other platform's spelling. None was in the probe layer, which is where the
+first failing CI run was read as pointing -- that run's 145 failures were
+nearly all `got ''`, and `probe_mtimes` and path translation were written down
+here as the first places to look. Both were fine. The lesson that generalised
+is that an empty result is a poor compass: it says a chain broke, not where.
+
+**1. `/proc/self/winpid` is the pid of whatever reads it.** `_probe_proc_windows`
+verifies it can call `OpenProcess` at all before trusting the answer for the
+session pids -- a control query, the same shape every probe uses. It read the
+shell's Windows pid as `winpid=$(cat /proc/self/winpid)`. But `$(...)` forks,
+so `/proc/self` there is **`cat`'s** own process, which has exited by the time
+Python runs. `OpenProcess` answered `ERROR_INVALID_PARAMETER` every time, the
+control query failed, and the probe refused on every host -- so the whole fleet
+read as unmeasurable. Two successive reads returning 72352 and then 132636 is
+what gave it away. It now reads `/proc/$$/winpid`: procfs's record of *this
+shell's* Windows pid, which is stable across reads and is what the comment
+always said was wanted. The comment's warning -- "never `$$`, which is an MSYS
+pid" -- was correct and was still the thing that misled, because `$$` as a
+*path component* is exactly right.
+
+**2. A native `jq` writes CRLF.** On Windows `jq` is usually a native PE build,
+and a native build opens its streams in text mode: every line it writes
+ends CRLF.
+MSYS bash's `$(...)` strips the trailing CRLF, and nothing strips the interior
+ones -- so a multi-line capture comes back with a stray `\r` on every element
+**but the last**. Measured: four of five real repositories reported `no repo`
+because `git -C 'C:/Users/killc/Code/docket\r'` cannot resolve, while the
+fifth, being last in the sorted list, was correct. That is the worst possible
+distribution of a decoding fault -- it reads as "some repositories are odd"
+rather than as an encoding problem, and a single-value capture never shows it
+at all. The fix is one wrapper beside `need jq`, using jq's own binary-mode
+flag:
+
+```bash
+if [ "$CCWATCH_PLATFORM" = windows ] && command jq -b -n true >/dev/null 2>&1; then
+  jq() { command jq -b "$@"; }
+fi
+```
+
+A `tr -d '\r'` at the call sites was the alternative and is worse twice over:
+there are too many call sites to keep honest, and `tr` would replace jq's exit
+status with its own -- `jq -e` is load-bearing in `collect_repos`. `-b` is
+probed rather than assumed, so a jq too old for it keeps the plain call.
+
+Native **`python3`** translates newlines the same way, and there is no flag or
+environment variable that stops it -- only `sys.stdout.reconfigure(newline="
+")`
+inside the program. It costs nothing today because every multi-line Python
+program here either emits JSON (trailing whitespace is ignored) or reads its
+input with `.strip()`/`split(None)`. It is written down because the next one
+added will not necessarily do either.
+
+**3. `date -r` and `sed -i ''` are BSD spellings, and GNU has a different
+meaning for both.** Both were in the fixture builders in `tests/run.sh`, so
+both corrupted the inputs assertions measure rather than the assertions
+themselves:
+
+| The BSD form | What GNU does with it | What it cost |
+|---|---|---|
+| `date -r EPOCH '+FMT'` | `-r` means "take the mtime of this FILE", so the epoch is a filename: `date: 1791647162: No such file or directory` | `touch -t ""` failed with `invalid date format`, so every fixture transcript kept the mtime of its own creation and the silence each assertion measures read as 0s |
+| `sed -i '' 's/x/y/' f` | `-i` takes no argument: `''` is the script (a no-op) and `s/x/y/` is a filename | `state.json` was never modified, so a phase meant to be `needs_input` stayed `running` and the assertion measured psev 3 against the 4 it names |
+
+Both now go through a form both hosts agree on -- `epochfmt`, which probes by
+asking `date` to round-trip an epoch rather than by testing `uname`, and a
+`sed` to a temp file followed by `mv`. Neither error was silent: both printed
+to stderr on every run. They were invisible anyway, because they printed
+*between* assertion lines in a suite whose output is read for its red marks.
+
+`verify-ui` is the one place still macOS-only by data rather than by design:
+`CHROME_CANDIDATES` listed only `/Applications/...` paths, so on Windows it
+skipped for "no Chrome" on a host with Chrome installed. The Windows paths are
+now in the list. A skip that is honest about its reason can still be a
+capability quietly missing, and rule 13 -- a change under `web/` is not done
+until it has been rendered and looked at -- is unsatisfiable on a platform
+where the renderer can never be found.
+
+With those paths in place `verify-ui` ran on Windows for the first time and
+reported **106 checked, 0 failed, 6 skipped** -- but two of those checks had to
+be fixed first, and the second is the more interesting:
+
+**4. A relative `--screenshot` path writes nothing.** Chrome on Windows is a
+native binary, so MSYS rewrites an *absolute* argument path to `C:/...` for it
+and has nothing to rewrite in a relative one. `--shots .screens` is the
+documented spelling, and `--screenshot=rel.png` produced no file at all while
+the identical run with an absolute path produced 8966 bytes. It failed as "the
+screenshot was written by this run", which reads as a renderer fault rather
+than a path one. `cmd_verify_ui` now resolves `$shots` with `cd … && pwd`
+before Chrome sees it.
+
+**5. `bash` on a sparse PATH can be WSL's launcher.** `%LOCALAPPDATA%/Microsoft/
+WindowsApps/bash.exe` starts WSL, and the shebang here is `#!/usr/bin/env
+bash`. The gh assertion builds its own PATH out of the directories holding the
+tools ccwatch needs, sorted -- and `WindowsApps` sorts ahead of `/usr/bin`, so
+`env` found WSL first and ccwatch never started: two lines of
+`WSL ERROR: execvpe /bin/bash failed` on stderr, nothing on stdout, rc=1. The
+product code was already right about this (`_ccwatch_resolve_bash` excludes
+System32's copy by path and verifies every remaining candidate by running
+`uname -s`); it was the *test's* synthetic PATH that was wrong. It now carries
+bash's own directory, first.
+
+**6. MSYS rewrites argument paths, and that cuts both ways.** This is the
+counterpart to the Python rule above, and the two are easiest to remember
+together:
+
+| How a path reaches a native child | What MSYS does | So |
+|---|---|---|
+| as an **argument** (`prog /tmp/x`) | rewrites it to `C:/Users/.../Temp/x` | a path the child must OPEN works; a path that is DATA is silently changed |
+| inside **program text** (`python3 -c "open('/tmp/x')"`) | nothing | the child resolves `/tmp/x` against the current drive and fails |
+| on **stdin** | nothing | the string survives exactly as written |
+
+`collect_repos` was caught by the first row. It keys its cache by working
+directory and builds each entry with `jq -cn --arg c "$cwd"` -- and `--arg` is
+an argument, so a cwd of `/tmp/ccwatch-tests.XXXX/localdirname` was stored
+under `C:/Users/<user>/AppData/Local/Temp/ccwatch-tests.XXXX/localdirname`. The
+join downstream looks each entry up by the session's own `.cwd`, which arrives
+through jq's *stdin* and is therefore unrewritten. The two never matched, so
+`repo` came back `null` for a repository `git -C` resolved perfectly by hand.
+
+What makes this one worth writing down is where it hid. Claude Code records
+`C:/...` working directories already, and the rewrite is a no-op on a path that
+is native to begin with -- so every manual check on real sessions passed. It
+could only be seen in the hermetic suite, whose fixtures live under `/tmp`,
+where it read as "the git lookup is broken on Windows" rather than as an
+encoding fault. `_jq_rawpath` turns the rewriting off (`MSYS_NO_PATHCONV=1`
+for Git-for-Windows, `MSYS2_ARG_CONV_EXCL='*'` for MSYS2) for exactly the two
+calls that pass a path as DATA. It is scoped to a subshell and used nowhere
+that hands jq a file to open, because there the rewriting is doing its job.
+
+**7. A `powershell.exe` launch sometimes returns nothing at all.** `probe_clock`
+validates its candidates against two fixed instants that straddle a DST
+boundary, and it asked for them in two separate spawns. Its own candidate
+report is what caught the result:
+
+```
+powershell-tz: '12:45 PM EDT'/''
+```
+
+The first instant answered; the second, launched immediately after, returned
+empty. One empty answer fails validation, so the candidate was rejected,
+`_ccwatch_clock_impl` became `none`, and the reset clock vanished from the menu
+bar and the table -- measured 2 runs in 8, with the percentage beside it still
+correct. In isolation the same two calls were right 20 times out of 20: it only
+appears inside a full snapshot, and only sometimes, which is the worst shape a
+bug can have. Both halves are fixed: the two fixed instants are now answered by
+**one** spawn rather than two, and an EMPTY answer is retried once. A WRONG
+answer is never retried -- rejecting those is what validation is for. Measured
+after: 0 missing in 15.
+
+### The leak that made all of it look worse
+
+One line accounted for more failures than every defect above put together:
+
+```bash
+export CCWATCH_PLATFORM=macos CCWATCH_PY=python3
+```
+
+It is in the `collectors` section, and it is correct there -- `collect_live` is
+eval'd into the suite's own shell and called as a function, so it needs the
+variable in THIS shell rather than in a child's environment. But it is
+`export`ed and never restored, so it silently reconfigured **every remaining
+section**: roughly 400 assertions, a third of the suite. On macOS that is
+invisible, because macos is already the answer. On Windows it forced the BSD
+probes onto a GNU host, and the run said so in its own footer the whole time:
+
+```
+exercised: proc=ps(BSD)  mtimes=stat-f(BSD)  clock=none  host=vm_stat+sysctl
+```
+
+`clock=none` is `probe_clock` reporting that no candidate validated -- which is
+exactly why the bar's reset clock vanished and why the cross-renderer clock
+check could read a clock from neither renderer. The diagnosis that cost the
+most time was believing those were three separate bugs in `bar`, `revive` and
+`serve`. A leaked export is the most expensive kind of test-only state,
+because its symptoms appear in sections that have nothing to do with it, and
+it is `unset` now the moment its subsection ends.
+
+### app-win, compiled for the first time
+
+`app-win/` had never been built: no host here had the .NET SDK, so the code had
+been written, reviewed and merged without once being handed to a compiler. With
+the .NET 8 SDK installed it now builds and `--selftest` reports **20 checks, all
+passed** — but only after four defects, and the order they had to be fixed in is
+the interesting part, because each one hid the next.
+
+**`build.ps1` did not parse.** Twice:
+
+```powershell
+Write-Warning "WebView2 runtime not detected. " +
+    "Install it from https://..."
+```
+
+PowerShell does not continue a line after `+` in command-argument position; the
+`+` is read as another argument, and the parser then fails at the end of the
+enclosing block with `Missing closing '}'`, pointing dozens of lines from the
+fault. Both are parenthesised now.
+
+**And then it still did not parse,** because the file is UTF-8 with no BOM and
+Windows PowerShell 5.1 reads such a file as ANSI. The em-dash in a comment
+(`E2 80 94`) decodes to `â€"` under CP1252, and `"` is a smart quote that ends
+the string early — so the prose after it became bare tokens: `Unexpected token
+'the'`. A BOM fixes every non-ASCII character in the file at once, including the
+`⚠️` this project writes everywhere. Any `.ps1` here that carries non-ASCII needs
+one, or it is pwsh-7-only without saying so.
+
+**`--selftest` printed nothing.** The project is a `WinExe`, which starts with no
+console attached, so every `Console.WriteLine` went to a sink that discards.
+The exit code was still right, which is the trap: `tests/run.sh` asserts on the
+TEXT of specific claims rather than on the exit code, precisely so a selftest
+cannot pass by saying nothing — and here it said nothing while exiting 0.
+`AttachConsole(ATTACH_PARENT_PROCESS)` puts it back, and `Console.SetOut` has to
+follow it, because .NET resolves `Console.Out` once and a WinExe resolves it to
+the sink.
+
+**And the first readable run immediately failed a real check:**
+
+```
+✗ the overlay stays above other windows (WS_EX_TOPMOST)
+```
+
+`ApplyOverlayWindowProperties` OR-ed `WS_EX_TOPMOST` into the extended style and
+wrote it with `SetWindowLong`. Windows **ignores** that bit when it arrives that
+way — the call succeeds and the bit is not there when read back — and
+`form.TopMost = true` does not supply it either while the form has a handle but
+has never been shown. Topmost is set with `SetWindowPos(HWND_TOPMOST, …)`, which
+`ReassertTopmost` already did; it is now called from `Apply` as well. This is the
+Windows twin of the `NSPanel` level on macOS and fails identically: invisibly,
+until something covers it.
+
+**`BuildInfo.cs` recorded WSL's bash.** `build.ps1` writes the bash interpreter
+into the binary because a GUI process launched from Explorer does not inherit a
+shell's PATH, which makes it "the candidate that normally wins" — and it chose
+it with a bare `Get-Command bash.exe`. On this machine that returns
+`C:\Windows\system32\bash.exe`, with the WindowsApps copy behind it and no MSYS
+bash on the Windows PATH at all. Both are WSL. `BashLocator` excludes System32
+by path and verifies every candidate by running `uname -s`; the build-time
+recorder did neither, so it baked the one interpreter the whole design rules out
+into the binary, where it outranks the locator. WSL cannot see Windows process
+ids, so the tray would have reported an empty fleet for ever, with no error
+anywhere. `Find-MsysBash` now mirrors `BashLocator.Candidates()` exactly,
+exclusion and `uname -s` check included.
+
+The same lines also escaped wrongly. `-replace '\\', '\\\\'` looks like "write a
+backslash as two", but a backslash is literal in a .NET regex *replacement* —
+only `$` is special — so it inserted four, and the recorded path came out as
+`C:\\\\Windows\\\\system32\\\\bash.exe`. `.Replace('\\', '\\\\')`, the ordinary
+string method, is literal on both sides and gives the two a C# literal needs.
+
+**Still open: the selftest can hang.** About a third of runs print every check
+and then stop dead on `and answers WM_MOUSEACTIVATE with MA_NOACTIVATE`, which
+is the one block that builds a real `OverlayForm`. Ruled out by measurement,
+none of which moved the rate: skipping `CoreWebView2` initialisation, not
+constructing the `WebView2` control at all, dropping the `using` so the form is
+never disposed, swapping `SendMessage` for `SendMessageTimeout`, and replacing
+`Environment.Exit` with `ExitProcess` to bypass managed teardown. Those
+experiments were reverted rather than left in: an unproven change that is kept
+because it *might* help is indistinguishable later from one that was measured.
+What remains is a race in window creation on a thread with no message pump, and
+it is not fixed.
+
+What IS fixed is the cost of it: `tests/run.sh` now calls the selftest under
+`timeout 60`, because an unbounded call stalled the suite for fourteen minutes
+with no output. A stall is worse than a failure — a failure is read, a stall is
+only waited on. CI never sees either, because the `windows-latest` job does not
+build `app-win`, so the section skips there with its reason.
+
+⚠️ `app-win/Sources/BuildInfo.cs` is tracked **and** generated: `build.ps1`
+overwrites it immediately before `dotnet publish`, and the committed state must
+stay the empty fallback so `BashLocator`/`CliLocator` fall through to their own
+candidates rather than trusting a path from somebody else's machine. So a build
+dirties the tree, and `git checkout -- app-win/Sources/BuildInfo.cs` belongs
+after every one.
+
+### What Windows cannot pose, and says so
+
+Four commands -- `send`, `revive`, `peers`, `kill` -- refuse on Windows by
+design: they need POSIX signals and the per-session Unix socket. Their sections
+are guarded as whole sections and skip with that reason, the way the
+`shellcheck` and `node` sections already do, rather than reporting 87 separate
+failures that all mean "this host is Windows". `TALLY_FLOOR` comes down by
+exactly those 87 on a Windows host, because the floor is a guard against
+assertions running uncounted and would otherwise fire on every Windows run --
+costing the attention rule 14 exists to protect.
+
+Two more are host facts rather than platform ones, and both are detected by
+**trying them**, never by testing a platform name:
+
+- `ln -s` without admin rights or Developer Mode copies instead of linking,
+  and still exits 0. `cmd_setup` already checks the result with `-L` and falls
+  back to the D24 shim; the assertions now follow whichever mechanism the host
+  produced, and assert the shim's `exec` target as the "not a copy" property.
+- `chmod -x` does not stick on an MSYS mount without ACL support -- the file
+  comes back `-rwxr-xr-x` and still runs. The lost-executable-bit assertions
+  cannot be posed there, so they skip, and the probe reads the bit back rather
+  than assuming.
 
 ## Performance
 
