@@ -1346,22 +1346,29 @@ assert_contains "$(probe_report)" "$(printf 'mtimes\tstat-f(BSD)\tfailed')" \
   "and the report says failed, not absent, when the control query itself could not run"
 
 # --- the control query, generalised: a failing control query says nothing,
-# never an empty result (FR-004). On a host with no /proc/self/winpid (this
-# macOS runner, standing in for the seam — D11's actual "use $$ instead"
-# defect needs a real Windows, since ctypes.windll fails identically here
-# whatever pid it is handed), the Windows path must refuse rather than
-# reporting the pid list as a measured absence. Mutation-checked: turning the
-# "winpid missing -> fail" branch into "winpid missing -> absent, print []"
-# flips rc from 1 to 0 and the payload from nothing to "[]" — exactly what
-# these three assertions catch.
+# never an empty result (FR-004). Posed by pointing CCWATCH_PY at a command
+# that cannot answer, so the control query fails on EITHER host.
+#
+# ⚠️ The previous version posed it by relying on the macOS runner having no
+# /proc/<pid>/winpid at all. On a real Windows host, where it exists and works,
+# that asserted the opposite of the truth and went red for correct behaviour.
+# Worse, it could not have caught the defect it sat closest to: reading the
+# control pid from /proc/self/winpid gives the forked `cat`'s pid, already
+# exited, so OpenProcess answered ERROR_INVALID_PARAMETER and the control query
+# failed ALWAYS -- which is indistinguishable from what this assertion was
+# asking to see. A check that cannot tell "refuses when it should" from
+# "refuses always" is not a check on refusing.
 _ccwatch_probe_report=""
 CCWATCH_PLATFORM=windows
+_pp_save_py="${CCWATCH_PY:-}"
+CCWATCH_PY=false
 probe_proc "1,2,3" > "$WORK/pp-win.out"
 _pp_win_noproc_rc=$?
+CCWATCH_PY="$_pp_save_py"
 assert_eq "$_pp_win_noproc_rc" "1" \
-  "the Windows proc probe refuses when it cannot verify the control pid via /proc/self/winpid"
+  "the Windows proc probe refuses when it cannot verify its control pid"
 assert_eq "$(cat "$WORK/pp-win.out")" "" "and prints nothing rather than an empty machine"
-assert_contains "$(probe_report)" "/proc/self/winpid" \
+assert_contains "$(probe_report)" "control pid" \
   "and says why, rather than reporting the pid list as an empty machine"
 CCWATCH_PLATFORM=macos
 unset -f ps_out probe_note probe_report probe_proc _probe_proc_bsd_parse _probe_proc_macos \

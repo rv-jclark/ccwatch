@@ -434,29 +434,42 @@ _probe_proc_macos() { _probe_proc_bsd_parse "$1" "$2"; }
 # list at once. ERROR_INVALID_PARAMETER (87) is a measured absence for that
 # pid ("not running"); ERROR_ACCESS_DENIED (5) is a failure to measure for
 # that pid, counted and reasoned rather than folded into "not running" (D12).
-# The control query uses the pid in /proc/self/winpid — never $$, which is an
-# MSYS pid and would fail always (D11).
+# The control query uses the Windows pid procfs reports for THIS shell, read
+# as /proc/$$/winpid — never $$ itself, which is an MSYS pid OpenProcess would
+# always reject (D11), and never /proc/self/winpid, which is the pid of the
+# forked `cat` doing the reading: a process already reaped by the time python
+# runs, so OpenProcess answered ERROR_INVALID_PARAMETER every time and the
+# whole Windows read path refused on every host (D11a).
 _probe_proc_windows() { # _probe_proc_windows <pids> <impl-label>
-  local pids="$1" impl="$2" winpid out denied
+  local pids="$1" impl="$2" winpid ctl out denied
 
   if [ "$impl" = "powershell-cim" ]; then
     _probe_proc_windows_powershell "$pids"
     return $?
   fi
 
-  if [ -r /proc/self/winpid ]; then
-    winpid=$(cat /proc/self/winpid 2>/dev/null)
+  if [ -r "/proc/$$/winpid" ]; then
+    winpid=$(cat "/proc/$$/winpid" 2>/dev/null)
   fi
-  if [ -z "$winpid" ] || ! out=$($CCWATCH_PY -c '
+  if [ -z "$winpid" ]; then
+    probe_note proc "$impl" failed "refused: no control pid for this shell at /proc/\$\$/winpid"
+    return 1
+  fi
+  # Prints ok, or err:<code>, so the refusal below can name the reason rather
+  # than reporting the pid list as a measured absence (FR-004).
+  ctl=$($CCWATCH_PY -c '
 import ctypes, sys
-pid = int(sys.argv[1])
-h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+k32.OpenProcess.restype = ctypes.c_void_p
+h = k32.OpenProcess(0x1000, False, int(sys.argv[1]))
 if not h:
-    sys.exit(1)
-ctypes.windll.kernel32.CloseHandle(h)
-print("ok")
-' "$winpid" 2>/dev/null); then
-    probe_note proc "$impl" failed "refused: could not verify the control pid via /proc/self/winpid"
+    print("err:%d" % ctypes.get_last_error())
+else:
+    k32.CloseHandle(ctypes.c_void_p(h))
+    print("ok")
+' "$winpid" 2>/dev/null)
+  if [ "$ctl" != "ok" ]; then
+    probe_note proc "$impl" failed "refused: could not verify the control pid $winpid via /proc/\$\$/winpid${ctl:+ ($ctl)}"
     return 1
   fi
 
