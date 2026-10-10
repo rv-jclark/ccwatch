@@ -641,7 +641,7 @@ _CCWATCH_CLOCK_EST_EPOCH=1704141000   # 2024-01-01 20:30:00 UTC -> 3:30 PM EST
 _CCWATCH_CLOCK_EST_WANT="3:30 PM EST"
 
 _ccwatch_clock_select() {
-  local candidates c a1 a2
+  local candidates c a1 a2 _clk_pair
   case "$CCWATCH_PLATFORM" in
     macos) candidates="date-r(BSD)" ;;
     windows) candidates="date-d(GNU) powershell-tz" ;;
@@ -656,8 +656,17 @@ _ccwatch_clock_select() {
         a1=$(TZ=America/New_York date -d "@$_CCWATCH_CLOCK_EDT_EPOCH" '+%I:%M %p %Z' 2>/dev/null | sed 's/^0//' | tr -d '\r')
         a2=$(TZ=America/New_York date -d "@$_CCWATCH_CLOCK_EST_EPOCH" '+%I:%M %p %Z' 2>/dev/null | sed 's/^0//' | tr -d '\r') ;;
       powershell-tz)
-        a1=$(_ccwatch_clock_powershell "$_CCWATCH_CLOCK_EDT_EPOCH")
-        a2=$(_ccwatch_clock_powershell "$_CCWATCH_CLOCK_EST_EPOCH") ;;
+        # ⚠️ ONE spawn for both fixed instants. Every powershell.exe launch
+        # is a chance to come back empty, and selection needs BOTH answers to
+        # validate, so asking in two spawns doubled the exposure for a question
+        # one spawn answers. Measured before this: `powershell-tz:
+        # '12:45 PM EDT'/''` -- the first instant answered, the second,
+        # launched immediately after, returned nothing, and the whole candidate
+        # was rejected, so the reset clock vanished for that run.
+        _clk_pair=$(_ccwatch_clock_pair)
+        [ -n "$_clk_pair" ] || _clk_pair=$(_ccwatch_clock_pair)
+        a1=$(printf '%s' "$_clk_pair" | sed -n '1p')
+        a2=$(printf '%s' "$_clk_pair" | sed -n '2p') ;;
     esac
     _ccwatch_clock_candidate_answers="$_ccwatch_clock_candidate_answers$c: '$a1'/'$a2'; "
     if [ "$a1" = "$_CCWATCH_CLOCK_EDT_WANT" ] && [ "$a2" = "$_CCWATCH_CLOCK_EST_WANT" ]; then
@@ -672,7 +681,39 @@ _ccwatch_clock_select() {
 }
 _ccwatch_clock_candidate_answers=""
 
-_ccwatch_clock_powershell() { # _ccwatch_clock_powershell <epoch-seconds>
+# ⚠️ Asked twice when the answer comes back EMPTY. Back-to-back
+# `powershell.exe` launches intermittently produce no output at all on Windows,
+# and probe_clock's own candidate report is what caught it:
+#
+#   powershell-tz: '12:45 PM EDT'/''
+#
+# The first fixed instant answered; the second, launched immediately after,
+# returned nothing. Selection then validated no candidate, _ccwatch_clock_impl
+# became `none`, and the reset clock vanished from the menu bar AND the table
+# for that run -- measured 2 runs in 8, with the percentage beside it still
+# correct, which reads as a renderer bug rather than a probe one. Isolated, the
+# same two calls in a loop were right 20 times out of 20, so this only shows up
+# inside a full snapshot and only sometimes: the worst shape to debug from.
+#
+# An empty answer is a failed spawn, not a measurement, so it is worth asking
+# again. A WRONG answer is never retried -- selection has to keep rejecting
+# that, which is the whole point of validating against two fixed instants --
+# and if the retry is empty too the candidate still fails, with the reason.
+# Both fixed instants from one powershell, newest-first order fixed by the
+# caller: line 1 is the EDT instant, line 2 the EST one.
+_ccwatch_clock_pair() {
+  powershell -NoProfile -Command "
+    \$tz = [TimeZoneInfo]::FindSystemTimeZoneById('Eastern Standard Time')
+    foreach (\$e in @($_CCWATCH_CLOCK_EDT_EPOCH, $_CCWATCH_CLOCK_EST_EPOCH)) {
+      \$dt = [DateTimeOffset]::FromUnixTimeSeconds(\$e).UtcDateTime
+      \$local = [TimeZoneInfo]::ConvertTimeFromUtc(\$dt, \$tz)
+      \$abbr = if (\$tz.IsDaylightSavingTime(\$local)) { 'EDT' } else { 'EST' }
+      Write-Output (\$local.ToString('h:mm tt') + ' ' + \$abbr)
+    }
+  " 2>/dev/null | tr -d '\r'
+}
+
+_ccwatch_clock_once() { # _ccwatch_clock_once <epoch-seconds>
   powershell -NoProfile -Command "
     \$dt = [DateTimeOffset]::FromUnixTimeSeconds($1).UtcDateTime
     \$tz = [TimeZoneInfo]::FindSystemTimeZoneById('Eastern Standard Time')
@@ -680,6 +721,14 @@ _ccwatch_clock_powershell() { # _ccwatch_clock_powershell <epoch-seconds>
     \$abbr = if (\$tz.IsDaylightSavingTime(\$local)) { 'EDT' } else { 'EST' }
     Write-Output (\$local.ToString('h:mm tt') + ' ' + \$abbr)
   " 2>/dev/null | tr -d '\r'
+}
+
+_ccwatch_clock_powershell() { # _ccwatch_clock_powershell <epoch-seconds>
+  local out
+  out=$(_ccwatch_clock_once "$1")
+  # One retry, and only on an EMPTY answer -- see the note above.
+  [ -n "$out" ] || out=$(_ccwatch_clock_once "$1")
+  printf '%s' "$out"
 }
 
 # probe_host — one JSON object (ram/swap/load), or `null`, or nothing on
