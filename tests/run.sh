@@ -1584,6 +1584,19 @@ _cnone=$(PATH="$WORK/psshim:$PATH" CCWATCH_FAKE_PS='' collect_live '[{"pid":9001
 assert_eq "$_cnone" "[]" \
   "but a working ps with no live pids is an absence, and is reported as one"
 
+# ⚠️ Scoped here, not left set. The export above is for the eval'd
+# collect_live, which needs CCWATCH_PLATFORM in THIS shell because it is called
+# as a function rather than through the CLI. Exported and never restored, it
+# silently reconfigured every remaining section of the suite: harmless on
+# macOS, where it is already the answer, and on Windows it forced the BSD
+# probes (`ps -o lstart=`, `stat -f`, `date -r`) onto a GNU host for the next
+# ~400 assertions. The footer said so all along -- `exercised: proc=ps(BSD)
+# mtimes=stat-f(BSD) clock=none` on a Windows run -- and `clock=none` is
+# exactly why the bar's reset clock vanished. A leaked export is the most
+# expensive kind of test-only state, because its failures surface as product
+# bugs in sections that have nothing to do with it.
+unset CCWATCH_PLATFORM CCWATCH_PY
+
 # --- the poisoned cache, which is the same bug's other half -----------------
 # While collect_live was appending, `$live` was two values, so the CPU-cache
 # writer's `reduce` ran twice and wrote TWO objects into the cache file. The
