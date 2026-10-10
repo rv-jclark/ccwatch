@@ -2457,7 +2457,16 @@ cmd_resume() {
     rn=$(jq -r '.sessions | length' "$ROSTER" 2>/dev/null) || rn=0
     if [ -n "$rage" ] && [ "${rn:-0}" -gt 0 ]; then
       local gone
-      gone=$(jq -c --slurpfile live <(printf '%s' "$snap" | jq -c '[.sessions[].sid]') '
+      # ⚠️ A real file, never <(...). On Windows jq is a native build and
+      # cannot open MSYS's process-substitution path: it reported
+      # `Could not open /proc/40185/fd/63`, exited, and the inner jq then died
+      # writing into the closed pipe -- surfacing as
+      # `jq: error: writing output failed: Invalid argument` above a heading
+      # that otherwise looked completely normal. Argument paths are safe,
+      # because MSYS rewrites those for a native child; a /proc/<pid>/fd path
+      # has nothing to rewrite to.
+      printf '%s' "$snap" | jq -c '[.sessions[].sid]' >"$TMP/live-sids.json"
+      gone=$(jq -c --slurpfile live "$TMP/live-sids.json" '
         ( $live[0] // [] ) as $l
         | [ .sessions[] | select( ([.sid] | inside($l)) | not ) ]' "$ROSTER" 2>/dev/null)
       if [ "$(printf '%s' "${gone:-[]}" | jq 'length')" -gt 0 ]; then
