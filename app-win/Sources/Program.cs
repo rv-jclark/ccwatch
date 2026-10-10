@@ -10,6 +10,7 @@
 // contracts/bar-document.md and contracts/tray-app.md.
 
 using System.Diagnostics;
+using System.IO;
 using System.Net.Sockets;
 using System.Text;
 using Microsoft.Win32;
@@ -780,11 +781,58 @@ internal static class Colors
 
 internal static class Program
 {
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern bool AttachConsole(int dwProcessId);
+
+    private const int AttachParentProcess = -1;
+
+    /// <summary>
+    /// Put stdout back on the terminal that launched us.
+    /// </summary>
+    /// <remarks>
+    /// ⚠️ This project is a WinExe, which starts with NO console attached, so
+    /// every Console.WriteLine in Selftest goes nowhere. `--selftest` ran, and
+    /// exited with the right code, while printing absolutely nothing - and
+    /// tests/run.sh asserts on the TEXT of specific claims, not on the exit
+    /// code, precisely so that a selftest cannot pass by saying nothing. So an
+    /// unreadable selftest is the same failure as no selftest at all.
+    ///
+    /// Attaching is not enough on its own: .NET resolves Console.Out once, at
+    /// first use, and a WinExe resolves it to a sink that discards. It has to
+    /// be replaced afterwards, which is what the SetOut below is for. Both
+    /// steps fail harmlessly when there is genuinely no parent console (double
+    /// -clicked from Explorer), which is why neither is checked.
+    /// </remarks>
+    private static void AttachToParentConsole()
+    {
+        // Only when stdout is NOT already going somewhere. AttachConsole
+        // re-points the standard handles at the console it attaches to, so
+        // calling it when the caller has redirected us sends the output to the
+        // terminal and leaves the caller's pipe empty -- which is exactly how
+        // tests/run.sh reads this (`$("$WINBIN" --selftest 2>&1)`), and it saw
+        // nothing while the same command with `> file` worked by hand.
+        if (Console.IsOutputRedirected)
+        {
+            return;
+        }
+
+        if (!AttachConsole(AttachParentProcess))
+        {
+            return;
+        }
+
+        var stdout = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
+        Console.SetOut(stdout);
+        var stderr = new StreamWriter(Console.OpenStandardError()) { AutoFlush = true };
+        Console.SetError(stderr);
+    }
+
     [STAThread]
     private static void Main(string[] args)
     {
         if (args.Contains("--selftest"))
         {
+            AttachToParentConsole();
             Environment.Exit(Selftest.Run());
             return;
         }
