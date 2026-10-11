@@ -139,7 +139,7 @@ TALLY_FLOOR_NODE=305
 # 12 send + 52 revive + 7 peers + 16 kill, plus the 5 inside `serve` and
 # `collectors` that those same refusals take with them. Measured from a
 # full Windows run, not estimated: the floor said 779 counted against 784.
-TALLY_FLOOR_POSIX=92
+TALLY_FLOOR_POSIX=94
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
 # deadline passes. Returns 0 if it succeeded.
