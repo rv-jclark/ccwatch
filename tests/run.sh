@@ -137,9 +137,19 @@ TALLY_FLOOR_NODE=305
 # every Windows run and means "this host is Windows", which costs the same
 # attention as a real regression (rule 14). Counted, not estimated:
 # 12 send + 52 revive + 7 peers + 16 kill, plus the 5 inside `serve` and
-# `collectors` that those same refusals take with them. Measured from a
-# full Windows run, not estimated: the floor said 779 counted against 784.
-TALLY_FLOOR_POSIX=94
+# `collectors` that those same refusals take with them, plus the 2 app-win
+# assertions that only exist on a host that has BUILT it -- CI has not, and a
+# floor has to assume the case with FEWER assertions. Measured from real runs,
+# not estimated, each time it moved.
+#
+# The last 2 are an ALLOWANCE, and deliberately so. A handful of skips here are
+# host capability rather than platform -- whether the runner has a pagefile,
+# whether it can make a symlink -- and they move the count by one each. Pinning
+# the floor to one runner's exact total is precisely the "assertion that
+# encodes one machine's configuration" rule 14 forbids; the floor exists to
+# catch assertions running UNCOUNTED, which is a regression of dozens, not of
+# one.
+TALLY_FLOOR_POSIX=96
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
 # deadline passes. Returns 0 if it succeeded.

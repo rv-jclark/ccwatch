@@ -2065,6 +2065,7 @@ implementation broken in the specific way it describes:
 | iterate `_ccwatch_resolve_bash`'s candidates with `for c in $candidates` again | 2, and only on a host that has BOTH msys64 and Git-for-Windows — a green run here proves nothing about it, which is why the measurement that found it was CI's and not this machine's |
 | delete `.gitattributes`, or drop the `\r?` from the contrast check's anchors | 1, and only on a checkout made with core.autocrlf=true — the check reports every colour token "not found" rather than reporting a contrast failure |
 | calibrate TALLY_FLOOR_POSIX on a host where app-win IS built | 1 on CI, 0 here — the floor reports "assertions are running but not registering" for a section that skipped honestly |
+| drop the retry from `_probe_host_windows_once` | intermittent — 1 CI run in 2 of the SAME commit, where the host panel reads null and "host memory state is collected" goes red on a runner whose memory is perfectly readable |
 | collapse `_probe_proc_bsd_parse`'s `absent`/`ok` branches into a single unconditional `ok` | 1 |
 | drop `probe_mtimes`'s control-query guard, so an unreadable root reports `ok` with an empty listing instead of `failed` | 3 |
 | report `load1: 0` in `_probe_host_windows`'s jq transform instead of `null` | 2 |
@@ -2500,6 +2501,16 @@ with `* text=auto eol=lf` settles it once, for every file and every
 contributor — `bin/ccwatch` least of all wants a CRLF shebang. The regexes
 take `\r?` as well, so a checkout that still arrives with CRLF reports bad
 contrast or none rather than silently finding no colours.
+
+**And the host probe had the clock's bug.** The second CI run of an identical
+commit reported `powershell produced no usable output` where the first had
+reported `ram_free_mb 13298` and swap at 10% — the same empty `powershell.exe`
+launch, now costing the whole host panel instead of the reset clock. That is
+what two runs of the same commit are for: one of them is a measurement of
+flakiness that no single run can give you. `probe_host` was already honest
+about it (`failed`, with the reason, never a fabricated zero), but an honest
+report of a transient is still a panel nobody can read, so it asks twice on an
+empty answer and never on a wrong one.
 
 **A floor measured on the wrong host.** `TALLY_FLOOR_POSIX` was calibrated
 here, where app-win is built and its two selftest assertions count toward

@@ -832,20 +832,23 @@ print(json.dumps(out) if out else "null")
 # Cache for the Windows host probe: withheld (not annotated) past 30s, per
 # D15/principle III. Keyed under CCWATCH_HOME because $TMPDIR is not carried
 # between the tray app and a terminal invocation.
-_probe_host_windows() {
-  local cache="$CCWATCH_HOME/host-probe-cache.json" age now out
-
-  if [ -f "$cache" ]; then
-    now=$(date '+%s')
-    age=$(( now - $(stat -c '%Y' "$cache" 2>/dev/null || printf '0') ))
-    if [ "$age" -le 30 ]; then
-      probe_note host powershell-cim ok "cached ${age}s ago"
-      cat "$cache"
-      return 0
-    fi
-  fi
-
-  out=$(powershell -NoProfile -Command "
+# One shot at the host query, so the caller can ask twice.
+#
+# ⚠️ A powershell.exe launch sometimes returns nothing at all - the same
+# failure probe_clock's candidate report caught, and the reason its two fixed
+# instants are now answered by a single spawn. Here it cost the whole host
+# panel: measured across two CI runs of the identical commit, the first
+# reported ram_free_mb 13298 and swap at 10%, the second
+# `powershell produced no usable output`, so `host` came back null and
+# "host memory state is collected" went red for a runner whose memory was
+# perfectly readable.
+#
+# probe_host was already honest about it -- `failed`, with the reason, never
+# a fabricated zero -- but an empty spawn is not a measurement, and an honest
+# report of a transient is still a panel nobody can read. A WRONG answer is
+# never retried; only an empty one.
+_probe_host_windows_once() {
+  powershell -NoProfile -Command "
     \$os = Get-CimInstance Win32_OperatingSystem
     \$pf = Get-CimInstance Win32_PageFileUsage
     \$result = [ordered]@{ ram_free_mb = [math]::Round(\$os.FreePhysicalMemory / 1KB) }
@@ -862,7 +865,25 @@ _probe_host_windows() {
     }
     \$result.load1 = \$null
     \$result | ConvertTo-Json
-  " 2>/dev/null | tr -d '\r')
+  " 2>/dev/null | tr -d '\r'
+}
+
+_probe_host_windows() {
+  local cache="$CCWATCH_HOME/host-probe-cache.json" age now out
+
+  if [ -f "$cache" ]; then
+    now=$(date '+%s')
+    age=$(( now - $(stat -c '%Y' "$cache" 2>/dev/null || printf '0') ))
+    if [ "$age" -le 30 ]; then
+      probe_note host powershell-cim ok "cached ${age}s ago"
+      cat "$cache"
+      return 0
+    fi
+  fi
+
+  out=$(_probe_host_windows_once)
+  # One retry, and only on an empty answer -- see the note above the helper.
+  [ -n "$out" ] || out=$(_probe_host_windows_once)
 
   if [ -z "$out" ]; then
     probe_note host powershell-cim failed "powershell produced no usable output"
