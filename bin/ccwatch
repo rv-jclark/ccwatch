@@ -279,23 +279,62 @@ _ccwatch_resolve_py() {
 # wrong kernel with no error to show for it.
 _ccwatch_resolve_bash() {
   [ -n "$CCWATCH_BASH" ] && return 0
-  local candidates c reg_path on_path
+  local candidates c reg_path self
+
+  # ⚠️ NEWLINE-separated, and read with `read`, never `for c in $candidates`.
+  # Every serious candidate here lives under "Program Files", and unquoted
+  # word splitting cut that in half: the loop tested `C:\Program` and
+  # `Files\Git\bin\bash.exe`, neither of which exists, so the
+  # Git-for-Windows entries were unreachable and the first candidate that
+  # could ever match was C:\msys64. Measured on a CI runner that has both:
+  # `doctor` reported `bash: C:\msys64\usr\bin\bash.exe` while the suite
+  # itself was running under Git-for-Windows bash.
+  #
+  # That is not a cosmetic mismatch. The two have different /tmp mappings --
+  # Git bash resolves it to %LOCALAPPDATA%\Temp, MSYS2 to C:\msys64\tmp --
+  # so `serve`, which spawns the collector through CCWATCH_BASH, looked for
+  # CLAUDE_CONFIG_DIR in a directory that did not exist. It reported a healthy
+  # snapshot with no sessions in it: an empty answer standing in for a
+  # different filesystem, which is rule 4 all over again.
+  #
+  # So the bash ALREADY RUNNING this script goes first. Whatever else is
+  # installed, that one provably shares this process's view of the
+  # filesystem, which is the only property `serve` actually needs from it.
+  # cygpath, because the value is handed to a NATIVE python through the
+  # environment, where no MSYS path translation happens -- and only when
+  # cygpath is there to convert it, since a bare /usr/bin/bash would pass the
+  # uname check below and then be unspawnable.
   candidates=""
+  self=""
+  if command -v cygpath >/dev/null 2>&1; then
+    self=$(command -v bash 2>/dev/null) || self=""
+    [ -n "$self" ] && { self=$(cygpath -m "$self" 2>/dev/null) || self=""; }
+  fi
+  [ -n "$self" ] && candidates="$self"
 
+  # `sed`, not `awk '{print $NF}'`: the install path has a space in it too,
+  # and $NF returned "Files\Git".
   reg_path=$(reg query 'HKLM\SOFTWARE\GitForWindows' -v InstallPath 2>/dev/null \
-    | awk '/InstallPath/{print $NF}')
-  [ -n "$reg_path" ] && candidates="$candidates ${reg_path}\\bin\\bash.exe"
-  candidates="$candidates ${ProgramFiles:-C:\\Program Files}\\Git\\bin\\bash.exe"
-  candidates="$candidates C:\\msys64\\usr\\bin\\bash.exe"
-  on_path=$(command -v bash 2>/dev/null) && candidates="$candidates $on_path"
+    | sed -n 's/.*REG_SZ[[:space:]][[:space:]]*//p' | tr -d '\r')
+  [ -n "$reg_path" ] && candidates="$candidates
+${reg_path}\\bin\\bash.exe"
+  candidates="$candidates
+${ProgramFiles:-C:\\Program Files}\\Git\\bin\\bash.exe
+C:\\msys64\\usr\\bin\\bash.exe"
 
-  for c in $candidates; do
-    case "$c" in *[Ss]ystem32*bash.exe) continue ;; esac
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    # WindowsApps carries the same WSL launcher System32 does.
+    case "$c" in
+      *[Ss]ystem32*bash.exe|*[Ww]indows[Aa]pps*bash.exe) continue ;;
+    esac
     command -v "$c" >/dev/null 2>&1 || [ -x "$c" ] || continue
     case "$("$c" -c 'uname -s' 2>/dev/null)" in
       MINGW*|MSYS*|CYGWIN*) CCWATCH_BASH="$c"; return 0 ;;
     esac
-  done
+  done <<EOF
+$candidates
+EOF
   CCWATCH_BASH=""
 }
 
