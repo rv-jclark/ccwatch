@@ -312,6 +312,21 @@ produced a specific wrong output that someone believed.
   sessions were fine because Claude Code records `C:/...` already, which is why
   it hid from every manual check.
 
+  ⚠️ **A green run here proves nothing about a host with both bashes.**
+  `_ccwatch_resolve_bash` must find the bash that shares THIS shell's
+  filesystem: its candidate list is newline-separated and read with `read`
+  (every Windows candidate lives under "Program Files", and word splitting cut
+  them in half so they were unreachable), and the running bash goes first.
+  Get this wrong and `serve` spawns its collector under a bash whose `/tmp`
+  points somewhere else, then reports a healthy snapshot with no sessions in
+  it. Found by CI, not here: this machine has no msys64 to fall through to.
+
+  Also from CI: the runner checks out with `core.autocrlf=true`, so
+  `.gitattributes` pins `eol=lf` — this project reads its own files with
+  regexes anchored on `
+`, and `bin/ccwatch` least of all wants a CRLF
+  shebang.
+
   Three more that only bite on Windows, all now handled: native jq **cannot
   open a process-substitution path** (`/proc/<pid>/fd/63`) — pass a real file;
   a `powershell.exe` launch **sometimes returns nothing at all**, so

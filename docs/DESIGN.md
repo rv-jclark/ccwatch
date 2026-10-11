@@ -2062,6 +2062,9 @@ implementation broken in the specific way it describes:
 | strip the UTF-8 BOM from `app-win/build.ps1` | the whole file stops parsing under Windows PowerShell 5.1, with the error pointing at a brace dozens of lines from the em-dash that caused it |
 | drop `AttachConsole` from the `--selftest` path | 0 — and that is the point: the selftest still exits 0/1 correctly while printing nothing, so every assertion in tests/run.sh that reads its text goes quiet rather than red |
 | record the build-time bash with a bare `Get-Command bash.exe` | 0 in any suite — it compiles, runs, and reports an empty fleet for ever, because the recorded WSL bash cannot see Windows process ids |
+| iterate `_ccwatch_resolve_bash`'s candidates with `for c in $candidates` again | 2, and only on a host that has BOTH msys64 and Git-for-Windows — a green run here proves nothing about it, which is why the measurement that found it was CI's and not this machine's |
+| delete `.gitattributes`, or drop the `\r?` from the contrast check's anchors | 1, and only on a checkout made with core.autocrlf=true — the check reports every colour token "not found" rather than reporting a contrast failure |
+| calibrate TALLY_FLOOR_POSIX on a host where app-win IS built | 1 on CI, 0 here — the floor reports "assertions are running but not registering" for a section that skipped honestly |
 | collapse `_probe_proc_bsd_parse`'s `absent`/`ok` branches into a single unconditional `ok` | 1 |
 | drop `probe_mtimes`'s control-query guard, so an unreadable root reports `ok` with an empty listing instead of `failed` | 3 |
 | report `load1: 0` in `_probe_host_windows`'s jq transform instead of `null` | 2 |
@@ -2450,6 +2453,60 @@ most time was believing those were three separate bugs in `bar`, `revive` and
 `serve`. A leaked export is the most expensive kind of test-only state,
 because its symptoms appear in sections that have nothing to do with it, and
 it is `unset` now the moment its subsection ends.
+
+### What only CI could show
+
+Three more defects survived a fully green local run and appeared on the first
+Windows CI run. Each is worth keeping for the same reason: the local host
+happened not to have the ingredient that triggers it.
+
+**A space in "Program Files" made the right bash unreachable.**
+`_ccwatch_resolve_bash` built its candidates as one space-separated string and
+iterated `for c in $candidates`. Word splitting then cut every Windows
+candidate in half — it tested `C:\Program` and `Files\Git\bin\bash.exe`,
+neither of which exists. The registry lookup had the same bug by another
+route: `awk '{print $NF}'` on an InstallPath containing a space returns
+`Files\Git`. So the Git-for-Windows entries could never be selected, and the
+first candidate that could ever match was `C:\msys64`.
+
+This machine has no msys64, so the locator fell through to PATH and found the
+right bash anyway. The CI runner has both, and `doctor` there reported
+`bash: C:\msys64\usr\bin\bash.exe` while the suite itself was running under
+Git-for-Windows bash. That is not cosmetic: the two resolve `/tmp`
+differently — `%LOCALAPPDATA%\Temp` against `C:\msys64\tmp` — and `serve`
+spawns its collector through `CCWATCH_BASH`. Serve therefore looked for
+`CLAUDE_CONFIG_DIR` in a directory that did not exist and answered with a
+healthy snapshot containing no sessions: an empty result standing in for a
+different filesystem, which is rule 4 wearing yet another coat. Two assertions
+caught it, and both of them read as something else — "the session the CLI
+would show is in it" and "parse_failed matches".
+
+The list is newline-separated and read with `read` now, and **the bash already
+running this script goes first**. Whatever else is installed, that one
+provably shares this process's view of the filesystem, which is the only
+property serve needs from it. It is converted with `cygpath` because the value
+reaches a native python through the environment, where no MSYS translation
+happens — and only when cygpath is present, since a bare `/usr/bin/bash` would
+pass the `uname -s` check and then be unspawnable.
+
+**The runner checks out CRLF.** Git-for-Windows defaults to
+`core.autocrlf=true`, and this project reads its own files with regexes that
+anchor on `\n`. The contrast check extracts the page's colour tokens with
+`/:root \{\n([\s\S]*?)\n  \}/`, which matches nothing against `{\r\n`:
+measured, the same extraction returns 700 characters against LF and **0**
+against CRLF, so it reported every dark token and five of seven light ones as
+"not found in map.html" while the page was perfectly fine. A `.gitattributes`
+with `* text=auto eol=lf` settles it once, for every file and every
+contributor — `bin/ccwatch` least of all wants a CRLF shebang. The regexes
+take `\r?` as well, so a checkout that still arrives with CRLF reports bad
+contrast or none rather than silently finding no colours.
+
+**A floor measured on the wrong host.** `TALLY_FLOOR_POSIX` was calibrated
+here, where app-win is built and its two selftest assertions count toward
+pass+fail. CI does not build app-win, so the count is two lower and the floor
+fired with "assertions are running but not registering" — when what happened
+is that a section honestly skipped. A floor is a minimum, so it has to assume
+the case with FEWER assertions: the one CI always runs.
 
 ### app-win, compiled for the first time
 
