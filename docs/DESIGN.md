@@ -2423,9 +2423,19 @@ bar and the table -- measured 2 runs in 8, with the percentage beside it still
 correct. In isolation the same two calls were right 20 times out of 20: it only
 appears inside a full snapshot, and only sometimes, which is the worst shape a
 bug can have. Both halves are fixed: the two fixed instants are now answered by
-**one** spawn rather than two, and an EMPTY answer is retried once. A WRONG
-answer is never retried -- rejecting those is what validation is for. Measured
-after: 0 missing in 15.
+**one** spawn rather than two, and an EMPTY answer is retried -- three
+attempts, because two was not enough: a later CI run still produced
+`menu='4:25 AM EDT' table=''`, the same instant formatted by two separate
+ccwatch processes, one of which lost every attempt it had. A WRONG answer is
+never retried, because rejecting those is what validating against two fixed
+instants is for. Measured after: 0 missing in 20 runs of both renderers, 40
+invocations.
+
+The same spawn failure turned up a third time, in `probe_host`, and the three
+together are the lesson: on a loaded 2-core runner `powershell.exe`
+intermittently produces nothing at all, so **every** PowerShell probe here
+needs to tell an empty answer apart from a measured one. A probe that cannot
+is not wrong about the value, it is wrong about whether it has one.
 
 ### The leak that made all of it look worse
 

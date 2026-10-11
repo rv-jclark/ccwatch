@@ -704,6 +704,7 @@ _ccwatch_clock_select() {
         # was rejected, so the reset clock vanished for that run.
         _clk_pair=$(_ccwatch_clock_pair)
         [ -n "$_clk_pair" ] || _clk_pair=$(_ccwatch_clock_pair)
+        [ -n "$_clk_pair" ] || _clk_pair=$(_ccwatch_clock_pair)
         a1=$(printf '%s' "$_clk_pair" | sed -n '1p')
         a2=$(printf '%s' "$_clk_pair" | sed -n '2p') ;;
     esac
@@ -763,11 +764,20 @@ _ccwatch_clock_once() { # _ccwatch_clock_once <epoch-seconds>
 }
 
 _ccwatch_clock_powershell() { # _ccwatch_clock_powershell <epoch-seconds>
-  local out
-  out=$(_ccwatch_clock_once "$1")
-  # One retry, and only on an EMPTY answer -- see the note above.
-  [ -n "$out" ] || out=$(_ccwatch_clock_once "$1")
-  printf '%s' "$out"
+  local out tries
+  # THREE attempts, and only ever on an EMPTY answer. Two was not enough: a
+  # CI run still produced `menu='4:25 AM EDT' table=''` -- the same instant,
+  # formatted by two separate ccwatch processes, one of which lost every
+  # attempt. Each retry costs nothing unless the spawn actually failed, and a
+  # WRONG answer is still never retried, because rejecting those is what
+  # validating against two fixed instants is for.
+  tries=0
+  while [ "$tries" -lt 3 ]; do
+    out=$(_ccwatch_clock_once "$1")
+    if [ -n "$out" ]; then printf '%s' "$out"; return 0; fi
+    tries=$((tries + 1))
+  done
+  return 0
 }
 
 # probe_host — one JSON object (ram/swap/load), or `null`, or nothing on
