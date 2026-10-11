@@ -267,6 +267,13 @@ internal static class BashLocator
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
+                // ⚠️ UTF-8, stated. Without this .NET decodes the child's
+                // output with the console's ANSI code page, and `ccwatch bar`
+                // speaks UTF-8: the `·` separator (U+00B7) arrived as `Â·` and
+                // the em dash as `â€”`, so the menu filled with stray
+                // characters while the CLI printing it was perfectly correct.
+                StandardOutputEncoding = new UTF8Encoding(false),
+                StandardErrorEncoding = new UTF8Encoding(false),
             };
             using var p = Process.Start(psi);
             if (p == null) return null;
@@ -606,6 +613,13 @@ internal sealed class TrayContext : ApplicationContext
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
+                // ⚠️ UTF-8, stated. Without this .NET decodes the child's
+                // output with the console's ANSI code page, and `ccwatch bar`
+                // speaks UTF-8: the `·` separator (U+00B7) arrived as `Â·` and
+                // the em dash as `â€”`, so the menu filled with stray
+                // characters while the CLI printing it was perfectly correct.
+                StandardOutputEncoding = new UTF8Encoding(false),
+                StandardErrorEncoding = new UTF8Encoding(false),
             };
             foreach (var (k, v) in env) psi.EnvironmentVariables[k] = v;
             using var p = Process.Start(psi);
