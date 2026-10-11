@@ -8,6 +8,123 @@ subject is the changelog entry, which is why the subject line is expected to
 describe the user-visible change rather than the diff. The 1.0.0 entry predates
 that and is written by hand.
 
+## [2.0.0](https://github.com/rv-jclark/ccwatch/compare/v1.1.0...v2.0.0) (2026-10-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* /map no longer pans or zooms. The drag-to-pan gesture, the wheel zoom, the arrow-key panning, the +/- and 0 keys, the zoom out/in/fit buttons and the remembered viewport are all gone, replaced by the scroll container. web/camera.js and web/plots.js are removed, and the ccwatch.map.plots.v1 and ccwatch.map.view.v1 browser records are no longer read or written.
+
+### Features
+
+* add `ccwatch revive` to nudge agents that stopped too early ([6658cab](https://github.com/rv-jclark/ccwatch/commit/6658cab5c19c6b50aafb97c5dd693d916382dc3a))
+* add the platform probe seam ([03a2ca9](https://github.com/rv-jclark/ccwatch/commit/03a2ca95bb9a41693eaf5eb503cce63e19e4a8bc))
+* add the Windows tray app skeleton ([a6c468f](https://github.com/rv-jclark/ccwatch/commit/a6c468f287173f9278b9259de6fb9e78ae566a0f))
+* draw the map as a 2.5D pixel-art world of hedged fields and walled rooms ([5d63b83](https://github.com/rv-jclark/ccwatch/commit/5d63b837db7cd622328b124d7134106130abd5c4))
+* draw the map's sessions as pixel-art characters on grass ([b4f45ab](https://github.com/rv-jclark/ccwatch/commit/b4f45ab6e4a7168d60513d6c3deb4f14ba3cbcbe))
+* fit the whole fleet into the overlay's window ([767b912](https://github.com/rv-jclark/ccwatch/commit/767b9123c09da9fe281782dc13f2229ab4aa6c9d))
+* give the menu bar's reset time to one decimal ([67a8190](https://github.com/rv-jclark/ccwatch/commit/67a81907eed245483e00f8fb7a2652878dbace93))
+* hold warnings in a header control, chart usage against the clock ([77582ea](https://github.com/rv-jclark/ccwatch/commit/77582ea215e1fa15f2e5d6e491b8082d5551b628))
+* implement the macOS probes behind the platform seam ([32e9f1c](https://github.com/rv-jclark/ccwatch/commit/32e9f1ceb693ba2dafd347aaa060722a75ba1075))
+* install with one command, and prove the link runs before saying so ([a2f6883](https://github.com/rv-jclark/ccwatch/commit/a2f68834448582b8f78362a57141518acb8d882f))
+* lay a repo's branches out side by side on the map when they fit ([56c789e](https://github.com/rv-jclark/ccwatch/commit/56c789e8459c3e745b630bff85c97b0194e9562a))
+* lead the menu bar with the usage figure and when it resets ([47342fa](https://github.com/rv-jclark/ccwatch/commit/47342fa414521bb37b3dfe281d37dd0640a90d77))
+* make the Windows overlay stay on top without stealing focus ([1fea88f](https://github.com/rv-jclark/ccwatch/commit/1fea88fa7a8305428e5386d4aae4ae27c1d8949a))
+* mark agents that are messaging on the map, and draw their lines only on hover, focus or selection ([a7b7967](https://github.com/rv-jclark/ccwatch/commit/a7b79678af84ca6d16c0044739f4f1b177d1fe71))
+* one app for the menu bar, the overlay and the serve it supervises ([0b87060](https://github.com/rv-jclark/ccwatch/commit/0b87060d3a618023c01069a978d5578814fd7727))
+* open an agent from the overlay in a browser tab ([a1b5410](https://github.com/rv-jclark/ccwatch/commit/a1b541039407f5f6b29a4a23320776eaea057d42))
+* render the fleet in a Windows tray item and overlay ([401cb02](https://github.com/rv-jclark/ccwatch/commit/401cb02cb9c5407309a73577c00e3ccf90eecf53))
+* replace the map camera with a scrolling block layout ([09357e9](https://github.com/rv-jclark/ccwatch/commit/09357e974a88c42ea2d68cf6751d2dd28e890911))
+* report the same verdicts in a macOS menu bar, and stop serve exiting noisily ([71ca4be](https://github.com/rv-jclark/ccwatch/commit/71ca4beebc38474482af566b3921fcb94ee5368c))
+* run revive from serve, behind a switch in the dashboard header ([b9fb3a0](https://github.com/rv-jclark/ccwatch/commit/b9fb3a039c8d9b9540925d0013d6345e79563ffa))
+* run the taskbar and overlay on Windows behind a platform probe seam ([e96712e](https://github.com/rv-jclark/ccwatch/commit/e96712e8d0e66eab26456a96d8b6e0ffc03ed760))
+* run the taskbar and overlay on Windows behind a platform probe seam ([#10](https://github.com/rv-jclark/ccwatch/issues/10)) ([e96712e](https://github.com/rv-jclark/ccwatch/commit/e96712e8d0e66eab26456a96d8b6e0ffc03ed760))
+
+
+### Bug Fixes
+
+* **app-win:** make build.ps1 parse under Windows PowerShell ([77c4b13](https://github.com/rv-jclark/ccwatch/commit/77c4b13c4676b209186714858c34c41e58bbe653))
+* **app-win:** print the selftest where its caller can read it ([3870328](https://github.com/rv-jclark/ccwatch/commit/38703284a4c637c7385c48613326c643b9228bbb))
+* **app-win:** record an MSYS bash in the binary, never WSL's ([a66f392](https://github.com/rv-jclark/ccwatch/commit/a66f392f07f235be0eecdfa39f67396b3d386cc6))
+* **app-win:** set the overlay topmost with SetWindowPos ([39a3702](https://github.com/rv-jclark/ccwatch/commit/39a3702a58abceb988870ab98503249d54475de5))
+* ask a paused session once, not two or three times in a row ([0009a06](https://github.com/rv-jclark/ccwatch/commit/0009a0672632a9d725755247971addbf92e97fa7))
+* ask a session only about the roadmap it ran itself ([ab5e56c](https://github.com/rv-jclark/ccwatch/commit/ab5e56c87a09628d44f915f4389e9df692c2f779))
+* ask the Windows host probe twice when PowerShell answers with nothing ([b5bd2fa](https://github.com/rv-jclark/ccwatch/commit/b5bd2fa2034e2e259a386fac9ee63d50d8f6c4a3))
+* count a Windows process that refuses to be opened ([95a4b5d](https://github.com/rv-jclark/ccwatch/commit/95a4b5df4b1a0a6c2f39ad4baa43e3c0244e17cd))
+* dock the map key in the header instead of floating it over the board ([7a5b71f](https://github.com/rv-jclark/ccwatch/commit/7a5b71f621ebf08b359328c35b95d9f3d1a6a6a7))
+* give speckit's mktemp calls a template ([66f9ff7](https://github.com/rv-jclark/ccwatch/commit/66f9ff792ea9871cf16e04caa28d238a777ac33c))
+* give the overlay's small window to the board, not to the roster ([6366c83](https://github.com/rv-jclark/ccwatch/commit/6366c833c38d42e3e4ed6d04b9ff593cd20877e7))
+* give the reset clock three attempts at a PowerShell that answers nothing ([12ffa06](https://github.com/rv-jclark/ccwatch/commit/12ffa06c50e3c08eac95e3383ed7a3a12ece39b9))
+* keep a long-running ccwatch alive when its own script is edited ([b049ad2](https://github.com/rv-jclark/ccwatch/commit/b049ad2bdf1708a854d7b914ac3cc212193e3b6b))
+* keep the reset clock when a PowerShell launch returns nothing ([4410db2](https://github.com/rv-jclark/ccwatch/commit/4410db28ad943047fc4e5b934715fe68d584efd7))
+* key the repo cache by the path the session actually reports ([4b190b1](https://github.com/rv-jclark/ccwatch/commit/4b190b152c694b25ae491ba5b7cacd31632659f4))
+* leave unfinished runs out of the menu bar title ([183e04c](https://github.com/rv-jclark/ccwatch/commit/183e04c1716959495e5cc69980ded0eba456262d))
+* let the overlay be dragged by its title bar ([3c4f716](https://github.com/rv-jclark/ccwatch/commit/3c4f716bde642c19348dcdc4d9ef4a8d2ccb363a))
+* let verify-ui run on Windows ([7287e56](https://github.com/rv-jclark/ccwatch/commit/7287e565fb150080f968de232553876b9d62637f))
+* list kill in ccwatch --help ([b488745](https://github.com/rv-jclark/ccwatch/commit/b488745248ac4076f0fda990724e1c49f2d3e08c))
+* make verify-ui --shots take new screenshots instead of keeping old ones ([5dd7095](https://github.com/rv-jclark/ccwatch/commit/5dd7095ad9cd6427ef1892c5bfcd2c2676bee1e3))
+* pass reap_serve the port, not the name of the variable ([68b6405](https://github.com/rv-jclark/ccwatch/commit/68b640572596950d22160e593734ccbe2781649f))
+* point setup at the menu bar app instead of the SwiftBar plugin ([e5426b1](https://github.com/rv-jclark/ccwatch/commit/e5426b10da2082ea37607b083b8e970ed8e16a5a))
+* read the last-known roster without a process substitution ([f8804f1](https://github.com/rv-jclark/ccwatch/commit/f8804f14f9df0bbea9500feeb3cad21738ef353e))
+* read the Windows proc probe's control pid from the shell ([c7a9d79](https://github.com/rv-jclark/ccwatch/commit/c7a9d79d11013ee55e1d9a7781585e2f2d83b51c))
+* reap the suite's servers by port instead of crashing the run ([e63cac9](https://github.com/rv-jclark/ccwatch/commit/e63cac938b5da6f8e7e1ded57ea0e5e36b3ab139))
+* refuse a collector answer that is two values, or an absence it never measured ([c0578e5](https://github.com/rv-jclark/ccwatch/commit/c0578e592fa29b3a0ad518acad356a1339485fcd))
+* report usage from the freshest reading, and stop serves accumulating ([acc27ae](https://github.com/rv-jclark/ccwatch/commit/acc27ae70ef20fb1d25a0c9c33205cf531f41224))
+* resolve CCWATCH_BASH to a bash that shares this shell's filesystem ([217c46a](https://github.com/rv-jclark/ccwatch/commit/217c46a77c1a479bd38ede482082e1c6ed0ea4df))
+* restore the map figures' hover highlight and keyboard focus ring ([f563eb3](https://github.com/rv-jclark/ccwatch/commit/f563eb36ec133edd9e360a85533ba7d3ce7ee81b))
+* say why the overlay is blank, and bring serve back instead of giving up ([a43a6aa](https://github.com/rv-jclark/ccwatch/commit/a43a6aa85f8ee7e5553a47a5f2e176f65942260e))
+* serve the map with a query string, and stop the selftest opening a browser tab ([a9159e8](https://github.com/rv-jclark/ccwatch/commit/a9159e8eb7f0fc7e16a1159c6588b23a29c2a6a4))
+* serve's exit trap aborted on every ordinary stop. `srv_pid` was a `local` ([71ca4be](https://github.com/rv-jclark/ccwatch/commit/71ca4beebc38474482af566b3921fcb94ee5368c))
+* show no branch line rather than a "?" when a session has none ([500f3b3](https://github.com/rv-jclark/ccwatch/commit/500f3b3782e7359a1c3640d0b634b440e5dd00b7))
+* stop a native jq's CRLF corrupting every multi-line capture ([45a911f](https://github.com/rv-jclark/ccwatch/commit/45a911ff8ca62c536dbf0da32767fac88bd430a9))
+* stop revive asking a session twice after it has answered ([f58084e](https://github.com/rv-jclark/ccwatch/commit/f58084e29bac1c1f36b45f0c55febb8506c37f3d))
+* stop revive re-asking a session that answered by messaging back ([112da67](https://github.com/rv-jclark/ccwatch/commit/112da6733b19a1f89b0601325f0232da11965757))
+* stop serve's exit trap aborting on an ordinary stop ([8e090d7](https://github.com/rv-jclark/ccwatch/commit/8e090d773ff3f35f270508648a5568826080829d))
+* stop the alert chip rendering over the header nav ([c9432f7](https://github.com/rv-jclark/ccwatch/commit/c9432f7e162b035fd77cba1e2968a8eba4583895))
+* take resume's and peers' temp directory from $TMPDIR ([64ae771](https://github.com/rv-jclark/ccwatch/commit/64ae771e770d8e444f90ea1e6d2fa4945e989f9c))
+* withhold the usage figure when sessions disagree about it ([e575045](https://github.com/rv-jclark/ccwatch/commit/e5750454b815c2b12355b4d0911b14cf9d96f5fe))
+
+
+### Performance
+
+* hold figure motion as discrete poses instead of tweening ([c7b0ac3](https://github.com/rv-jclark/ccwatch/commit/c7b0ac31a3a25536b641b22de755e11213f4cc48))
+
+
+### Documentation
+
+* bring the install, app and uninstall instructions up to date ([6d0852c](https://github.com/rv-jclark/ccwatch/commit/6d0852c0347052fdaafee705ae97e2466f020280))
+* check off Phase 6 (US4) tasks ([2495b99](https://github.com/rv-jclark/ccwatch/commit/2495b9939f1051fd82e10d2278a004285021bfa9))
+* close out Phase 7 polish for the Windows tray/overlay feature ([40d1d48](https://github.com/rv-jclark/ccwatch/commit/40d1d4826e7a29ee1344e23afa8cb5d5873020c8))
+* mutation-check every check, not just the ones in the suite ([8cdad19](https://github.com/rv-jclark/ccwatch/commit/8cdad193ff583ac86948c733b94610fb2c801133))
+* plan the Windows probe layer, tray and overlay ([74e852f](https://github.com/rv-jclark/ccwatch/commit/74e852fc01de8ee315f08b440df14016ad909ab7))
+* put install and usage at the top of the README ([97ab3e1](https://github.com/rv-jclark/ccwatch/commit/97ab3e14c5c8dd4b8ea566abb2c94fad824eb203))
+* record the three defects only CI could show ([3f5debb](https://github.com/rv-jclark/ccwatch/commit/3f5debb5c1af1f047400fb6c285e1559ce8ef828))
+* record what the Windows path actually got wrong ([0ba0dd1](https://github.com/rv-jclark/ccwatch/commit/0ba0dd129a144546e4a9920372617286df6ca4ca))
+* rewrite the sandbox note now two of its three causes are fixed ([af33863](https://github.com/rv-jclark/ccwatch/commit/af3386304cc56c162c44484a124dd27d9b36ef0f))
+* say plainly that the Windows path has never been executed ([6cf6dc9](https://github.com/rv-jclark/ccwatch/commit/6cf6dc901ef618eb315d7122e34dc103424067e1))
+* specify Windows support for the taskbar tray and the overlay ([61f0adb](https://github.com/rv-jclark/ccwatch/commit/61f0adb84ba26e2eaa71822f2594cb3ff301905d))
+* specify Windows support for the tray and the overlay ([e53ae35](https://github.com/rv-jclark/ccwatch/commit/e53ae351efa0f5e51429f468571f523acde194a1))
+* split the README into a user guide and docs/DESIGN.md ([42008a1](https://github.com/rv-jclark/ccwatch/commit/42008a104928048d24fc9288a61bc18b8d909346))
+* state that ccwatch supports macOS and Windows ([df23c5e](https://github.com/rv-jclark/ccwatch/commit/df23c5e1565338f71596c1afa40d749d2657f950))
+
+
+### Tests
+
+* bound the Windows tray selftest so a hang cannot stall the suite ([f679028](https://github.com/rv-jclark/ccwatch/commit/f679028604a5836e4d20c22066d47e7408891985))
+* build fixtures with the spellings GNU date and sed understand ([dfa1525](https://github.com/rv-jclark/ccwatch/commit/dfa152595848cca490d540f557458dd4951bd3a3))
+* compare the menu and table reset clocks on one fixed instant ([ae7937e](https://github.com/rv-jclark/ccwatch/commit/ae7937eb678954ed98ae9081861840ae7ceb84c1))
+* lower the Windows tally floor to what a host without app-win counts ([45b3a2b](https://github.com/rv-jclark/ccwatch/commit/45b3a2ba84ee8a6181b59f5158d92d68b260c356))
+* mutation-check the platform probe layer's outcomes and selection ([6898682](https://github.com/rv-jclark/ccwatch/commit/689868266b2d4f360e4322378faf3f7c86c908bd))
+* scope the macOS platform override to the collector it serves ([06b2532](https://github.com/rv-jclark/ccwatch/commit/06b25324f8d3e40e5109451da281c723363566eb))
+* skip the orphan check where process enumeration is refused ([3e8a0de](https://github.com/rv-jclark/ccwatch/commit/3e8a0defebd273fb547a54d9b742387328bf6950))
+* skip what a Windows host cannot pose, rather than failing it ([149c5be](https://github.com/rv-jclark/ccwatch/commit/149c5bedcb27c6064557302baa7be1fc5eedfdda))
+* stop the ETag age assertion depending on how fast the host is ([13e4788](https://github.com/rv-jclark/ccwatch/commit/13e4788b706e288851f55fc1f3441afee2dc0d21))
+
+
+### Refactoring
+
+* fold the bar assertions into the suite's own wait and gap helpers ([bdd4e3c](https://github.com/rv-jclark/ccwatch/commit/bdd4e3c2f8d7ef842ba2ae40b43f7f0c4cdb5cdf))
+
 ## [1.1.0](https://github.com/rv-jclark/ccwatch/compare/v1.0.0...v1.1.0) (2026-09-09)
 
 
