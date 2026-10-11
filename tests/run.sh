@@ -6330,8 +6330,13 @@ function holeOf(f, x, y) { return x >= f.l && x < f.l + f.m && y >= f.t && y < f
 (function () {
   var html = require("fs").readFileSync(process.argv[3], "utf8");
   function block(re) { var m = html.match(re); return m ? m[1] : ""; }
-  var dark = block(/:root \{\n([\s\S]*?)\n  \}/);
-  var light = block(/prefers-color-scheme: light\) \{\n\s*:root \{([\s\S]*?)\}/) +
+  // ⚠️ \r? at every newline anchor, beside .gitattributes rather than
+  // instead of it. A checkout that still arrives with CRLF should make this
+  // check report bad contrast, or none, never silently find NO colours: on CI
+  // it reported every dark token and five of seven light ones as "not found
+  // in map.html" while the page itself was perfectly fine.
+  var dark = block(/:root \{\r?\n([\s\S]*?)\r?\n  \}/);
+  var light = block(/prefers-color-scheme: light\) \{\r?\n\s*:root \{([\s\S]*?)\}/) +
               block(/prefers-color-scheme: light\) \{[\s\S]*?#board \{([^}]*)\}/);
   // The LAST declaration wins, as in the cascade: the board's override is
   // appended after the root's value.

@@ -1,0 +1,18 @@
+# ⚠️ LF in the working tree, on every platform. GitHub's Windows runner has
+# Git-for-Windows' core.autocrlf=true default, so without this a Windows
+# checkout gets CRLF — and this project reads its OWN files with regexes that
+# anchor on "\n". The contrast check extracts the page's colour tokens with
+# /:root \{\n([\s\S]*?)\n  \}/, which matches nothing against "{\r\n": it
+# reported every dark token and five of seven light ones as "not found in
+# map.html", on CI only, while the page itself was perfectly fine.
+#
+# It matters more than one check. `bin/ccwatch` is read by bash, and a CRLF
+# shebang line is a "bad interpreter" error with a carriage return invisibly
+# in the middle of it; the embedded python and jq programs are parsed the
+# same way. There is nothing here that wants CRLF.
+* text=auto eol=lf
+
+# Binary, so Git never touches them whatever the heuristics decide.
+*.png binary
+*.ico binary
+*.icns binary
