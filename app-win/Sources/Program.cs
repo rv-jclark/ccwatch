@@ -530,7 +530,7 @@ internal sealed class TrayContext : ApplicationContext
         {
             Text = "ccwatch",
             Visible = true,
-            Icon = SystemIcons.Application,
+            Icon = TrayGlyph.For(null),
             ContextMenuStrip = new ContextMenuStrip(),
         };
 
@@ -645,6 +645,12 @@ internal sealed class TrayContext : ApplicationContext
         BarDocument doc;
         lock (_renderLock) { doc = _doc; }
         _icon.Text = Truncate(doc.Title, 127); // NotifyIcon.Text is capped at 127 chars
+        // The tint is ccwatch's own verdict, not one recomputed here: `bar`
+        // puts a colour on the title line only when something wants a person
+        // (principle XI). The words are already in the tooltip and the menu,
+        // so this is decoration on top of them, never the carrier of the
+        // meaning (principle VII).
+        _icon.Icon = TrayGlyph.For(doc.TitleColor);
         RebuildMenu();
     }
 
@@ -752,6 +758,74 @@ internal sealed class TrayContext : ApplicationContext
 /// Named colours, `#rrggbb`, and SwiftBar's `light,dark` pair
 /// (bar-document.md). An unparseable value returns false and the caller
 /// keeps the default colour — losing an emphasis, never a word.
+/// The tray icon: a `cc` monogram, tinted by the title colour `ccwatch bar`
+/// supplies.
+///
+/// Drawn rather than shipped as an .ico so there is no binary in the tree and
+/// no csproj resource plumbing for one 32px mark. Icons are CACHED per colour:
+/// Render() runs every few seconds, `Icon.FromHandle` takes an unmanaged HICON,
+/// and making a fresh one each tick would leak a GDI handle every time. The
+/// set of colours is tiny and fixed (none, blocked-on-you, suspect), so the
+/// cache is bounded and its icons live as long as the process does.
+internal static class TrayGlyph
+{
+    private static readonly Dictionary<string, Icon> Cache = new();
+
+    /// Calm. Light enough to read on a dark taskbar, dark enough on a light one.
+    private static readonly Color Neutral = Color.FromArgb(0xC8, 0xD2, 0xDC);
+
+    public static Icon For(string? colorSpec)
+    {
+        var key = colorSpec ?? "";
+        lock (Cache)
+        {
+            if (Cache.TryGetValue(key, out var cached)) return cached;
+            var tint = Colors.TryParse(colorSpec, out var c) ? c : Neutral;
+            var icon = Draw(tint);
+            Cache[key] = icon;
+            return icon;
+        }
+    }
+
+    private static Icon Draw(Color tint)
+    {
+        using var bmp = new Bitmap(32, 32);
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+            g.Clear(Color.Transparent);
+
+            // ⚠️ A FILLED disc with the letter knocked out of it, and ONE
+            // letter, not two. Windows draws this at 16x16, and the obvious
+            // designs do not survive that: `cc` inside a ring turns to mush
+            // (the two letters merge into a grey smudge), and a ring with no
+            // letter reads as a generic record button. Rendered side by side
+            // at the real 16px before choosing -- the solid disc is the only
+            // one that stays crisp, and it carries the severity tint across
+            // its whole area instead of in a 3px outline, so `blocked on you`
+            // is visible at a glance rather than on inspection.
+            using (var disc = new SolidBrush(tint))
+            {
+                g.FillEllipse(disc, 1f, 1f, 30f, 30f);
+            }
+            using (var knockout = new SolidBrush(Color.FromArgb(0x16, 0x18, 0x1C)))
+            using (var font = new Font("Segoe UI", 22f, FontStyle.Bold, GraphicsUnit.Pixel))
+            using (var fmt = new StringFormat
+                   {
+                       Alignment = StringAlignment.Center,
+                       LineAlignment = StringAlignment.Center,
+                   })
+            {
+                g.DrawString("c", font, knockout, new RectangleF(0f, 0f, 32f, 32f), fmt);
+            }
+        }
+
+        var handle = bmp.GetHicon();
+        return Icon.FromHandle(handle);
+    }
+}
+
 internal static class Colors
 {
     public static bool TryParse(string? spec, out Color color)
