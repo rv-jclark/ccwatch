@@ -116,4 +116,12 @@ jobs:
       # so that absence is visible instead of silent.
       - name: Probe report
         if: always()
+        # ⚠️ Informational, and explicitly NOT a gate. `doctor` exits non-zero
+        # when it finds problems, and a runner with no ~/.claude legitimately
+        # has them -- "no registry at /c/Users/runneradmin/.claude/sessions" is
+        # doctor working, not the build breaking. Without this the job went red
+        # on every single run, including ones where the suite itself reported
+        # 0 failed, which made the Tests result impossible to read from the
+        # job status alone.
+        continue-on-error: true
         run: bash ./bin/ccwatch doctor
