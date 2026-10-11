@@ -41,6 +41,46 @@ since a step this app took silently would be a step the documentation could
 not name (SC-010). Uninstalling is deleting that folder; the app writes no
 registry keys.
 
+### Launching at sign-in
+
+A shortcut in the Startup folder, which is the mechanism with no service, no
+scheduled task and nothing to uninstall but a file:
+
+```powershell
+$target  = Join-Path $env:LOCALAPPDATA 'Programs\ccwatch\ccwatch-tray.exe'
+$lnk     = Join-Path ([Environment]::GetFolderPath('Startup')) 'ccwatch.lnk'
+$sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+$sc.TargetPath = $target
+$sc.WorkingDirectory = Split-Path $target
+$sc.Save()
+```
+
+Point it at the **installed** copy, not `app-win/build/`: that directory is
+git-ignored and a `git clean` would leave the shortcut aimed at nothing. The
+cost of the installed copy is that `-Install` has to be re-run after a
+rebuild, the same trade the CLI's symlink avoids and a compiled binary
+cannot.
+
+### Making the icon visible
+
+⚠️ Windows 11 files every **new** tray icon into the hidden overflow, so the
+first launch looks like nothing happened. It is behind the `^` chevron. Drag
+it onto the tray, or set *Settings → Personalization → Taskbar → Other system
+tray icons → ccwatch-tray*.
+
+The preference is keyed by **executable path**, under
+`HKCU\Control Panel\NotifyIconSettings\<id>` as `IsPromoted`. So promoting
+the copy in `app-win/build/` does nothing for the installed one — they are
+two different entries, and installing after a build hides the icon again
+even though it was visible a moment earlier. Check which is which with:
+
+```powershell
+Get-ChildItem 'HKCU:\Control Panel\NotifyIconSettings' | ForEach-Object {
+  $p = Get-ItemProperty $_.PSPath
+  if ($p.ExecutablePath -match 'ccwatch') { "$($_.PSChildName)  $($p.ExecutablePath)  IsPromoted=$($p.IsPromoted)" }
+}
+```
+
 At launch the tray locates `ccwatch` the same way on every run: a build-time
 path recorded at publish time, then `PATH`. If neither resolves, the tray
 title reads `cc !` and the menu states what it looked for and where — never
