@@ -520,6 +520,9 @@ internal sealed class TrayContext : ApplicationContext
     /// back to it. See OnUiThread.
     private readonly Control _marshal;
 
+    /// 0 idle, 1 a snapshot is in flight. See RefreshNow.
+    private int _refreshInFlight;
+
     private LocatedBash? _bash;
     private LocatedCli? _cli;
     private ServeSupervisor? _serve;
@@ -588,8 +591,25 @@ internal sealed class TrayContext : ApplicationContext
         var bash = _bash;
         var cli = _cli;
 
+        // ⚠️ ONE snapshot at a time. The timer fires every CCWATCH_BAR_REFRESH
+        // seconds (10 by default) and `ccwatch bar` walks the whole transcript
+        // tree, so on a loaded machine it can take far longer than the gap
+        // between ticks -- measured at 170 SECONDS here while the test suite
+        // was running, against a 10s timer. Without this guard that is
+        // seventeen overlapping snapshots, each spawning bash, jq and python,
+        // all of them finishing into the same Render: the tray stops
+        // responding and Windows eventually kills it with AppHangB1. The
+        // RunBar timeout is 120s, which is itself longer than the interval, so
+        // overlap was not an edge case but the design.
+        //
+        // A tick that arrives while one is running is DROPPED, not queued: the
+        // next one is a fresh snapshot anyway, and a queue of stale ones is
+        // the pile-up by another name.
+        if (Interlocked.CompareExchange(ref _refreshInFlight, 1, 0) != 0) { return; }
         Task.Run(() =>
         {
+            try
+            {
             var env = new Dictionary<string, string> { ["NO_COLOR"] = "1", ["CCWATCH_PORT"] = _port.ToString() };
             var output = RunBar(bash.Path, cli.Path, env, 120_000);
             var doc = string.IsNullOrWhiteSpace(output)
@@ -605,6 +625,8 @@ internal sealed class TrayContext : ApplicationContext
                 : BarDocument.Parse(output);
             lock (_renderLock) { _doc = doc; }
             Render();
+            }
+            finally { Interlocked.Exchange(ref _refreshInFlight, 0); }
         });
     }
 
