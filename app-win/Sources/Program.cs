@@ -515,6 +515,11 @@ internal sealed class TrayContext : ApplicationContext
     private readonly System.Windows.Forms.Timer _timer;
     private readonly object _renderLock = new();
 
+    /// A parentless, never-shown control whose only job is to own a window
+    /// handle on the UI thread, so work arriving from elsewhere can be posted
+    /// back to it. See OnUiThread.
+    private readonly Control _marshal;
+
     private LocatedBash? _bash;
     private LocatedCli? _cli;
     private ServeSupervisor? _serve;
@@ -523,6 +528,12 @@ internal sealed class TrayContext : ApplicationContext
 
     public TrayContext()
     {
+        // ⚠️ FIRST, and on this thread, because this constructor runs on the
+        // UI thread and `.Handle` is what pins the handle to it. Everything
+        // below marshals through it.
+        _marshal = new Control();
+        _ = _marshal.Handle;
+
         _port = int.TryParse(Environment.GetEnvironmentVariable("CCWATCH_PORT"), out var p) ? p : 8787;
         _refreshSeconds = double.TryParse(Environment.GetEnvironmentVariable("CCWATCH_BAR_REFRESH"), out var r) ? r : 10;
 
@@ -576,6 +587,7 @@ internal sealed class TrayContext : ApplicationContext
         }
         var bash = _bash;
         var cli = _cli;
+
         Task.Run(() =>
         {
             var env = new Dictionary<string, string> { ["NO_COLOR"] = "1", ["CCWATCH_PORT"] = _port.ToString() };
@@ -640,8 +652,40 @@ internal sealed class TrayContext : ApplicationContext
         }
     }
 
+    /// Run <paramref name="action"/> on the UI thread, posting it there if we
+    /// are not already on it.
+    ///
+    /// ⚠️ Windows killed this app with AppHangB1 — "stopped interacting with
+    /// Windows" — and the cause was touching UI objects from the wrong thread.
+    /// `RefreshNow` does its subprocess work on a thread-pool thread, which is
+    /// right, and then called `Render` straight from it, which is not:
+    /// `RebuildMenu` mutates a ContextMenuStrip, and a ContextMenuStrip is a
+    /// Control. `ServeSupervisor.OnChange` did the same from its own monitor
+    /// thread. Mutating a Control's items while the UI thread is painting them
+    /// is a deadlock waiting for a slow enough tick, and a tray that polls a
+    /// subprocess every ten seconds eventually finds one.
+    ///
+    /// It was always latent; it started biting when the icon began carrying
+    /// severity, because that added GDI work — bitmap, Graphics, GetHicon — to
+    /// the same wrong thread.
+    ///
+    /// BeginInvoke, not Invoke: the worker has nothing to wait for, and making
+    /// it wait on the UI thread is how the other half of a deadlock is built.
+    private void OnUiThread(Action action)
+    {
+        if (_marshal.IsHandleCreated && _marshal.InvokeRequired)
+        {
+            try { _marshal.BeginInvoke(action); }
+            catch (ObjectDisposedException) { /* quitting; nothing to repaint */ }
+            catch (InvalidOperationException) { /* handle gone; same */ }
+            return;
+        }
+        action();
+    }
+
     private void Render()
     {
+        if (_marshal.IsHandleCreated && _marshal.InvokeRequired) { OnUiThread(Render); return; }
         BarDocument doc;
         lock (_renderLock) { doc = _doc; }
         _icon.Text = Truncate(doc.Title, 127); // NotifyIcon.Text is capped at 127 chars
@@ -658,6 +702,9 @@ internal sealed class TrayContext : ApplicationContext
 
     private void RebuildMenu()
     {
+        // Reached directly from ServeSupervisor.OnChange, which fires on its
+        // own thread — so this guards itself rather than trusting its callers.
+        if (_marshal.IsHandleCreated && _marshal.InvokeRequired) { OnUiThread(RebuildMenu); return; }
         var menu = _icon.ContextMenuStrip!;
         menu.Items.Clear();
 
@@ -751,6 +798,7 @@ internal sealed class TrayContext : ApplicationContext
         _serve?.Stop();
         _icon.Visible = false;
         _icon.Dispose();
+        _marshal.Dispose();
         ExitThread();
     }
 }
