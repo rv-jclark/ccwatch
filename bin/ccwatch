@@ -1683,26 +1683,56 @@ snapshot() {
         else .[$k] = { cpu: $s.cpu, at: $at } end)' \
     >"$CPU_CACHE.tmp" 2>/dev/null && mv "$CPU_CACHE.tmp" "$CPU_CACHE" 2>/dev/null || true
 
+  # ⚠️ The BULK goes through a file, not the command line. Windows caps a
+  # command line at 32767 characters, and these payloads are the snapshot
+  # itself: measured at 41662 bytes with nine sessions -- of which `pipelines`
+  # alone was 21612 and the jq program a fixed 12809 -- and jq died with
+  # `Argument list too long`. What the tray then showed was "ccwatch could not
+  # read the sessions", which is true, and is caused by the SIZE of the answer
+  # rather than by anything wrong with it. That is the hardest kind of failure
+  # to read: the machine looks broken when it is only busy.
+  #
+  # macOS allows roughly 1MB, so this can only ever be seen here, and only
+  # once a fleet is big enough -- it worked at eight sessions and failed at
+  # nine. Anything that grows with the fleet belongs in the file; the scalars
+  # stay on the command line, where they cost nothing and keep the call
+  # readable.
+  #
+  # Built with `printf`, which is a bash BUILTIN, so assembling the file
+  # cannot hit the very limit it exists to avoid.
+  mkdir -p "$CCWATCH_HOME" 2>/dev/null
+  local joinfile="$CCWATCH_HOME/join-$$.json" join_rc=0
+  printf '{"t":%s,"p":%s,"live":%s,"prev":%s,"runners":%s,"ctx":%s,"usage":%s,"host":%s,"repos":%s,"asks":%s}' \
+    "$transcripts" "$pipelines" "$live" "$prev" "$runners_alive" \
+    "$ctx" "$usage" "${host:-null}" "$repos" "${asks:-\{\}}" >"$joinfile"
+
   printf '%s' "$live_sessions" | jq \
+    --slurpfile _bulk "$joinfile" \
     --argjson parse_failed "$parse_failed" \
-    --argjson t "$transcripts" \
-    --argjson p "$pipelines" \
-    --argjson live "$live" \
-    --argjson prev "$prev" \
     --argjson nowf "$nowf" \
     --argjson cpu_gap "$CCWATCH_CPU_MIN_GAP" \
-    --argjson runners "$runners_alive" \
     --argjson now "$now" \
     --argjson busy_stale "$CCWATCH_BUSY_STALE" \
     --argjson sdk_stale "$CCWATCH_SDK_STALE" \
     --argjson unfinished_hours "$CCWATCH_UNFINISHED_HOURS" \
-    --argjson ctx "$ctx" \
-    --argjson usage "$usage" \
-    --argjson host "${host:-null}" \
     --argjson swap_warn "$CCWATCH_SWAP_WARN" \
-    --argjson ctx_stale "$CCWATCH_CTX_STALE" \
-    --argjson repos "$repos" \
-    --argjson asks "${asks:-\{\}}" '
+    --argjson ctx_stale "$CCWATCH_CTX_STALE" '
+    # The file, unpacked back into the names the program below already uses,
+    # so moving it off the command line changed the call and not the program.
+    # These bindings come BEFORE the defs deliberately: a `def` captures its
+    # lexical scope, so one defined above `$repos` could not see it.
+    ($_bulk[0]) as $B
+    | ($B.t) as $t
+    | ($B.p) as $p
+    | ($B.live) as $live
+    | ($B.prev) as $prev
+    | ($B.runners) as $runners
+    | ($B.ctx) as $ctx
+    | ($B.usage) as $usage
+    | ($B.host) as $host
+    | ($B.repos) as $repos
+    | ($B.asks) as $asks
+    |
     # Shared by session rows and unfinished-run rows, and derived from the git
     # REMOTE rather than the path — see collect_repos for why the path version
     # was wrong three different ways.
@@ -1921,7 +1951,10 @@ snapshot() {
           | unique_by([.cwd, .feature, .phase])
           | sort_by(.age // 9e18) }
     | .unfinished_old = ([ .unfinished[] | select((.age // 9e18) > ($unfinished_hours * 3600)) ] | length)
-    | .unfinished = [ .unfinished[] | select((.age // 9e18) <= ($unfinished_hours * 3600)) ]'
+    | .unfinished = [ .unfinished[] | select((.age // 9e18) <= ($unfinished_hours * 3600)) ]' \
+    || join_rc=$?
+  rm -f "$joinfile" 2>/dev/null
+  return "$join_rc"
 }
 
 # ============================================================== rendering ====

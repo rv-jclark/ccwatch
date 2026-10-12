@@ -128,7 +128,7 @@ case "$(uname -s)" in
   *)                    _host_platform=macos ;;
 esac
 
-TALLY_FLOOR=566
+TALLY_FLOOR=569
 TALLY_FLOOR_NODE=305
 # ⚠️ Windows refuses send/kill/peers/revive outright -- they need POSIX
 # signals and the per-session Unix socket -- so those four sections cannot run
@@ -1595,6 +1595,38 @@ _fr001_mutleak=$(awk '
   | grep -E '(^|[^A-Za-z0-9_."-])(ps -o|ps -p|stat -f|stat -c|date -r|date -d|vm_stat|sysctl|powershell |cygpath|uname -s)')
 assert_contains "$_fr001_mutleak" "date -r" \
   "and the guard actually goes red against a real inline call planted outside the seam"
+
+# --- the snapshot's payloads stay OFF the command line (Windows) ------------
+# ⚠️ Windows caps a command line at 32767 characters. `the join` passes every
+# collected payload to one jq, and those payloads ARE the snapshot: measured
+# at 41662 bytes with nine sessions, of which `pipelines` alone was 21612.
+# Over the cap, jq exits with `Argument list too long`, the snapshot fails,
+# and the tray reads "ccwatch could not read the sessions" -- true, and caused
+# by the SIZE of the answer rather than anything wrong with it.
+#
+# This is STRUCTURAL rather than behavioural, which is a weaker check and is
+# chosen deliberately: macOS allows roughly 1MB, so no fixture that runs in
+# reasonable time can pose the failure on the host this suite is usually run
+# on, and a fixture big enough to pose it on Windows would be 32KB of
+# fabricated state for one assertion. What CAN be asserted on both hosts is
+# the shape the fix depends on: the bulk arrives by file, and the payloads
+# that grow with the fleet are not named on the command line at all.
+_join_call=$(awk '/^  printf .%s. "\$live_sessions" \| jq/,/^    --argjson ctx_stale/' "$CCWATCH")
+assert_contains "$_join_call" "--slurpfile _bulk" \
+  "the join reads its bulk payloads from a file, not the command line"
+for _big in 't' 'p' 'live' 'prev' 'runners' 'ctx' 'usage' 'repos' 'asks'; do
+  case "$_join_call" in
+    *"--argjson $_big "*)
+      t_fail "the join keeps every fleet-sized payload off the command line" \
+             "--argjson $_big is back on the command line (Windows caps it at 32767 bytes)" ;;
+    *) ;;
+  esac
+done
+t_pass "the join keeps every fleet-sized payload off the command line"
+# And the program still binds them, or moving them would have deleted them:
+# a `def` captures its lexical scope, so these have to precede the defs.
+assert_contains "$(sed -n '/^    ($_bulk\[0\]) as $B/,/^    |$/p' "$CCWATCH")" '($B.repos) as $repos' \
+  "and binds them back to the names the program already used"
 
 # ============================================================== collectors ===
 printf '\ncollectors\n'

@@ -2054,6 +2054,7 @@ implementation broken in the specific way it describes:
 | feed a native jq a process substitution instead of a real file (`--slurpfile live <(...)`) | 1 — not planted either: `resume` printed `jq: error: writing output failed: Invalid argument` and dropped the whole LAST KNOWN ROSTER block, with the heading above it looking normal |
 | restore the `export CCWATCH_PLATFORM=macos` leak out of the collectors section | 42 revive + 23 serve + 9 roster + 3 bar on a Windows host, and **0** on macOS — the mutation that proves a leaked export is invisible on the platform it names |
 | drop bash's own directory from the gh assertion's constructed PATH | 1 on Windows, 0 on macOS |
+| put any fleet-sized payload back on `the join`'s command line (`--argjson p "$pipelines"`) | 1 — structural, and mutation-checked by planting exactly that line: the guard fires on the mutant and passes on the real file. The BEHAVIOURAL failure needs a fleet big enough to pass 32767 bytes, which only a Windows host can show |
 | leave TALLY_FLOOR unadjusted on a host that refuses send/revive/peers/kill | 1 — the floor fires and reports "assertions are running but not registering" when what actually happened is that four sections honestly skipped |
 | key `collect_repos` with a plain `jq --arg c "$cwd"` on Windows, letting MSYS rewrite the path | 4 — not a planted mutation: this was the implementation, and it reported `no repo` for every fixture repository while real sessions, whose cwds are already native, stayed correct |
 | ask `probe_clock`'s two fixed instants in two powershell spawns instead of one | intermittent — 2 bar assertions in 8 runs, 0 in the other 6; the mutation that only fails sometimes, and the reason the fix is measured over 15 runs rather than 1 |
@@ -2436,6 +2437,31 @@ together are the lesson: on a loaded 2-core runner `powershell.exe`
 intermittently produces nothing at all, so **every** PowerShell probe here
 needs to tell an empty answer apart from a measured one. A probe that cannot
 is not wrong about the value, it is wrong about whether it has one.
+
+**8. A command line is only 32767 characters here.** `the join` hands every
+collected payload to one jq, and those payloads are the snapshot: measured at
+41662 bytes with nine sessions, of which `pipelines` alone was 21612 and the
+jq program a fixed 12809. Over the cap jq exits `Argument list too long`, the
+snapshot fails, and the tray reads **"ccwatch could not read the sessions"** --
+which is true, and is caused by the SIZE of the answer rather than by anything
+wrong with it. That is the hardest shape of failure to read: the machine looks
+broken when it is only busy. macOS allows roughly 1MB, so it cannot be seen
+there at all, and it is a function of fleet size rather than of anything in
+the code: it worked at eight sessions and failed at nine.
+
+The bulk now goes through a file and the scalars stay on the command line.
+The file is assembled with `printf`, a bash BUILTIN, so building it cannot hit
+the very limit it exists to avoid, and the program unpacks the file back into
+the names it already used -- before the `def`s, because a `def` captures its
+lexical scope and one defined above `$repos` could not see it.
+
+The assertion guarding this is deliberately **structural**, which is weaker
+than this project likes. No fixture that runs in reasonable time can pose the
+failure on macOS, and one big enough to pose it on Windows would be 32KB of
+fabricated state for a single check. What can be asserted on both hosts is the
+shape the fix depends on: the bulk arrives by file, and no payload that grows
+with the fleet is named on the command line. Recorded here so the weakness is
+a known one rather than an unexamined one.
 
 ### The leak that made all of it look worse
 
