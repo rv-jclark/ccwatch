@@ -8,6 +8,27 @@ subject is the changelog entry, which is why the subject line is expected to
 describe the user-visible change rather than the diff. The 1.0.0 entry predates
 that and is written by hand.
 
+## [2.1.0](https://github.com/rv-jclark/ccwatch/compare/v2.0.0...v2.1.0) (2026-10-12)
+
+
+### Features
+
+* **app-win:** give the tray a real icon, tinted by ccwatch's own verdict ([fa316fe](https://github.com/rv-jclark/ccwatch/commit/fa316fea99893bc9930deba8d351027c528f63be))
+
+
+### Bug Fixes
+
+* **app-win:** decode the CLI's output as UTF-8, not the ANSI code page ([ac84e71](https://github.com/rv-jclark/ccwatch/commit/ac84e71d720e6f81d4c8f4fcbf38dcbb6cc97ba4))
+* **app-win:** run one snapshot at a time, instead of starting a new one every tick ([c18da02](https://github.com/rv-jclark/ccwatch/commit/c18da0291267f57e963fdd145f1c4c91adc1823b))
+* **app-win:** touch the tray's UI objects only from the UI thread ([846d9cf](https://github.com/rv-jclark/ccwatch/commit/846d9cf32149a9dd5f0a896ccfe6a22edfa447fd))
+* **app-win:** write the selftest's output as UTF-8, so a pass reads differently from a failure ([7feae31](https://github.com/rv-jclark/ccwatch/commit/7feae318130c69c6f1015a8a91330b006d2ffae5))
+* keep the snapshot's payloads under the Windows command-line limit ([9909a4a](https://github.com/rv-jclark/ccwatch/commit/9909a4a9f68ce7fc2afc9dc68bf89b1eff43e096))
+
+
+### Documentation
+
+* **app-win:** say how to launch at sign-in, and why the icon hides ([98a1c11](https://github.com/rv-jclark/ccwatch/commit/98a1c11f40ac2f48f225e661dd73ac0758eace9c))
+
 ## [2.0.0](https://github.com/rv-jclark/ccwatch/compare/v1.1.0...v2.0.0) (2026-10-11)
 
 
