@@ -901,6 +901,13 @@ internal static class Program
         // nothing while the same command with `> file` worked by hand.
         if (Console.IsOutputRedirected)
         {
+            // ⚠️ Redirected, so there is no console to attach to — but the
+            // default writer still encodes with the console code page, and
+            // that cannot represent the ✓ and ✗ the selftest prints: BOTH
+            // arrive as a bare '?', which makes a pass and a failure
+            // indistinguishable in any captured output. Say UTF-8.
+            Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true });
+            Console.SetError(new StreamWriter(Console.OpenStandardError(), new UTF8Encoding(false)) { AutoFlush = true });
             return;
         }
 
@@ -909,9 +916,9 @@ internal static class Program
             return;
         }
 
-        var stdout = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
+        var stdout = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true };
         Console.SetOut(stdout);
-        var stderr = new StreamWriter(Console.OpenStandardError()) { AutoFlush = true };
+        var stderr = new StreamWriter(Console.OpenStandardError(), new UTF8Encoding(false)) { AutoFlush = true };
         Console.SetError(stderr);
     }
 
