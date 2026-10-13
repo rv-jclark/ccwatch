@@ -299,9 +299,17 @@ _ccwatch_resolve_py() {
 # back a slice of exactly what the cache exists to save: builtins only means
 # no subshells either, not just no execs.
 _ccwatch_cache_value=""
+# ⚠️ Set by `doctor`, and only by doctor. Everywhere else a cache that says
+# "this is the bash, this is the clock" is exactly what we want; doctor is the
+# command whose whole question is "is ccwatch's own view still trustworthy",
+# and answering it from a cache would be reporting `ok` for something never
+# measured -- rule 4 by way of a shortcut. So doctor pays the full cost and
+# every other caller does not.
+_ccwatch_cache_bypass=""
 _ccwatch_cache_get() { # _ccwatch_cache_get <key> -> _ccwatch_cache_value
   local f="$CCWATCH_HOME/platform.cache" k v
   _ccwatch_cache_value=""
+  [ -n "$_ccwatch_cache_bypass" ] && return 1
   [ -s "$f" ] || return 1
   # The script is newer than the cache: re-detect rather than trust it.
   [ -n "${BASH_SOURCE[0]:-}" ] && [ "${BASH_SOURCE[0]}" -nt "$f" ] && return 1
@@ -749,6 +757,25 @@ _CCWATCH_CLOCK_EST_WANT="3:30 PM EST"
 
 _ccwatch_clock_select() {
   local candidates c a1 a2 _clk_pair
+
+  # ⚠️ The CHOICE is cached, never an answer. Validation costs a spawn per
+  # fixed instant, and `reset_clock` is called once per usage window -- each
+  # inside its own `$(...)`, so the memo in _ccwatch_clock_impl cannot survive
+  # back to the caller and every one of them re-validated from scratch. That
+  # was up to six powershell launches per render, on a platform where a launch
+  # intermittently returns nothing at all: this flake has now cost the reset
+  # clock, probe_host and a CI assertion in turn, and fewer spawns is the only
+  # fix that addresses the cause rather than the odds.
+  #
+  # Only a name is stored, so the two fixed instants still decide WHICH
+  # implementation is right -- this remembers the verdict, it does not skip
+  # reaching it. Invalidated with the rest of the cache when ccwatch changes.
+  if _ccwatch_cache_get clock; then
+    _ccwatch_clock_impl="$_ccwatch_cache_value"
+    probe_note clock "$_ccwatch_clock_impl" ok "cached"
+    return 0
+  fi
+
   case "$CCWATCH_PLATFORM" in
     macos) candidates="date-r(BSD)" ;;
     windows) candidates="date-d(GNU) powershell-tz" ;;
@@ -779,6 +806,7 @@ _ccwatch_clock_select() {
     _ccwatch_clock_candidate_answers="$_ccwatch_clock_candidate_answers$c: '$a1'/'$a2'; "
     if [ "$a1" = "$_CCWATCH_CLOCK_EDT_WANT" ] && [ "$a2" = "$_CCWATCH_CLOCK_EST_WANT" ]; then
       _ccwatch_clock_impl="$c"
+      _ccwatch_cache_put clock "$c"
       probe_note clock "$c" ok
       return 0
     fi
@@ -7182,6 +7210,14 @@ cmd_doctor() {
     meh "send/kill/peers: not available on Windows — this needs POSIX signals and the per-session Unix socket"
     meh "serve: read-only on Windows for the same reason — write endpoints refuse"
   fi
+  # ⚠️ Nothing cached: doctor MEASURES. See _ccwatch_cache_bypass. The bash and
+  # clock it reports below are resolved from scratch here, which is why this
+  # command is slower than every other one and should be.
+  _ccwatch_cache_bypass=1
+  CCWATCH_BASH=""
+  _ccwatch_clock_impl=""
+  _ccwatch_resolve_bash
+
   # Exercise every probe once so the report has one row per probe.
   probe_proc "" >/dev/null
   probe_mtimes "$PROJ_DIR" -maxdepth 2 >/dev/null

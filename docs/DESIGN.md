@@ -2057,6 +2057,7 @@ implementation broken in the specific way it describes:
 | put any fleet-sized payload back on `the join`'s command line (`--argjson p "$pipelines"`) | 1 — structural, and mutation-checked by planting exactly that line: the guard fires on the mutant and passes on the real file. The BEHAVIOURAL failure needs a fleet big enough to pass 32767 bytes, which only a Windows host can show |
 | delete `$CCWATCH_HOME/platform.cache` before each run | 0 assertions — it is a performance property, and the suite cannot see it. Measured instead: startup median 1071ms becomes 5752ms |
 | have `_ccwatch_cache_get` answer on stdout (`v=$(_ccwatch_cache_get bash)`) rather than through a global | 0 assertions, and it still WORKS — it just forks, which is most of what the cache was saving. The kind of regression only a measurement catches |
+| let `doctor` read the platform cache instead of bypassing it | 0 assertions — and that is the danger: doctor would report `ok` for a bash and a clock it never measured, which is the one command where that is unacceptable |
 | split the statusline's single jq back into one call per document | 0 assertions — every output is identical, which is the point: this is a cost regression, not a behaviour one |
 | leave TALLY_FLOOR unadjusted on a host that refuses send/revive/peers/kill | 1 — the floor fires and reports "assertions are running but not registering" when what actually happened is that four sections honestly skipped |
 | key `collect_repos` with a plain `jq --arg c "$cwd"` on Windows, letting MSYS rewrite the path | 4 — not a planted mutation: this was the implementation, and it reported `no repo` for every fixture repository while real sessions, whose cwds are already native, stayed correct |
@@ -2549,6 +2550,24 @@ read with `read -d ''` rather than `$(cat)` (112ms against 67ms).
 
 End to end, same machine, same payload: **min 2382ms to 1095ms, median 4459ms
 to 1669ms.**
+
+The same cache later took the clock's *choice* as well, and that one is about
+correctness as much as speed. `reset_clock` is called once per usage window,
+each inside its own `$(...)`, so the memo in `_ccwatch_clock_impl` could never
+survive back to the caller and every call re-validated from scratch: up to six
+powershell launches per render, on a platform where a launch intermittently
+returns nothing at all. That flake had by then cost the reset clock, the whole
+host panel, and a CI assertion in turn, and retries only improve the odds —
+fewer spawns addresses the cause. Only the implementation NAME is stored, so
+the two fixed instants still decide which formatter is right; the cache
+remembers the verdict rather than skipping it.
+
+⚠️ `doctor` bypasses all of this, deliberately. Everywhere else a cache saying
+"this is the bash, this is the clock" is the point; doctor's whole question is
+whether ccwatch's own view is still trustworthy, and answering that from a
+cache would report `ok` for something never measured — rule 4 reached by a
+shortcut. So doctor re-resolves from scratch and is slower than every other
+command, which is the right way round.
 
 ⚠️ A note on measuring any of this. This machine runs a dozen Claude sessions,
 and the noise is enormous — the same command measured 1032ms and 6613ms
