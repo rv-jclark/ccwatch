@@ -2055,6 +2055,9 @@ implementation broken in the specific way it describes:
 | restore the `export CCWATCH_PLATFORM=macos` leak out of the collectors section | 42 revive + 23 serve + 9 roster + 3 bar on a Windows host, and **0** on macOS — the mutation that proves a leaked export is invisible on the platform it names |
 | drop bash's own directory from the gh assertion's constructed PATH | 1 on Windows, 0 on macOS |
 | put any fleet-sized payload back on `the join`'s command line (`--argjson p "$pipelines"`) | 1 — structural, and mutation-checked by planting exactly that line: the guard fires on the mutant and passes on the real file. The BEHAVIOURAL failure needs a fleet big enough to pass 32767 bytes, which only a Windows host can show |
+| delete `$CCWATCH_HOME/platform.cache` before each run | 0 assertions — it is a performance property, and the suite cannot see it. Measured instead: startup median 1071ms becomes 5752ms |
+| have `_ccwatch_cache_get` answer on stdout (`v=$(_ccwatch_cache_get bash)`) rather than through a global | 0 assertions, and it still WORKS — it just forks, which is most of what the cache was saving. The kind of regression only a measurement catches |
+| split the statusline's single jq back into one call per document | 0 assertions — every output is identical, which is the point: this is a cost regression, not a behaviour one |
 | leave TALLY_FLOOR unadjusted on a host that refuses send/revive/peers/kill | 1 — the floor fires and reports "assertions are running but not registering" when what actually happened is that four sections honestly skipped |
 | key `collect_repos` with a plain `jq --arg c "$cwd"` on Windows, letting MSYS rewrite the path | 4 — not a planted mutation: this was the implementation, and it reported `no repo` for every fixture repository while real sessions, whose cwds are already native, stayed correct |
 | ask `probe_clock`'s two fixed instants in two powershell spawns instead of one | intermittent — 2 bar assertions in 8 runs, 0 in the other 6; the mutation that only fails sometimes, and the reason the fix is measured over 15 runs rather than 1 |
@@ -2490,6 +2493,71 @@ most time was believing those were three separate bugs in `bar`, `revive` and
 `serve`. A leaked export is the most expensive kind of test-only state,
 because its symptoms appear in sections that have nothing to do with it, and
 it is `unset` now the moment its subsection ends.
+
+### A process costs a hundred times more here
+
+The thing that makes Windows slow is not any one operation, it is that
+`CreateProcess` is expensive and MSYS emulates `fork()` on top of it. Measured
+on an idle-ish machine:
+
+| | |
+|---|---|
+| `jq -n 1` | 62ms |
+| `/usr/bin/true` | ~184ms under load, ~60ms idle |
+| `bash -c 'exit 0'` | 73ms |
+| `uname -s` | 59ms |
+| `reg query HKLM/SOFTWARE/GitForWindows` | **759ms** |
+
+On macOS the same spawns are one to five milliseconds. So a shell script that
+pipes through six small processes is idiomatic there and a visible stall here,
+and `v=$(helper)` is not free either: a command substitution forks, and an
+emulated fork costs real milliseconds even when nothing is executed.
+
+That turned `ccwatch statusline` into a problem. It runs on **every statusline
+repaint**, in the critical path of the prompt, in every open session — its own
+comment says it "must never fail, never be slow". It was taking **2.4 to 4.5
+seconds**, and with thirteen sessions and a ten-second refresh that is thirteen
+multi-second pipelines starting every ten seconds.
+
+Two things were paying for it, and the first was not in `statusline` at all.
+
+**Every invocation re-detected the platform.** `platform_detect` resolves which
+bash is MSYS-class, and on Windows that meant a `reg query` (759ms), a
+`bash -c 'uname -s'` verification (134ms) and a `cygpath -m` (115ms), plus the
+`jq -b` probe beside `need jq` (134ms). About 1.1 seconds of a 1.5 second
+startup, before the command did anything — and `once`, `bar`, `--json` and
+`serve`'s collector all paid it too.
+
+Those are facts about the machine, not about the run, so they are cached in
+`$CCWATCH_HOME/platform.cache`. Validated by EXISTENCE rather than by running
+the interpreter again — the `uname -s` check happened when the value was
+cached, and repeating it would hand back exactly the second the cache exists
+to save. Invalidated by the script being newer than the cache, which is a
+builtin test and therefore free: upgrading ccwatch re-detects. Measured:
+startup median **5752ms to 1071ms**.
+
+**And `statusline` shelled out seven times for one small payload.** The
+account-wide usage document, a `.session_id` read, the per-session usage
+document, a SECOND identical `.session_id` read, the context document, the
+status line text, and a `date` for the timestamp. It is now one `jq` that emits
+four lines — session id, usage document, context document, status line text —
+with jq computing the timestamp itself via `now`. Everything after that is
+shell builtins, because a rewrite that saved six spawns and then added one to
+read the answer back would have been pointless: the cache helpers answer
+through a global rather than stdout for the same reason, and the payload is
+read with `read -d ''` rather than `$(cat)` (112ms against 67ms).
+
+End to end, same machine, same payload: **min 2382ms to 1095ms, median 4459ms
+to 1669ms.**
+
+⚠️ A note on measuring any of this. This machine runs a dozen Claude sessions,
+and the noise is enormous — the same command measured 1032ms and 6613ms
+minutes apart, and one statusline sample hit 19768ms. **Take the minimum over
+ten-odd runs**, not a single timing and not the mean: the minimum is the
+closest thing to the cost with nothing else in the way, and it is the only
+number that stayed stable enough across runs to compare against. Two
+measurements here were nearly reported as regressions before re-running them
+on a quiet machine showed otherwise.
 
 ### What only CI could show
 

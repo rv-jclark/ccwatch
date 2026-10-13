@@ -30,3 +30,9 @@ app-win/obj/
 # Zero-byte files bash drops in the cwd when it crashes. Eighteen appeared
 # during a night when the host ran out of swap and bash segfaulted repeatedly.
 sh-thd-*
+
+# MSYS bash crash dumps. Windows emulates fork(), and under enough
+# concurrency it gives up and drops one of these in the working
+# directory -- which is also how a test run dies silently part-way
+# through with no error of its own.
+*.stackdump

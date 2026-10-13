@@ -312,6 +312,23 @@ produced a specific wrong output that someone believed.
   sessions were fine because Claude Code records `C:/...` already, which is why
   it hid from every manual check.
 
+  ⚠️ **A process costs ~100x more here, and `$(...)` forks.** `CreateProcess`
+  is expensive and MSYS emulates `fork()` on top of it: a `jq` spawn is ~62ms
+  idle, `reg query` 759ms, against 1-5ms for the same thing on macOS. So a
+  pipeline of six small processes is idiomatic on macOS and a visible stall
+  here, and `v=$(helper)` is not free even when the helper is pure builtins.
+  `platform_detect`'s answers are cached in `$CCWATCH_HOME/platform.cache`
+  (validated by existence, invalidated by the script being newer — both
+  builtin tests), and `ccwatch statusline` is ONE jq pass because it runs on
+  every statusline repaint in every session. Anything on a hot path here
+  should be counted in processes, not in lines. `docs/DESIGN.md` has the
+  numbers.
+
+  ⚠️ **Measure with the MINIMUM of ten-odd runs, never one timing.** This
+  machine's noise is enormous — the same command measured 1032ms and 6613ms
+  minutes apart. Two readings were nearly reported as regressions here before
+  a quiet-machine re-run showed they were load.
+
   ⚠️ **A green run here proves nothing about a host with both bashes.**
   `_ccwatch_resolve_bash` must find the bash that shares THIS shell's
   filesystem: its candidate list is newline-separated and read with `read`
