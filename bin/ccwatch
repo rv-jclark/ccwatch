@@ -987,9 +987,21 @@ _probe_host_windows() {
     fi
   fi
 
-  out=$(_probe_host_windows_once)
-  # One retry, and only on an empty answer -- see the note above the helper.
-  [ -n "$out" ] || out=$(_probe_host_windows_once)
+  # THREE attempts, and only ever on an EMPTY answer -- the same budget the
+  # clock gets, for the same reason and after the same evidence. One retry was
+  # not enough: CI failed "host memory state is collected" on a runner whose
+  # memory was perfectly readable, which is the fourth time this one flake has
+  # surfaced somewhere new (clock selection, the clock value, the host panel,
+  # and now this). Every powershell launch here is a chance to get nothing
+  # back, so every one of them retries, and they all retry the same number of
+  # times rather than whatever each site happened to be given.
+  local _ph_tries=0
+  out=""
+  while [ "$_ph_tries" -lt 3 ]; do
+    out=$(_probe_host_windows_once)
+    [ -n "$out" ] && break
+    _ph_tries=$((_ph_tries + 1))
+  done
 
   if [ -z "$out" ]; then
     probe_note host powershell-cim failed "powershell produced no usable output"

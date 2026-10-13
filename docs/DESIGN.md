@@ -2558,7 +2558,15 @@ survive back to the caller and every call re-validated from scratch: up to six
 powershell launches per render, on a platform where a launch intermittently
 returns nothing at all. That flake had by then cost the reset clock, the whole
 host panel, and a CI assertion in turn, and retries only improve the odds —
-fewer spawns addresses the cause. Only the implementation NAME is stored, so
+fewer spawns addresses the cause.
+
+It surfaced a fourth time immediately afterwards, in `probe_host`, because
+that site had been given ONE retry while the clock had three. Both now get
+three: a budget that differs per call site is not a policy, it is wherever
+each site happened to land. **Every powershell launch in this file retries on
+an empty answer, three times, and never on a wrong one** — rejecting wrong
+answers is what validating against two fixed instants is for, and a retry that
+accepts a consistently wrong answer would be worse than the flake. Only the implementation NAME is stored, so
 the two fixed instants still decide which formatter is right; the cache
 remembers the verdict rather than skipping it.
 
