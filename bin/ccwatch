@@ -45,7 +45,7 @@ set -uo pipefail
 # any line carrying it, and this is the only copy of the number in the repo that
 # the tool itself reads. Do not bump it by hand — the release PR does that, and
 # a hand-edit makes the tag and the script disagree about what shipped.
-CCWATCH_VERSION=2.1.0 # x-release-please-version
+CCWATCH_VERSION=2.1.1 # x-release-please-version
 
 # ---------------------------------------------------------------- output ------
 # A dumb terminal, a pipe, or a CI log gets plain text. Colour is decoration and

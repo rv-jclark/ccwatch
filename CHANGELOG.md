@@ -8,6 +8,25 @@ subject is the changelog entry, which is why the subject line is expected to
 describe the user-visible change rather than the diff. The 1.0.0 entry predates
 that and is written by hand.
 
+## [2.1.1](https://github.com/rv-jclark/ccwatch/compare/v2.1.0...v2.1.1) (2026-10-13)
+
+
+### Bug Fixes
+
+* give every PowerShell probe the same three attempts ([551a420](https://github.com/rv-jclark/ccwatch/commit/551a420b78d987b7070fd50870171ab1310e599a))
+
+
+### Performance
+
+* cache the clock's chosen formatter, and have doctor measure anyway ([5c837b2](https://github.com/rv-jclark/ccwatch/commit/5c837b20065e3f34730eee187735b968878fb565))
+* cache the platform facts that cost a second to establish on Windows ([7dc1c88](https://github.com/rv-jclark/ccwatch/commit/7dc1c88e35263a3acc9bd7690017686c93ef9980))
+* shred the statusline payload in one jq pass, not seven processes ([002590e](https://github.com/rv-jclark/ccwatch/commit/002590e3a2201a0c4c8c462a3ba8f9e4b4f92900))
+
+
+### Documentation
+
+* record what a process costs on Windows, and how to measure it ([f7f69a4](https://github.com/rv-jclark/ccwatch/commit/f7f69a4e2b2d83c1ceca615736d273d3a137aa18))
+
 ## [2.1.0](https://github.com/rv-jclark/ccwatch/compare/v2.0.0...v2.1.0) (2026-10-12)
 
 
