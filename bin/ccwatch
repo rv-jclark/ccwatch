@@ -277,8 +277,73 @@ _ccwatch_resolve_py() {
 # it: `uname -s` must answer MINGW*/MSYS*/CYGWIN*, because a `bash` on PATH
 # that silently opens a WSL shell instead would run every probe against the
 # wrong kernel with no error to show for it.
+# Two facts about this machine that are expensive to establish and do not
+# change between runs: which bash is MSYS-class, and whether jq understands
+# `-b`. Cached in one file, read and written with shell builtins only.
+#
+# ⚠️ This is worth a cache because on Windows EVERY invocation paid for it, and
+# process creation here costs roughly a hundred times what it does on Unix.
+# Measured per run: `reg query HKLM/SOFTWARE/GitForWindows` 759ms, the
+# `bash -c 'uname -s'` verification 134ms, `cygpath -m` 115ms and the `jq -b`
+# probe 134ms -- about 1.1s of a 1.5s startup, before the command itself did
+# anything. `ccwatch statusline` runs on every statusline repaint, in the
+# critical path of the prompt, so it paid that 1.5s several times a minute per
+# session.
+#
+# Invalidated by the script being NEWER than the cache, which is a builtin
+# test and therefore free: upgrading ccwatch re-detects. Delete the file to
+# force it by hand; `ccwatch doctor` prints what is in use either way.
+# ⚠️ Answers through a GLOBAL, not stdout, and the loop reads from a
+# redirect rather than a pipe -- so neither forks. On MSYS `fork()` is
+# emulated and costs real milliseconds, so `v=$(helper)` would have handed
+# back a slice of exactly what the cache exists to save: builtins only means
+# no subshells either, not just no execs.
+_ccwatch_cache_value=""
+_ccwatch_cache_get() { # _ccwatch_cache_get <key> -> _ccwatch_cache_value
+  local f="$CCWATCH_HOME/platform.cache" k v
+  _ccwatch_cache_value=""
+  [ -s "$f" ] || return 1
+  # The script is newer than the cache: re-detect rather than trust it.
+  [ -n "${BASH_SOURCE[0]:-}" ] && [ "${BASH_SOURCE[0]}" -nt "$f" ] && return 1
+  while IFS='=' read -r k v; do
+    [ "$k" = "$1" ] || continue
+    [ -n "$v" ] || return 1
+    _ccwatch_cache_value="$v"
+    return 0
+  done < "$f"
+  return 1
+}
+
+_ccwatch_cache_put() { # _ccwatch_cache_put <key> <value>
+  local f="$CCWATCH_HOME/platform.cache" tmp other line
+  [ -n "$2" ] || return 0
+  mkdir -p "$CCWATCH_HOME" 2>/dev/null || return 0
+  tmp="$f.$$"
+  # Keep whatever other keys are already there.
+  other=""
+  if [ -s "$f" ]; then
+    while IFS= read -r line; do
+      case "$line" in "$1="*) ;; "") ;; *) other="$other$line
+" ;; esac
+    done < "$f"
+  fi
+  { [ -n "$other" ] && printf '%s' "$other"; printf '%s=%s\n' "$1" "$2"; } >"$tmp" 2>/dev/null \
+    && mv "$tmp" "$f" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
 _ccwatch_resolve_bash() {
   [ -n "$CCWATCH_BASH" ] && return 0
+
+  # Validated by EXISTENCE, not by running it again: the `uname -s` check
+  # happened when this was cached, and repeating it would hand back the second
+  # the cache exists to save. A path that has gone away falls through to a
+  # full re-detect below.
+  if _ccwatch_cache_get bash && [ -x "$_ccwatch_cache_value" ]; then
+    CCWATCH_BASH="$_ccwatch_cache_value"
+    return 0
+  fi
   local candidates c reg_path self
 
   # ⚠️ NEWLINE-separated, and read with `read`, never `for c in $candidates`.
@@ -330,7 +395,10 @@ C:\\msys64\\usr\\bin\\bash.exe"
     esac
     command -v "$c" >/dev/null 2>&1 || [ -x "$c" ] || continue
     case "$("$c" -c 'uname -s' 2>/dev/null)" in
-      MINGW*|MSYS*|CYGWIN*) CCWATCH_BASH="$c"; return 0 ;;
+      MINGW*|MSYS*|CYGWIN*)
+        CCWATCH_BASH="$c"
+        _ccwatch_cache_put bash "$c"
+        return 0 ;;
     esac
   done <<EOF
 $candidates
@@ -7628,8 +7696,18 @@ need awk
 # status still comes straight from jq -- `jq -e` is load-bearing in
 # collect_repos and a pipe through `tr` would have replaced it with tr's.
 # Probed rather than assumed: a jq too old for `-b` keeps the plain call.
-if [ "$CCWATCH_PLATFORM" = windows ] && command jq -b -n true >/dev/null 2>&1; then
-  jq() { command jq -b "$@"; }
+# The probe costs a jq spawn (134ms here), so its answer is cached beside the
+# bash path -- same file, same invalidation.
+if [ "$CCWATCH_PLATFORM" = windows ]; then
+  if _ccwatch_cache_get jqb; then
+    _ccwatch_jqb="$_ccwatch_cache_value"
+  else
+    if command jq -b -n true >/dev/null 2>&1; then _ccwatch_jqb=1; else _ccwatch_jqb=0; fi
+    _ccwatch_cache_put jqb "$_ccwatch_jqb"
+  fi
+  if [ "$_ccwatch_jqb" = 1 ]; then
+    jq() { command jq -b "$@"; }
+  fi
 fi
 
 # ⚠️ The dispatch is ONE `{ ... }` block that ends in `exit`, and both halves
