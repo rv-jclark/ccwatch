@@ -3749,7 +3749,26 @@ CCWATCH_REVIVE_LIMIT_GRACE="${CCWATCH_REVIVE_LIMIT_GRACE:-120}"
 # The exact words. They double as the marker for "ccwatch already said this",
 # which is why they are compared verbatim and why changing one is a setting
 # rather than an edit.
-CCWATCH_REVIVE_ASK="${CCWATCH_REVIVE_ASK:-Are you actually done with the work and this pause is intentional?}"
+#
+# The ask says what to DO with the answer, not only asks it: a bare "are you
+# done?" got a stalled agent to say "not quite" and then wait to be told to
+# carry on, and got a finished one to send a reply that nobody reads - which
+# Claude Code delivered to some other session. ONE line, because it is found
+# inside Claude Code's peer envelope as a whole line (see collect_stops).
+#
+# ⚠️ And it is SIGNED, and says where the answer goes. Revive is not a Claude
+# session, so the envelope shows the agent only "Another Claude session sent
+# a message", with no sender it can address. Agents replied anyway, to
+# whichever session looked likely - the one with ccwatch in its name, every time - and
+# said they could not tell who had asked. Revive cannot receive a message, but
+# it does not need to: the answer is in the agent's own transcript, right
+# after the ask, and collect_stops reads it from there.
+CCWATCH_REVIVE_ASK="${CCWATCH_REVIVE_ASK:-Are you actually done with the work and this pause is intentional? If you are not done and have only stalled, resume the work now. If you are done, stay paused and say here, in a sentence, what you are waiting on — ccwatch reads your answer in this conversation, so do not message another session to reply. (Sent by ccwatch revive, an automated monitor, because you stopped partway through a spec-roadmap.)}"
+# Earlier wordings, one per line, still recognised as revive's own. Without
+# them every session already asked in the old words is a session never asked,
+# and each would be asked once more the day the wording changed.
+CCWATCH_REVIVE_ASK_PREVIOUS="${CCWATCH_REVIVE_ASK_PREVIOUS:-Are you actually done with the work and this pause is intentional?
+Are you actually done with the work and this pause is intentional? If you are not done and have only stalled, resume the work now. If you are done, stay paused — no reply is needed.}"
 CCWATCH_REVIVE_RETRY="${CCWATCH_REVIVE_RETRY:-retry}"
 CCWATCH_REVIVE_CONTINUE="${CCWATCH_REVIVE_CONTINUE:-continue}"
 # What "the network is back" is measured against.
@@ -3778,6 +3797,9 @@ from datetime import datetime, timedelta, timezone
 ask, retry, cont = sys.argv[1], sys.argv[2], sys.argv[3]
 resumed = int(sys.argv[4])
 ours = {ask: "asks", retry: "retries", cont: "continues"}
+for earlier in sys.argv[5].split("\n"):
+    if earlier.strip():
+        ours.setdefault(earlier.strip(), "asks")
 ROADMAP_CMD = re.compile(r"spec-roadmap(\s+run\b|\s*$|\s+--)")
 # The roadmap a spec-roadmap command names: `run --slug x`, or `run x`. Words
 # that are the runner own flags are not slugs; anything else that matches no
@@ -3989,9 +4011,16 @@ for line in sys.stdin:
     # again; the ones answering ran 0 to 3.
     launched = finished = since_ask = 0
     seen_ask = False
+    answer = None
     last_real = None
     for rec in reversed(recs):
         if rec["type"] == "assistant":
+            # Its answer: the last thing it said since the ask. Kept short and
+            # on one line - the reason it gave, not the turn (principle X).
+            if not seen_ask and answer is None:
+                said_text = " ".join(text_of((rec.get("message") or {}).get("content")).split())
+                if said_text:
+                    answer = said_text[:280] + ("…" if len(said_text) > 280 else "")
             for b in blocks(rec, "tool_use"):
                 # ⚠️ Replying is not working. An agent asked whether it is done
                 # very often answers by MESSAGING back (SendMessage), and that
@@ -4022,11 +4051,12 @@ for line in sys.stdin:
             if last_real is None:
                 last_real = (t or "").strip()
     row["answered_ask"] = seen_ask and since_ask < resumed
+    row["answer"] = answer if seen_ask else None
     row["bg_pending"] = max(0, launched - finished)
     out[sid] = row
 print(json.dumps(out))
 ' "$CCWATCH_REVIVE_ASK" "$CCWATCH_REVIVE_RETRY" "$CCWATCH_REVIVE_CONTINUE" \
-    "$CCWATCH_REVIVE_RESUMED" 2>/dev/null
+    "$CCWATCH_REVIVE_RESUMED" "$CCWATCH_REVIVE_ASK_PREVIOUS" 2>/dev/null
 }
 
 # collect_roadmaps — every spec-roadmap in the given directories, and how far
@@ -4123,7 +4153,9 @@ revive_plan() { # revive_plan <snapshot> <stops> <roadmaps> <runners|"unreadable
       | (if $named then [ $open[] | select(.slug as $x | $mine | index($x)) ] | first
          elif ($open | length) == 1 then $open[0] else null end) as $rm
       | { sid, name, pid, cwd, kind: $st.kind, since: $since,
-          resets_at: $st.resets_at }
+          resets_at: $st.resets_at,
+          # What it said when it was last asked, read from its own transcript.
+          answer: (if $st.kind == "end_turn" then $st.answer else null end) }
         + ( if $st.kind == "api_error" then
               ($retry_after * pow(2; $st.retries)) as $wait
               | ( "API error \(dur($since // 0)) ago (\($st.label // $st.error))" ) as $m
@@ -6338,7 +6370,9 @@ function run(doc, win) {
       var rvOn = {enabled: true, available: true, every: 60, live: true, pass_at: nowS - 5,
                   rows: [{name: "web-app-fc", action: "ask", outcome: "delivered", why: "paused 46m mid-roadmap checkout 4/5"},
                          {name: "pricing-7b", action: "retry", outcome: "failed", why: "API error 6m ago (ENOTFOUND)"},
-                         {name: "search-9d", action: null, why: "paused 5m mid-roadmap reindex 0/3 · asking at 10m"}],
+                         {name: "search-9d", action: null, why: "paused 5m mid-roadmap reindex 0/3 · asking at 10m"},
+                         {name: "billing-2a", action: null, why: "already asked, and it answered",
+                          answer: "Waiting on the owner to approve the migration window."}],
                   recent: [{at: nowS - 300, target: "web-app-fc", action: "ask", outcome: "delivered", why: "paused 46m"}]};
       rv.update(rvOff);
       var rq = {board: boxOf(board), header: boxOf(header)};
@@ -6382,6 +6416,7 @@ function run(doc, win) {
       var rtext = rmodal.textContent || "";
       check("the reason behind every decision is in the panel, beside its verdict",
             rtext.indexOf("mid-roadmap checkout 4/5") !== -1 && rtext.indexOf("ENOTFOUND") !== -1
+              && rtext.indexOf("its answer: Waiting on the owner to approve the migration window.") !== -1
               && rtext.indexOf("retried · failed") !== -1 && rtext.indexOf("asking at 10m") !== -1,
             JSON.stringify(rtext.slice(0, 200)));
       var rtog = doc.getElementById("revivetoggle");

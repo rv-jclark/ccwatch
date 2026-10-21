@@ -39,7 +39,8 @@
       word = (PAST[r.action] || r.action) + (r.outcome === "delivered" ? "" : " · " + r.outcome);
       cls = r.outcome === "failed" ? "bad" : "did";
     } else { word = (live ? "" : "would ") + r.action; cls = "would"; }
-    return { name: r.name || "?", word: word, why: r.why || "", cls: cls };
+    return { name: r.name || "?", word: word, why: r.why || "", cls: cls,
+             answer: r.answer || "" };
   }
 
   // view(revive, canSend, now) — everything the control and its panel show.
@@ -134,6 +135,7 @@
     ".revrow .w{font-weight:600}.revrow.wait .w{color:var(--dim)}" +
     ".revrow.would .w,.revrow.did .w{color:var(--warn)}.revrow.bad .w{color:var(--bad)}" +
     ".revrow .y{color:var(--dim);overflow-wrap:anywhere}" +
+    ".revanswer{grid-column:2/-1;color:var(--ink);font-style:italic;overflow-wrap:anywhere;margin-bottom:.2rem}" +
     "#revivemodal h3{margin:.3rem 0 0;font-size:12px;font-weight:600;color:var(--dim)}";
 
   function el(doc, tag, attrs, text) {
@@ -161,9 +163,9 @@
     modal.appendChild(head);
     modal.appendChild(el(doc, "div", { id: "reviveabout" },
       "Types what you would have: “retry” after an API error once the API answers, " +
-      "“continue” once a session limit resets, and “Are you actually done with the " +
-      "work and this pause is intentional?” to a session that stopped for 10 minutes partway " +
-      "through a spec-roadmap it was running. It never touches a session that is waiting on a " +
+      "“continue” once a session limit resets, and, to a session that stopped for 10 minutes " +
+      "partway through a spec-roadmap it was running, asks whether it is really done — and " +
+      "to resume if it has only stalled. It never touches a session that is waiting on a " +
       "prompt, ended on a question, or was interrupted by you."));
     var status = el(doc, "div", { id: "revivestatus" });
     var problem = el(doc, "div", { id: "reviveproblem", role: "status" });
@@ -198,7 +200,12 @@
       } else toggle.hidden = true;
       rows.textContent = "";
       if (v.empty) rows.appendChild(el(doc, "div", { "class": "revempty" }, v.empty));
-      v.rows.forEach(function (r) { rows.appendChild(row(r.cls, r.name, r.word, r.why)); });
+      v.rows.forEach(function (r) {
+        rows.appendChild(row(r.cls, r.name, r.word, r.why));
+        // What the agent said when asked, from its own transcript - the
+        // reply revive has no other way to receive.
+        if (r.answer) rows.appendChild(el(doc, "div", { "class": "revanswer" }, "its answer: " + r.answer));
+      });
       recent.textContent = "";
       if (!v.recent.length) recent.appendChild(el(doc, "div", { "class": "revempty" }, "nothing"));
       v.recent.forEach(function (r) { recent.appendChild(row(r.cls, r.target, r.word, r.ago + " · " + r.why)); });

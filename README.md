@@ -180,7 +180,10 @@ A few things are worth knowing up front:
   `retry` to a session stopped by an API error once the API answers again,
   `continue` once a session limit has reset, and *"Are you actually done with
   the work and this pause is intentional?"* to one that stopped for ten
-  minutes partway through a `spec-roadmap` it was running. It leaves alone a
+  minutes partway through a `spec-roadmap` it was running. The message goes
+  on to tell it to resume if it has only stalled, and otherwise to say what it
+  is waiting on. It is signed as ccwatch revive, and the agent's answer
+  appears beside it in the dashboard's revive panel. It leaves alone a
   session that is waiting on a prompt, ended on a question, was interrupted by
   you, still has its runner going, or has already answered that question.
   While it is off, the panel behind the switch shows what it *would* do and
@@ -355,7 +358,8 @@ that an upgrade has broken something.
 | `CCWATCH_REVIVE_RESUMED` | `10` | tool calls after an ask that count as the work resuming; fewer means it answered, and is not asked again until you write |
 | `CCWATCH_REVIVE_LIMIT_GRACE` | `120` | seconds past a session limit's reset before `continue` is sent |
 | `CCWATCH_REVIVE_INTERVAL` | `60` | seconds between `revive` passes |
-| `CCWATCH_REVIVE_ASK` | *Are you actually done…* | the question `revive` asks; also how it recognises its own earlier asks |
+| `CCWATCH_REVIVE_ASK` | *Are you actually done…* | the question `revive` asks; also how it recognises its own earlier asks. One line |
+| `CCWATCH_REVIVE_ASK_PREVIOUS` | the earlier wordings | earlier wordings, one per line, still recognised as revive's own asks |
 | `CCWATCH_REVIVE_NET` | `api.anthropic.com:443` | what "the API is reachable again" is tested against |
 | `CCWATCH_DEPLOY_PATTERN` | `deploy\|release\|rollback\|publish\|promote` | which workflows count as deploys |
 | `CCWATCH_DEPLOY_TTL` | `60` | seconds to cache `gh` results |

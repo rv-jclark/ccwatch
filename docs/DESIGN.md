@@ -423,7 +423,7 @@ and sends what you would have typed yourself:
 ```
 ccwatch revive — dry run, nothing is sent
   ASK       web-app-fc  paused 46m mid-roadmap checkout 4/5 · next entry cutover is in_progress · no runner, no question pending
-            would send: Are you actually done with the work and this pause is intentional?
+            would send: Are you actually done with the work and this pause is intentional? If you are not done …
   RETRY     pricing-7b  API error 6m ago (Can't reach the API server …) · API reachable · retry 1 of 6
   wait      billing-2a  session limit · resets in 14m
   wait      search-9d   paused 5m mid-roadmap reindex 0/3 · asking at 10m
@@ -532,6 +532,32 @@ one unfinished roadmap, because with several, picking one is a guess. A
 "slug" counts only if it names a roadmap file there: the matcher also picks
 up prose after `spec-roadmap run`, and the first live run read "for, instead,
 roadmap" as three slugs.
+
+**The ask says what to do with the answer.** It was only the question,
+*"Are you actually done with the work and this pause is intentional?"*. A
+stalled agent would answer "not quite" and then wait to be told to continue,
+and a finished one would write a reply that nobody reads, which Claude Code
+delivered to some other session. It now goes on: *"If you are not done and
+have only stalled, resume the work now. If you are done, stay paused…"*, and
+what it asks of a finished agent is the next paragraph. It is still one line, because revive finds its own text as
+a whole line inside Claude Code's envelope. The earlier wordings stay in
+`CCWATCH_REVIVE_ASK_PREVIOUS` and are still recognised: otherwise every session
+already asked in the old words would count as never asked, and would be asked
+once more on the day the wording changed.
+
+**It is signed, and the answer is read where it was given.** Revive is not
+a Claude session, so the envelope an agent reads names no sender: just
+"Another Claude session sent a message". Agents said they could not tell who
+had asked, and replied to whichever session looked likely. That was the same
+one every time — the session whose name had `ccwatch` in it — where nothing
+read the reply. Revive has no
+socket to receive on, and needs none: the answer is in the agent's own
+transcript, directly after the ask. The message now ends with
+*"(Sent by ccwatch revive, an automated monitor…)"* and asks the agent to say
+in a sentence, in its own conversation, what it is waiting on. Revive reads
+that sentence back, truncated to 280 characters and joined onto one line,
+and the panel shows it beside the row. The answers turned out to be the
+useful part. They say exactly what each agent needs from you.
 
 **"Ran spec-roadmap" is read from command text, and that has a known false
 positive.** A session whose commands merely *contain* `spec-roadmap run`
@@ -2130,6 +2156,8 @@ implementation broken in the specific way it describes:
 | `revive-module`: anchor the panel by its right edge | 1 (verify-ui) |
 | `revive`: compare a peer message's whole `content` rather than finding the ask as a line inside Claude Code's envelope | 1 |
 | `revive`: count a `SendMessage` reply as work | 1 |
+| `revive`: stop recognising the previous wording of the ask | 1 |
+| `revive`: drop the agent's answer from its row | 1, and 1 (verify-ui) |
 | `revive`: ask about the first unfinished roadmap in the directory, not the session's own | 1 |
 | `revive`: count a "slug" that names no roadmap file here | 1 |
 | `revive`: guess one roadmap when an unnamed session's directory has several unfinished | 1 |

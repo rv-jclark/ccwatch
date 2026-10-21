@@ -118,7 +118,8 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # not counted, for the reason the other serve checks are not. And by 1 for
 # the ask as Claude Code really records it, inside its peer envelope, and 1
 # for an ask answered by a SendMessage, 2 for the resumed-work threshold, and
-# 6 for asking about the roadmap the session itself ran.
+# 6 for asking about the roadmap the session itself ran, 3 for the reworded
+# ask, and 4 for its signature and the answer read back.
 # The host's REAL platform, read once and before anything exports
 # CCWATCH_PLATFORM to pose the other one. A section that exercises a command
 # this host refuses outright skips against this, never against
@@ -128,15 +129,15 @@ case "$(uname -s)" in
   *)                    _host_platform=macos ;;
 esac
 
-TALLY_FLOOR=569
-TALLY_FLOOR_NODE=305
+TALLY_FLOOR=576
+TALLY_FLOOR_NODE=306
 # ⚠️ Windows refuses send/kill/peers/revive outright -- they need POSIX
 # signals and the per-session Unix socket -- so those four sections cannot run
 # there at all and the floor has to come down by exactly what they contribute.
 # Otherwise the guard against "assertions ran but were never counted" fires on
 # every Windows run and means "this host is Windows", which costs the same
 # attention as a real regression (rule 14). Counted, not estimated:
-# 12 send + 52 revive + 7 peers + 16 kill, plus the 5 inside `serve` and
+# 12 send + 59 revive + 7 peers + 16 kill, plus the 5 inside `serve` and
 # `collectors` that those same refusals take with them, plus the 2 app-win
 # assertions that only exist on a host that has BUILT it -- CI has not, and a
 # floor has to assume the case with FEWER assertions. Measured from real runs,
@@ -149,7 +150,7 @@ TALLY_FLOOR_NODE=305
 # encodes one machine's configuration" rule 14 forbids; the floor exists to
 # catch assertions running UNCOUNTED, which is a regression of dozens, not of
 # one.
-TALLY_FLOOR_POSIX=96
+TALLY_FLOOR_POSIX=103
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
 # deadline passes. Returns 0 if it succeeded.
@@ -2479,7 +2480,8 @@ else
 # is cmd_send's, and is asserted in its own section.
 RV_NOW=$(date '+%s')
 rv_iso() { date -u -r "$(( RV_NOW - $1 ))" '+%Y-%m-%dT%H:%M:%S.000Z'; }
-RV_ASK="Are you actually done with the work and this pause is intentional?"
+RV_ASK="Are you actually done with the work and this pause is intentional? If you are not done and have only stalled, resume the work now. If you are done, stay paused and say here, in a sentence, what you are waiting on — ccwatch reads your answer in this conversation, so do not message another session to reply. (Sent by ccwatch revive, an automated monitor, because you stopped partway through a spec-roadmap.)"
+RV_ASK_OLD="Are you actually done with the work and this pause is intentional?"
 # One record per helper, so a fixture reads as the conversation it is.
 rv_human()  { printf '{"type":"user","timestamp":"%s","origin":{"kind":"human"},"message":{"role":"user","content":"%s"}}\n' "$(rv_iso "$1")" "$2"; }
 rv_text()   { printf '{"type":"assistant","timestamp":"%s","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]}}\n' "$(rv_iso "$1")" "$2"; }
@@ -2554,6 +2556,11 @@ rv_sess() { # rv_sess <n> <name> <cwd> [status]  — transcript on stdin
 { rv_human 3000 "run it"; rv_tool 2900 Bash '{"command":"spec-roadmap run --slug beta"}'; rv_text 1200 "All of beta is merged."; } | rv_sess 26 rv-named-landed "$RVM"
 { rv_human 3000 "run it"; rv_roadmap 2900; rv_text 1200 "Entry x is merged."; } | rv_sess 27 rv-unnamed-shared "$RVM"
 { rv_human 3000 "run it"; rv_tool 2900 Bash '{"command":"spec-roadmap run for the next entry"}'; rv_text 1200 "Entry one is merged."; } | rv_sess 28 rv-prose-after "$RVR"
+# Asked in the ORIGINAL wording, before the ask said to resume, and answered.
+# It is still revive's own ask; forgetting it would ask once more the day the
+# wording changed.
+{ rv_human 3000 "run it"; rv_roadmap 2900; rv_text 2000 "Entry one is merged."; rv_peer 1300 "$RV_ASK_OLD"
+  rv_text 1200 "Yes - intentional."; } | rv_sess 29 rv-answered-old-wording "$RVR"
 # Its runner is still beneath it: quiet because it is waiting, correctly.
 { rv_human 3000 "run it"; rv_roadmap 2900; rv_text 1200 "Running entry two."; } | rv_sess 4 rv-runner "$RVR"
 printf '%s %s /bin/bash /usr/local/bin/spec-roadmap run --stream\n' 9400 9304 >> "$WORK/pstree-rv"
@@ -2615,7 +2622,7 @@ if ! printf '%s' "$_rv" | jq -e '.rows | type == "array"' >/dev/null 2>&1; then
 else
   assert_eq "$(rv_field "$_rv" rv-paused action)" "ask" \
     "a session that drove spec-roadmap and stopped 20m ago with entries left is asked whether it is done"
-  assert_eq "$(rv_field "$_rv" rv-paused message)" "$RV_ASK" "with the exact words that worked by hand"
+  assert_eq "$(rv_field "$_rv" rv-paused message)" "$RV_ASK" "with the configured words — the ask, and what to do about the answer"
   assert_contains "$(rv_field "$_rv" rv-paused why)" "demo 1/3" "and the reason states the roadmap and how far through it is"
   assert_eq "$(rv_field "$_rv" rv-question action)" "null" "a turn that ended on a question to you is left for you"
   assert_eq "$(rv_field "$_rv" rv-answered action)" "null" \
@@ -2637,6 +2644,19 @@ else
     "a session that never named its roadmap, in a directory with several unfinished, is not asked — picking one is a guess"
   assert_eq "$(rv_field "$_rv" rv-prose-after action)" "ask" \
     "and words after the command that name no roadmap file do not count as naming one"
+  assert_eq "$(rv_field "$_rv" rv-answered-old-wording action)" "null" \
+    "and so is one asked in the ask's earlier wording — a reworded ask does not forget the old ones"
+  assert_contains "$(rv_field "$_rv" rv-paused message)" "resume the work now" \
+    "the ask says to resume if the agent has only stalled, not only asks"
+  assert_contains "$(rv_field "$_rv" rv-paused message)" "(Sent by ccwatch revive" \
+    "and is signed: the envelope names no sender an agent could address"
+  assert_contains "$(rv_field "$_rv" rv-paused message)" "do not message another session" \
+    "and says the answer belongs in the agent's own conversation, not in a reply to someone"
+  assert_contains "$(rv_field "$_rv" rv-answered answer)" "waiting on you to rotate the key" \
+    "an agent's answer is read back from its own transcript, the reply revive cannot otherwise receive"
+  assert_eq "$(rv_field "$_rv" rv-paused answer)" "null" "and a session not yet asked carries no answer"
+  assert_eq "$(rv_field "$_rv" rv-paused message | grep -c '')" "1" \
+    "and is one line, since revive finds its own text as a line inside the peer envelope"
   assert_eq "$(rv_field "$_rv" rv-runner action)" "null" "a session whose spec-roadmap runner is still beneath it is left waiting"
   assert_contains "$(rv_field "$_rv" rv-runner why)" "runner is still running" "and says that is why"
   assert_eq "$(rv_field "$_rv" rv-fresh action)" "null" "a pause shorter than CCWATCH_REVIVE_AFTER is not yet a stall"
@@ -2717,7 +2737,7 @@ assert_eq "$(jq -r 'select(.event == "ccwatch.revive" and .target == "rv-paused"
 # ⚠️ The transcripts go too, not only the registry entries. They hold peer
 # messages, and the `peers` section reads every transcript under this home:
 # left behind, they turned its "3 peer messages" into 12.
-for _i in $(seq 1 28); do
+for _i in $(seq 1 29); do
   rm -f "$FH/sessions/$((9300 + _i)).json" \
         "$FH/projects/-fake-repo/$(printf 'bbbbbbbb-0000-0000-0000-%012d' "$_i").jsonl"
 done
@@ -5905,6 +5925,9 @@ v = R.view(Object.assign({}, on, {rows: [], skipped: "another revive pass is run
 check("a skipped pass is stated with its reason", /skipped: another revive pass/.test(v.problem || ""), v.problem);
 v = R.view(Object.assign({}, on, {rows: []}), true, NOW);
 check("a pass that found nothing says nothing stopped", v.empty === "nothing stopped", JSON.stringify(v));
+v = R.view({enabled: true, available: true, live: true, pass_at: NOW - 5, recent: [],
+            rows: [{name: "a", action: null, why: "already asked", answer: "Waiting on you to rotate the key."}]}, true, NOW);
+check("an agent's answer to the ask travels with its row", v.rows[0].answer === "Waiting on you to rotate the key.", JSON.stringify(v.rows[0]));
 v = R.view(off, false, NOW);
 check("a page with no send token cannot flip the switch", v.toggle.disabled === true && /token/.test(v.toggle.why), JSON.stringify(v.toggle));
 console.log(out.join("\n"));
