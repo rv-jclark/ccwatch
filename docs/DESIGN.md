@@ -1644,6 +1644,46 @@ taken for display writes the roster down. Rows already running are dropped from
 it, and it is written from `render`, not from `snapshot`, so a `--json` consumer
 polling the state does not rewrite history as a side effect.
 
+**A restart used to erase the roster within seconds.** The menu bar app starts
+at login and runs `ccwatch bar` every ten seconds, and `bar` writes the roster
+like any other display. So the first refresh after a reboot wrote down the
+fleet of a machine that had just booted, which was empty, over the record of
+the one before it. By the time anyone ran `ccwatch resume`, `LAST KNOWN ROSTER`
+listed nothing. The menu bar app made that roster always current, and that is
+also what destroyed it.
+
+`write_roster` now compares the roster's own `at` with the host's boot time,
+read through the platform seam (`probe_boot`, `sysctl kern.boottime`). A
+roster written before this boot is moved to `roster.before-restart.json`, once.
+That happens before the empty one is written, and the next refresh compares
+against the new roster, so it does not move the record again. A host that
+cannot say when it booted (Windows for now, or a sandbox that refuses
+`sysctl`) never sets one aside. "Not measured" must not read as "restarted"
+(principle VI). `resume` reads the set-aside roster first, as "were live before
+the restart".
+
+**And as a text file to work down.** Every roster write also rewrites
+`sessions.txt`. It lists what is running now and what was running before the
+restart and is not running now, with one pasteable line per session, grouped
+under the directory it has to be run from:
+
+```
+pricing  (~/code/pricing)
+claude --resume 2c1c7ea2-0000-0000-0000-000000000000
+claude --worktree ui-theme --resume cafc005f-0000-0000-0000-000000000000
+```
+
+A session in `<repo>/.claude/worktrees/<name>` is grouped under the checkout
+and reopened with `--worktree <name>`, which is how Claude Code enters a
+worktree it made. The file carries no trailing comments, because zsh only
+treats `#` as a comment when `interactivecomments` is set. Without that option
+a pasted `# agents-92` would become arguments to the command. The first word
+can be your own wrapper. It is read from `CCWATCH_RESUME_CMD` or from
+`~/.claude/ccwatch/resume-command`, and the file is the setting that works.
+The menu bar app is what refreshes most, and launchd starts it without your
+shell's environment. With only the variable, the file would flip between your
+wrapper and plain `claude` depending on which process wrote it last.
+
 Two bugs found here worth knowing about, because both produced output that
 looked fine:
 
@@ -2156,6 +2196,11 @@ implementation broken in the specific way it describes:
 | `revive-module`: anchor the panel by its right edge | 1 (verify-ui) |
 | `revive`: compare a peer message's whole `content` rather than finding the ask as a line inside Claude Code's envelope | 1 |
 | `revive`: count a `SendMessage` reply as work | 1 |
+| `roster`: overwrite the roster after a restart instead of setting it aside | 5 |
+| `roster`: set the roster aside on every refresh after boot, not only the first | 2 |
+| `roster`: set it aside when the boot time could not be read | 1 |
+| `sessions.txt`: group a worktree under its own path, without `--worktree` | 3 |
+| `sessions.txt`: ignore `resume-command` | 1 |
 | `revive`: stop recognising the previous wording of the ask | 1 |
 | `revive`: drop the agent's answer from its row | 1, and 1 (verify-ui) |
 | `revive`: ask about the first unfinished roadmap in the directory, not the session's own | 1 |

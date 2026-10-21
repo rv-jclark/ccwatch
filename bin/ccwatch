@@ -1022,6 +1022,36 @@ _probe_host_windows() {
   printf '%s' "$out"
 }
 
+# probe_boot — when this host last started, in epoch seconds, or nothing on
+# failure. It is what tells a restart apart from sessions closed one by one:
+# both empty the registry, and only one of them means "reopen all of these".
+# CCWATCH_FAKE_BOOT is honoured first, for the reason CCWATCH_FAKE_PS is;
+# `none` poses a host that cannot say.
+#
+# Windows says nothing rather than guess, so there the roster is never set
+# aside as "before the restart" and behaves exactly as it did before this
+# probe existed.
+probe_boot() {
+  case "${CCWATCH_FAKE_BOOT:-}" in
+    none) probe_note boot fake failed "CCWATCH_FAKE_BOOT=none"; return 1 ;;
+    ?*)   printf '%s' "$CCWATCH_FAKE_BOOT"; return 0 ;;
+  esac
+  local out
+  case "$CCWATCH_PLATFORM" in
+    macos)
+      # `{ sec = 1792500000, usec = 412000 } Tue Oct 20 08:01:40 2026`
+      out=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p')
+      if [ -z "$out" ]; then
+        probe_note boot sysctl failed "sysctl kern.boottime produced no usable output"
+        return 1
+      fi
+      probe_note boot sysctl ok
+      printf '%s' "$out" ;;
+    *) probe_note boot none failed "not measured on this platform (uname: $CCWATCH_UNAME)"
+       return 1 ;;
+  esac
+}
+
 # probe_native_path / probe_posix_path — identity on macOS, cygpath on
 # Windows (D5). Applied at bash<->native boundaries only.
 probe_native_path() { # probe_native_path <path>
@@ -2127,6 +2157,17 @@ reset_clock() { # reset_clock <epoch-seconds>
 # reading the state does not rewrite history as a side effect.
 write_roster() { # write_roster <snapshot-json>
   mkdir -p "$CCWATCH_HOME" 2>/dev/null || return 0
+  # A roster written before this boot is the record of what a restart
+  # interrupted: set it aside, once, before the first refresh after the
+  # restart replaces it. With no boot time (Windows, a refused sysctl) nothing
+  # is set aside - "not measured" must not read as "restarted".
+  local boot at
+  if [ -f "$ROSTER" ] && boot=$(probe_boot) && [ -n "$boot" ]; then
+    at=$(jq -r '.at // 0' "$ROSTER" 2>/dev/null) || at=""
+    if [ -n "$at" ] && [ "$at" -lt "$boot" ]; then
+      mv "$ROSTER" "$ROSTER_PREV" 2>/dev/null
+    fi
+  fi
   printf '%s' "$1" | jq -c --argjson at "$(date '+%s')" '
     { at: $at,
       sessions: [ .sessions[]
@@ -2135,6 +2176,65 @@ write_roster() { # write_roster <snapshot-json>
                       pipeline: (if .pipeline == null then null
                                  else {feature: .pipeline.feature, phase: .pipeline.phase,
                                        status: .pipeline.status, cost: .pipeline.cost} end) } ] }'     >"$ROSTER.tmp" 2>/dev/null && mv "$ROSTER.tmp" "$ROSTER" 2>/dev/null
+  write_resume_file "$1"
+  return 0
+}
+
+# resume_command — the word each line of the sessions file starts with.
+# CCWATCH_RESUME_CMD, else the first line of $CCWATCH_HOME/resume-command,
+# else `claude`. The file exists because the menu bar app is what refreshes
+# most often, and it is started by launchd, not by your shell: a variable set
+# in ~/.zshrc never reaches it, so the file would flip between your wrapper
+# and plain `claude` depending on which process wrote it last.
+resume_command() {
+  local c="${CCWATCH_RESUME_CMD:-}"
+  if [ -z "$c" ] && [ -f "$CCWATCH_HOME/resume-command" ]; then
+    IFS= read -r c <"$CCWATCH_HOME/resume-command" || true
+  fi
+  printf '%s' "${c:-claude}"
+}
+
+# write_resume_file — the roster as text: what is running now, and what was
+# running before the last restart and is not running now, one pasteable
+# `<cmd> [--worktree W] --resume <id>` per session, grouped by the project
+# directory each line has to be run from.
+write_resume_file() {
+  local prev="null"
+  [ -f "$ROSTER_PREV" ] && prev=$(cat "$ROSTER_PREV" 2>/dev/null)
+  jq -r --argjson prev "${prev:-null}" --arg cmd "$(resume_command)" \
+      --arg home "$HOME" --arg written "$(date '+%Y-%m-%d %H:%M %Z')" \
+      --argjson now "$(date '+%s')" --argjson days "$CCWATCH_RESUME_DAYS" '
+    def q: if test("^[A-Za-z0-9._-]+$") then . else @sh end;
+    def tilde: if startswith($home + "/") then "~" + .[($home | length):] else . end;
+    def ago: if . < 3600 then "\(. / 60 | floor)m" elif . < 86400 then "\(. / 3600 | floor)h"
+             else "\(. / 86400 | floor)d" end;
+    # A Claude Code worktree is entered with --worktree from the checkout it
+    # belongs to, so its line is grouped under that checkout, not its own path.
+    def place: (.cwd // "?") as $c
+      | if $c | test("/\\.claude/worktrees/[^/]+$")
+        then {root: ($c | sub("/\\.claude/worktrees/[^/]+$"; "")),
+              wt: ($c | sub("^.*/\\.claude/worktrees/"; ""))}
+        else {root: $c, wt: null} end;
+    def block: map(. + place) | group_by(.root)
+      | map( "\(.[0].root | sub("^.*/"; ""))  (\(.[0].root | tilde))",
+             ( sort_by([.wt != null, .wt // "", .name // ""])[]
+               | $cmd + (if .wt then " --worktree \(.wt | q)" else "" end) + " --resume \(.sid)" ),
+             "" )
+      | .[];
+    ([.sessions[].sid]) as $live
+    | ( if $prev == null then []
+        else [ $prev.sessions[] | select([.sid] | inside($live) | not) ] end ) as $gone
+    | ( ($now - ($prev.at // 0)) ) as $prev_age
+    | "# Claude Code sessions, written by ccwatch \($written). Rewritten on every refresh.",
+      "# Run each line from the directory after its project name.",
+      "",
+      ( if (.sessions | length) == 0 then "== Running now: none ==", ""
+        else "== Running now (\(.sessions | length)) ==", "", (.sessions | block) end ),
+      ( if ($gone | length) == 0 or $prev_age > $days * 86400 then empty
+        else "== Running before the restart \($prev_age | ago) ago, not running now (\($gone | length)) ==",
+             "", ($gone | block) end )
+  ' <<<"$1" >"$CCWATCH_RESUME_FILE.tmp" 2>/dev/null \
+    && mv "$CCWATCH_RESUME_FILE.tmp" "$CCWATCH_RESUME_FILE" 2>/dev/null
   return 0
 }
 
@@ -2740,12 +2840,17 @@ cmd_resume() {
   # empty and transcripts alone cannot tell you which sessions were open
   # TOGETHER, what each was called, or what it was doing when everything
   # stopped. That is the part you would otherwise reconstruct from memory.
-  if [ -f "$ROSTER" ]; then
-    local rage rn
-    rage=$(jq -r --argjson now "$(date '+%s')" '($now - (.at // 0))' "$ROSTER" 2>/dev/null) || rage=""
-    rn=$(jq -r '.sessions | length' "$ROSTER" 2>/dev/null) || rn=0
+  #
+  # Two of them: the roster set aside at the last restart, then the current
+  # one, which after a restart holds only what has been opened since.
+  local _rf _rlabel rage rn gone
+  for _rf in "$ROSTER_PREV" "$ROSTER"; do
+  [ -f "$_rf" ] || continue
+  _rlabel="were live"
+  [ "$_rf" = "$ROSTER_PREV" ] && _rlabel="were live before the restart,"
+    rage=$(jq -r --argjson now "$(date '+%s')" '($now - (.at // 0))' "$_rf" 2>/dev/null) || rage=""
+    rn=$(jq -r '.sessions | length' "$_rf" 2>/dev/null) || rn=0
     if [ -n "$rage" ] && [ "${rn:-0}" -gt 0 ]; then
-      local gone
       # ⚠️ A real file, never <(...). On Windows jq is a native build and
       # cannot open MSYS's process-substitution path: it reported
       # `Could not open /proc/40185/fd/63`, exited, and the inner jq then died
@@ -2757,9 +2862,9 @@ cmd_resume() {
       printf '%s' "$snap" | jq -c '[.sessions[].sid]' >"$TMP/live-sids.json"
       gone=$(jq -c --slurpfile live "$TMP/live-sids.json" '
         ( $live[0] // [] ) as $l
-        | [ .sessions[] | select( ([.sid] | inside($l)) | not ) ]' "$ROSTER" 2>/dev/null)
+        | [ .sessions[] | select( ([.sid] | inside($l)) | not ) ]' "$_rf" 2>/dev/null)
       if [ "$(printf '%s' "${gone:-[]}" | jq 'length')" -gt 0 ]; then
-        say "${_c_bold}LAST KNOWN ROSTER${_c_reset} ${_c_dim}— $rn session(s) were live $(
+        say "${_c_bold}LAST KNOWN ROSTER${_c_reset} ${_c_dim}— $rn session(s) $_rlabel $(
           awk -v s="$rage" 'BEGIN{ if (s<60) printf "%ds", s; else if (s<3600) printf "%dm", s/60;
             else if (s<86400) printf "%dh", s/3600; else printf "%dd", s/86400 }'
         ) ago; these are not running now${_c_reset}"
@@ -2779,7 +2884,7 @@ cmd_resume() {
         say ""
       fi
     fi
-  fi
+  done
 
   local window=()
   [ "$all" -eq 1 ] || window=(-mtime "-$CCWATCH_RESUME_DAYS")
@@ -4414,6 +4519,17 @@ CCWATCH_REPO_TTL="${CCWATCH_REPO_TTL:-21600}"
 # at the moment everything stopped — and that is the part you have to
 # reconstruct from memory otherwise. So every snapshot writes the roster down.
 ROSTER="$CCWATCH_HOME/roster.json"
+# ⚠️ And the roster from before the last restart, set aside rather than
+# overwritten. Without it the record was lost at the one moment it exists for:
+# the menu bar app starts at login and refreshes within ten seconds, and every
+# refresh rewrote roster.json with the near-empty fleet of a machine that had
+# just booted - so by the time anyone ran `ccwatch resume` there was nothing
+# left to resume from.
+ROSTER_PREV="$CCWATCH_HOME/roster.before-restart.json"
+# The same two lists as plain text, one pasteable command per session, grouped
+# by project: a file to keep open after a restart and work down, rather than a
+# command to remember to run.
+CCWATCH_RESUME_FILE="${CCWATCH_RESUME_FILE:-$CCWATCH_HOME/sessions.txt}"
 
 SUBS="$CCWATCH_HOME/subscriptions.jsonl"
 DEPLOY_CACHE="$CCWATCH_HOME/deploys.json"

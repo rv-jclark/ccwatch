@@ -156,6 +156,7 @@ ccwatch ask                  # what each blocked session is asking, with its opt
 ccwatch convo <who>          # the recent conversation of one session
 ccwatch resume               # what to reopen after a crash or reboot
 ccwatch resume --cd          #   ...as `cd <dir> && claude --resume <id>` lines to paste
+open ~/.claude/ccwatch/sessions.txt   # the same list as a file, kept current
 ccwatch send <who> "<msg>"   # message a session that is already running
 ccwatch revive               # nudge agents that stopped too early (see below)
 ccwatch kill <who>           # stop a session; refuses when that would lose work
@@ -348,6 +349,8 @@ that an upgrade has broken something.
 | `CCWATCH_DEPLOY_LIMIT` | `20` | runs requested per repo from `gh` |
 | `CCWATCH_REFRESH` | `2` | seconds between repaints |
 | `CCWATCH_RESUME_DAYS` | `14` | how far back `ccwatch resume` looks |
+| `CCWATCH_RESUME_FILE` | `~/.claude/ccwatch/sessions.txt` | where the list of sessions to reopen is written |
+| `CCWATCH_RESUME_CMD` | `claude` | the command each line of that file starts with. For the menu bar app, put it in `~/.claude/ccwatch/resume-command` instead, because the app does not see your shell's variables |
 | `CCWATCH_UNFINISHED_HOURS` | `24` | how recent an unfinished run must be to appear in the live table |
 | `CCWATCH_SEND_VERIFY` | `10` | seconds to wait for a sent message to appear in the receiver |
 | `CCWATCH_SEND_AS` | `ccwatch` | how sent messages identify themselves |

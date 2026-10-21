@@ -119,7 +119,8 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # the ask as Claude Code really records it, inside its peer envelope, and 1
 # for an ask answered by a SendMessage, 2 for the resumed-work threshold, and
 # 6 for asking about the roadmap the session itself ran, 3 for the reworded
-# ask, and 4 for its signature and the answer read back.
+# ask, and 4 for its signature and the answer read back. And by 15 for the
+# sessions file and the roster set aside at a restart.
 # The host's REAL platform, read once and before anything exports
 # CCWATCH_PLATFORM to pose the other one. A section that exercises a command
 # this host refuses outright skips against this, never against
@@ -129,7 +130,7 @@ case "$(uname -s)" in
   *)                    _host_platform=macos ;;
 esac
 
-TALLY_FLOOR=576
+TALLY_FLOOR=591
 TALLY_FLOOR_NODE=306
 # ⚠️ Windows refuses send/kill/peers/revive outright -- they need POSIX
 # signals and the per-session Unix socket -- so those four sections cannot run
@@ -4463,7 +4464,74 @@ _res2=$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-ro" CCWATCH_HOME="$RH"
         NO_COLOR=1 "$CCWATCH" resume -n 1 2>&1)
 assert_not_contains "$_res2" "LAST KNOWN ROSTER" \
   "and says nothing about the roster when everything in it is still running"
-rm -f "$FH/sessions/9205.json"
+
+# The same roster as a text file to work down after a restart: one pasteable
+# command per session, grouped by the directory it has to be run from. Its own
+# home, so the restart below sets aside only what this section wrote.
+SH="$WORK/sessions-home"; mkdir -p "$SH"
+mksess 9206 eeeeeeee-0000-0000-0000-0000000000bb wt-sess "$WORK/wtrepo/.claude/worktrees/feat-x" idle cli
+mktrans eeeeeeee-0000-0000-0000-0000000000bb 20
+{ mkps 9205 "0:10.00"; mkps 9206 "0:02.00"; } > "$WORK/ps-st"
+st_once() { CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$SH" NO_COLOR=1 "$CCWATCH" once >/dev/null 2>&1; }
+CCWATCH_FAKE_PS="$WORK/ps-st" CCWATCH_FAKE_BOOT=1 st_once
+_st=$(cat "$SH/sessions.txt" 2>/dev/null)
+assert_contains "$_st" "claude --resume eeeeeeee-0000-0000-0000-0000000000aa" \
+  "drawing the table also writes the sessions file, a resume command per live session"
+assert_contains "$_st" "other  ($WORK/other)" "under a heading naming the directory to run it from"
+assert_contains "$_st" "claude --worktree feat-x --resume eeeeeeee-0000-0000-0000-0000000000bb" \
+  "and a session in a Claude Code worktree is reopened with --worktree"
+assert_contains "$_st" "wtrepo  ($WORK/wtrepo)" \
+  "from the checkout the worktree belongs to, not from inside the worktree"
+assert_not_contains "$_st" "before the restart" "and with no restart, there is no before-the-restart list"
+printf 'my-claude\n' > "$SH/resume-command"
+CCWATCH_FAKE_PS="$WORK/ps-st" CCWATCH_FAKE_BOOT=1 st_once
+assert_contains "$(cat "$SH/sessions.txt")" "my-claude --resume eeeeeeee-0000-0000-0000-0000000000aa" \
+  "the command word comes from resume-command, which a launchd-started menu bar app can read"
+CCWATCH_RESUME_CMD=env-claude CCWATCH_FAKE_PS="$WORK/ps-st" CCWATCH_FAKE_BOOT=1 st_once
+assert_contains "$(cat "$SH/sessions.txt")" "env-claude --resume eeeeeeee-0000-0000-0000-0000000000aa" \
+  "and CCWATCH_RESUME_CMD overrides it"
+rm -f "$SH/resume-command"
+
+# The restart. The first refresh after boot sees nothing live, and must set the
+# old roster aside before writing the empty one over it - which is exactly
+# what the menu bar app did, ten seconds after login, before this existed.
+# ⚠️ The boot is NOW and the roster is backdated before it, never "boot in 5s":
+# that let the first refresh after the boot land before the boot instant, so
+# the roster it wrote looked pre-boot too and was set aside again - green on a
+# slow full run, red under --fast, and a sequence no real host can produce.
+_st_boot=$(date '+%s')
+jq '.at -= 60' "$SH/roster.json" > "$SH/roster.json.tmp" && mv "$SH/roster.json.tmp" "$SH/roster.json"
+CCWATCH_FAKE_PS="$WORK/ps-none" CCWATCH_FAKE_BOOT="$_st_boot" st_once
+assert_eq "$(jq -r '[.sessions[].sid] | sort | join(",")' "$SH/roster.before-restart.json" 2>/dev/null)" \
+  "eeeeeeee-0000-0000-0000-0000000000aa,eeeeeeee-0000-0000-0000-0000000000bb" \
+  "a refresh after a restart sets the roster from before it aside instead of overwriting it"
+_st=$(cat "$SH/sessions.txt" 2>/dev/null)
+assert_contains "$_st" "== Running now: none ==" "the sessions file then says nothing is running now"
+assert_contains "$_st" "before the restart" "and lists what was running before the restart"
+assert_contains "$_st" "claude --worktree feat-x --resume eeeeeeee-0000-0000-0000-0000000000bb" \
+  "with the same commands to reopen it"
+# A second refresh in the same boot must not set aside the (empty) roster the
+# first one wrote, or the list would be gone a refresh later.
+CCWATCH_FAKE_PS="$WORK/ps-none" CCWATCH_FAKE_BOOT="$_st_boot" st_once
+assert_contains "$(cat "$SH/sessions.txt")" "eeeeeeee-0000-0000-0000-0000000000bb" \
+  "and keeps listing it on every refresh after, not only the first"
+# Reopening one takes it off the before-the-restart list.
+mkps 9206 "0:02.00" > "$WORK/ps-st1"
+CCWATCH_FAKE_PS="$WORK/ps-st1" CCWATCH_FAKE_BOOT="$_st_boot" st_once
+assert_eq "$(sed -n '/before the restart/,$p' "$SH/sessions.txt" | grep -c 'eeeeeeee-0000-0000-0000-0000000000bb')" "0" \
+  "a session reopened since the restart is no longer listed as needing it"
+assert_contains "$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-none" CCWATCH_HOME="$SH" \
+                   CCWATCH_FAKE_BOOT="$_st_boot" NO_COLOR=1 "$CCWATCH" resume -n 0 2>&1)" \
+  "were live before the restart" "and ccwatch resume reads the roster set aside at the restart"
+# No boot time - Windows, or a sandbox refusing sysctl - is not a restart.
+rm -rf "$SH"; mkdir -p "$SH"
+CCWATCH_FAKE_PS="$WORK/ps-st" CCWATCH_FAKE_BOOT=1 st_once
+CCWATCH_FAKE_PS="$WORK/ps-none" CCWATCH_FAKE_BOOT=none st_once
+[ ! -e "$SH/roster.before-restart.json" ] \
+  && t_pass "a host that cannot say when it booted never sets a roster aside as before a restart" \
+  || t_fail "a host that cannot say when it booted never sets a roster aside" "roster.before-restart.json exists"
+rm -f "$FH/sessions/9205.json" "$FH/sessions/9206.json" \
+      "$FH/projects/-fake-repo/eeeeeeee-0000-0000-0000-0000000000bb.jsonl"
 
 # ========================================================== pending asks =====
 printf '\npending questions\n'
