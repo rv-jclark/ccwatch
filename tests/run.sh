@@ -130,7 +130,7 @@ case "$(uname -s)" in
   *)                    _host_platform=macos ;;
 esac
 
-TALLY_FLOOR=621
+TALLY_FLOOR=625
 TALLY_FLOOR_NODE=306
 # ⚠️ Windows refuses send/kill/peers/revive outright -- they need POSIX
 # signals and the per-session Unix socket -- so those four sections cannot run
@@ -4536,7 +4536,7 @@ CCWATCH_FAKE_PS="$WORK/ps-none" CCWATCH_FAKE_BOOT="$_st_boot" st_once
 assert_eq "$(jq -r '[.sessions[].sid] | sort | join(",")' "$SH/roster.before-restart.json" 2>/dev/null)" \
   "eeeeeeee-0000-0000-0000-0000000000aa,eeeeeeee-0000-0000-0000-0000000000bb" \
   "a refresh after a restart sets the roster from before it aside instead of overwriting it"
-assert_eq "$(cat "$SH/roster.before-restart.json.boot" 2>/dev/null)" "$_st_boot" \
+assert_eq "$(jq -r '.set_aside_for_boot' "$SH/roster.before-restart.json" 2>/dev/null)" "$_st_boot" \
   "and records which boot it was set aside for, so reattach can tell this restart from an earlier one"
 _st=$(cat "$SH/sessions.txt" 2>/dev/null)
 assert_contains "$_st" "== Running now: none ==" "the sessions file then says nothing is running now"
@@ -4660,12 +4660,49 @@ fi
 ra_roster "$RAH/roster.json" $((RA_BOOT + 60))
 assert_eq "$(ra "$WORK/ra-b" --hook)" "" "a roster written after the boot is not offered"
 # The set-aside roster counts only if it was set aside for THIS boot.
-ra_roster "$RAH/roster.before-restart.json" $((RA_BOOT - 60))
-printf '%s\n' $((RA_BOOT - 86400)) > "$RAH/roster.before-restart.json.boot"
+ra_mark() { # ra_mark <boot>: set the set-aside roster's marker, as write_roster does
+  ra_roster "$RAH/roster.before-restart.json.tmp" $((RA_BOOT - 60))
+  jq -c --argjson b "$1" '.set_aside_for_boot = $b' "$RAH/roster.before-restart.json.tmp" \
+    > "$RAH/roster.before-restart.json" && rm -f "$RAH/roster.before-restart.json.tmp"
+}
+ra_mark $((RA_BOOT - 86400))
 assert_eq "$(ra "$WORK/ra-b" --hook)" "" "a roster set aside at an earlier restart is not offered"
-printf '%s\n' $((RA_BOOT + 2)) > "$RAH/roster.before-restart.json.boot"
+ra_mark $((RA_BOOT + 2))
 assert_eq "$(ra "$WORK/ra-b" --hook)" "claude --resume $_ra_b1" \
   "one set aside for this boot is, allowing for the boot time moving by a clock correction"
+rm -rf "$RAH/reattach"; rm -f "$RAH/roster.json"
+assert_eq "$(ra "$WORK/ra-b" --hook)" "claude --resume $_ra_b1" \
+  "and it is found with no live roster beside it at all"
+
+# ⚠️ The moment of setting aside. Zed and the menu bar app start in the same
+# second after login, so a restored shell can look while write_roster is
+# halfway through. The first version did `mv roster.json roster.before-
+# restart.json` and wrote the marker to a second file after, and a reader in
+# between found an unmarked roster and no live one: a plain shell. The gap was
+# microseconds, so it is not raced for here. `mv` is wrapped instead, and the
+# instant the set-aside roster lands, a reader runs before the write may go on.
+RAH2="$WORK/reattach-home-2"; mkdir -p "$RAH2/shim"
+ra_roster "$RAH2/roster.json" $((RA_BOOT - 60))
+_ra_realmv=$(command -v mv)
+{ printf '#!/bin/sh\n'
+  printf '"%s" "$@"; rc=$?\n' "$_ra_realmv"
+  printf 'case "$2" in */roster.before-restart.json)\n'
+  printf '  (cd "%s" && PATH="%s" "%s" reattach >>"%s" 2>&1) ;;\nesac\nexit $rc\n' \
+    "$WORK/ra-b" "$PATH" "$CCWATCH" "$RAH2/seen"
+} > "$RAH2/shim/mv"
+chmod +x "$RAH2/shim/mv"
+CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$RAH2" CCWATCH_FAKE_PS="$WORK/ps-ra" CCWATCH_FAKE_BOOT="$RA_BOOT" \
+  PATH="$RAH2/shim:$PATH" NO_COLOR=1 "$CCWATCH" once >/dev/null 2>&1
+# EVERY reading, appended: a write that renamed onto the set-aside roster twice
+# (move first, mark after) had its bad first reading overwritten by its good
+# second one, and this passed against exactly the bug it is here for.
+_ra_seen=$(cat "$RAH2/seen" 2>/dev/null)
+assert_contains "$_ra_seen" "free     ra-b-1" \
+  "a terminal that looks while the roster is being set aside still finds the sessions"
+assert_not_contains "$_ra_seen" "no record of what was running" \
+  "at every step of the write, not only after the last one"
+assert_eq "$(jq -r '.set_aside_for_boot' "$RAH2/roster.before-restart.json" 2>/dev/null)" "$RA_BOOT" \
+  "and the roster is set aside, marked, once the write finishes"
 
 # ⚠️ Not on Windows: Python there has no pty module, and install-reattach
 # refuses by design (no boot time). Nine assertions, counted in

@@ -1749,12 +1749,26 @@ shell. Every "no" below prints nothing, so the shell evals nothing:
   nothing and never gets a session it did not ask for.
 - **Only the roster this boot interrupted.** That is either a `roster.json`
   older than the boot (Zed can open before the menu bar app's first refresh),
-  or a `roster.before-restart.json` whose new `.boot` marker names this boot.
-  The roster's own `at` cannot settle it: it is the last write before a
-  shutdown, which can be any length of time before the next boot, so a
-  set-aside roster from last month's restart would otherwise look like this
+  or a `roster.before-restart.json` whose `set_aside_for_boot` field names
+  this boot. The roster's own `at` cannot settle it: it is the last write
+  before a shutdown, which can be any length of time before the next boot, so
+  a set-aside roster from last month's restart would otherwise look like this
   one. The marker is matched with 60s of slack because `kern.boottime` moves
   when the clock is corrected after boot.
+- **Never between the two.** Zed and the menu bar app start in the same second
+  after login, so a restored shell can look while `write_roster` is setting
+  the roster aside. The first version did `mv roster.json
+  roster.before-restart.json` and then wrote the marker to a second file, and
+  a reader in between found an unmarked roster and no live one, so it stayed a
+  plain shell. Now the marked copy is written whole to a temp file and renamed
+  into place, and only then is `roster.json` removed. A reader at any instant
+  sees one or the other. The reader also takes each file's content in a
+  single read instead of re-opening a path it checked a moment earlier, which
+  could be gone by then. The gap was microseconds, so the suite does not race
+  for it. It wraps `mv` so that a reader runs at the instant the set-aside
+  roster lands. That test passed against the two-step bug at first, because
+  the bug renames onto the file twice and the wrapper kept only the last,
+  good reading. It now keeps every reading.
 - **Only sessions whose cwd is this directory**, compared with repeated and
   trailing slashes collapsed on both sides. A Claude Code worktree session
   ran in the worktree, so Zed restores its tab there, and a plain `--resume`
@@ -2326,7 +2340,8 @@ implementation broken in the specific way it describes:
 | `reattach`: test `-t 0` for the wait, inside the heredoc-fed loop | 4 |
 | `reattach`: keep the claim when a key declines it | 1 |
 | `reattach`: compare cwds without collapsing slashes | 13 |
-| `write_roster`: set the roster aside without writing its `.boot` marker | 1 |
+| `write_roster`: set the roster aside without its `set_aside_for_boot` marker | 2 |
+| `write_roster`: move the roster aside first and mark it after, two steps | 1 |
 | `reattach`: accept a live roster written after the boot | 2 |
 | `reattach`: say nothing when there is no boot time | 1 |
 | `install-reattach`: append the block again when it is already there | 1 |

@@ -2210,8 +2210,24 @@ write_roster() { # write_roster <snapshot-json>
       # this restart interrupted from one left over from an earlier restart.
       # The roster's own `at` cannot say: it is the last write before a
       # shutdown, which can be any length of time before the boot after it.
-      mv "$ROSTER" "$ROSTER_PREV" 2>/dev/null \
-        && printf '%s\n' "$boot" >"$ROSTER_PREV.boot" 2>/dev/null
+      #
+      # ⚠️ The marker is INSIDE the set-aside file, and the order is: write it
+      # whole to a temp file, rename it into place, and only then remove the
+      # live roster. A reattach reading at any instant then sees either the
+      # pre-boot roster.json or a marked roster.before-restart.json, never
+      # neither. The first version did `mv` and then wrote the marker to a
+      # second file, and a Zed shell starting between the two found an
+      # unmarked roster and stayed a plain shell. Zed and the menu bar app do
+      # start in the same second after login, so that was a real window.
+      if jq -c --argjson b "$boot" '.set_aside_for_boot = $b' "$ROSTER" >"$ROSTER_PREV.tmp" 2>/dev/null \
+         && mv "$ROSTER_PREV.tmp" "$ROSTER_PREV" 2>/dev/null; then
+        rm -f "$ROSTER"
+      else
+        # A roster jq cannot read is still set aside, unmarked: `resume` can
+        # show what survives of it, and reattach will not trust it.
+        rm -f "$ROSTER_PREV.tmp"
+        mv "$ROSTER" "$ROSTER_PREV" 2>/dev/null
+      fi
     fi
   fi
   # A title the tail could not find this time keeps the last one read, so a
@@ -3096,25 +3112,29 @@ CCWATCH_REATTACH_WINDOW="${CCWATCH_REATTACH_WINDOW:-3600}"
 CCWATCH_REATTACH_WAIT="${CCWATCH_REATTACH_WAIT:-3}"
 _UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
-# _reattach_roster <boot> — the roster this boot interrupted, or nothing.
-# Either the live roster still predates the boot (no refresh has happened
-# since login: Zed can open before the menu bar app's first one), or it was set
-# aside by write_roster for THIS boot. The boot comparison has 60s of slack
-# because kern.boottime moves when the clock is corrected after boot.
+# _reattach_roster <boot> — the CONTENT of the roster this boot interrupted,
+# or nothing. Either the live roster still predates the boot (no refresh has
+# happened since login: Zed can open before the menu bar app's first one), or
+# it was set aside by write_roster for THIS boot. The boot comparison has 60s
+# of slack because kern.boottime moves when the clock is corrected after boot.
+#
+# Content, not a path, and each file read exactly once: write_roster removes
+# roster.json right after setting it aside, so a path that was valid when it
+# was checked could be gone by the time the candidates were read from it.
 _reattach_roster() {
-  local boot="$1" at mark
-  if [ -f "$ROSTER" ]; then
-    at=$(jq -r '.at // empty' "$ROSTER" 2>/dev/null) || at=""
+  local boot="$1" doc at mark d
+  if doc=$(cat "$ROSTER" 2>/dev/null) && [ -n "$doc" ]; then
+    at=$(printf '%s' "$doc" | jq -r '.at // empty' 2>/dev/null) || at=""
     case "$at" in ''|*[!0-9]*) ;; *)
-      if [ "$at" -lt "$boot" ]; then printf '%s' "$ROSTER"; return 0; fi ;;
+      if [ "$at" -lt "$boot" ]; then printf '%s' "$doc"; return 0; fi ;;
     esac
   fi
-  if [ -f "$ROSTER_PREV" ] && [ -f "$ROSTER_PREV.boot" ]; then
-    IFS= read -r mark <"$ROSTER_PREV.boot" || mark=""
+  if doc=$(cat "$ROSTER_PREV" 2>/dev/null) && [ -n "$doc" ]; then
+    mark=$(printf '%s' "$doc" | jq -r '.set_aside_for_boot // empty' 2>/dev/null) || mark=""
     case "$mark" in ''|*[!0-9]*) return 1;; esac
-    local d=$((mark - boot))
+    d=$((mark - boot))
     [ "$d" -lt 0 ] && d=$((-d))
-    if [ "$d" -le 60 ]; then printf '%s' "$ROSTER_PREV"; return 0; fi
+    if [ "$d" -le 60 ]; then printf '%s' "$doc"; return 0; fi
   fi
   return 1
 }
@@ -3172,11 +3192,11 @@ cmd_reattach() {
       | .sessions[]?
       | select(((.cwd // "") | norm) as $c | $c == $a or $c == $b)
       | select((.sid // "") | test($re))
-      | [.sid, (.name // ""), (.title // "")] | @tsv' "$roster" 2>/dev/null \
+      | [.sid, (.name // ""), (.title // "")] | @tsv' <<<"$roster" 2>/dev/null \
     | sort -t "$tab" -k2,2)
   if [ -z "$cands" ]; then
     [ "$hook" -eq 1 ] && return 1
-    say "$(jq -r '.sessions | length' "$roster" 2>/dev/null || printf '?') session(s) were running before the restart, none of them in $here."
+    say "$(jq -r '.sessions | length' <<<"$roster" 2>/dev/null || printf '?') session(s) were running before the restart, none of them in $here."
     return 0
   fi
 
@@ -3191,7 +3211,7 @@ cmd_reattach() {
   # rather than by the boot time, which can. Older keys are swept: each is one
   # restart's worth of empty directories.
   local key claims d
-  key=$(jq -r '.at // 0' "$roster" 2>/dev/null) || key=0
+  key=$(jq -r '.at // 0' <<<"$roster" 2>/dev/null) || key=0
   claims="$CCWATCH_HOME/reattach/$key"
   mkdir -p "$claims" 2>/dev/null || { err "reattach: cannot create $claims. Doing nothing."; return 1; }
   for d in "$CCWATCH_HOME"/reattach/*; do
