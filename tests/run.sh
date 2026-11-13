@@ -2231,7 +2231,11 @@ assert_contains "$(bar_run)" "resets in 2.5h ·" "and so does the dropdown"
 # the clock comparison below failed whenever that crossed a minute: measured
 # 12:55 AM against 12:54 AM on a run at load average 200.
 cp "$WORK/bar-usage-7500.json" "$BCH/usage.json"
-assert_contains "$_barreset" "EDT" "and the wall clock it resets at, with the zone"
+# The zone is the one in force AT the reset instant, computed, never a literal:
+# "EDT" passed from March to November and failed every run in between.
+_barzone=$(TZ=America/New_York epochfmt "$(jq -r '.five_hour.resets_at' "$WORK/bar-usage-7500.json")" '+%Z')
+# An empty zone would make the assertion pass on anything, so it cannot be one.
+assert_contains "$_barreset" "${_barzone:-<no zone computed>}" "and the wall clock it resets at, with the zone"
 # A bare percentage does not say whether it is what you have spent or what is
 # left, and the dropdown has room to say which.
 assert_contains "$_barreset" "% used" "and says the percentage is what has been used"
