@@ -30,7 +30,9 @@ after taking a timestamped backup. `install-reattach` likewise appends one block
 to your shell's startup file, after showing it, asking, and backing the file up.
 That block evals one line that `ccwatch reattach --hook` prints. The line is
 your own `resume-command` followed by `--resume <id>`, and the id is checked to
-be a UUID before it is printed.
+be a UUID before it is printed. The conversation titles in `sessions.txt` come
+from transcripts, so they are reduced to characters that do nothing when pasted
+into a shell.
 
 **It never** reads or requests your OAuth token or any other credential. The
 usage figures come from the payload Claude Code already pushes to a statusline
