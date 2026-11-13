@@ -1716,6 +1716,27 @@ claude --resume 4fb92dd3-0000-0000-0000-000000000000
   have not seen the record it writes in a real transcript, and guessing its
   shape would be rule 5's invented reading.
 
+**Zed restores the terminals, not what ran in them.** This was looked into
+because the obvious next step, a Zed task per session, would be wrong. From
+Zed's source (`terminal_view/src/persistence.rs`, `terminal_view.rs`,
+`terminal_panel.rs`, read at the 2026-11-12 `main`):
+
+- Zed persists each terminal tab's working directory, which is the cwd of the
+  PTY's foreground process (Claude Code's, while it runs), along with the
+  pane/tab order and any title the user typed. On reopen it starts a plain
+  shell there. It keeps no command and no scrollback.
+- A task never runs in a tab the user opened. It reuses only a *task* terminal
+  with the same label, and task terminals are not restored. Generating tasks
+  would therefore open a second terminal beside every restored one.
+- Nothing outside Zed can type into a given tab: the CLI's IPC, the `zed://`
+  URL handlers and the extension API have nothing for terminals. Every
+  restored shell gets the same environment (`ZED_TERM=true`,
+  `TERM_PROGRAM=zed`) and no per-tab id.
+
+So the only place a restored tab can be reattached is that tab's own shell
+startup, from state kept outside Zed. Tabs that share a directory have to
+divide that directory's sessions among themselves.
+
 Two bugs found here worth knowing about, because both produced output that
 looked fine:
 
