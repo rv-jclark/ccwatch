@@ -26,7 +26,11 @@ deploy panel.
 **It writes:** its own event log and caches under `~/.claude/ccwatch/`, a
 CPU-sample cache in `$TMPDIR`, and — only when you run `install-hooks` or
 `install-statusline` and confirm the diff it shows you — `~/.claude/settings.json`,
-after taking a timestamped backup.
+after taking a timestamped backup. `install-reattach` likewise appends one block
+to your shell's startup file, after showing it, asking, and backing the file up.
+That block evals one line that `ccwatch reattach --hook` prints. The line is
+your own `resume-command` followed by `--resume <id>`, and the id is checked to
+be a UUID before it is printed.
 
 **It never** reads or requests your OAuth token or any other credential. The
 usage figures come from the payload Claude Code already pushes to a statusline

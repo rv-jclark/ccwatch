@@ -82,6 +82,32 @@ Without the statusline, the usage figures and the `CTX` column stay blank.
 Without the hooks, ccwatch can miss a prompt that was answered or dismissed
 between two refreshes.
 
+### Optional: reopen sessions in Zed terminals after a restart
+
+When Zed reopens after a restart, each terminal comes back in the directory
+its session was running in, but as a plain shell. This makes those shells
+reopen their sessions:
+
+```bash
+ccwatch install-reattach     # appends a block to ~/.zshrc; shows it and asks first
+```
+
+What happens in each restored Zed terminal:
+
+- It reopens one of the sessions that was running in that directory before
+  the restart. Five terminals in one directory get five different sessions,
+  in no particular order.
+- It says which one first, and waits 3 seconds. Press any key to keep a plain
+  shell instead.
+- It skips anything you have already reopened yourself.
+- It only acts in the first hour after boot. A terminal you open later is a
+  plain shell.
+- It uses the same command word as `sessions.txt` (`resume-command`, or
+  `CCWATCH_RESUME_CMD`).
+
+`ccwatch reattach`, run in a directory, lists what a terminal there would
+reopen. To turn it off, set `CCWATCH_NO_REATTACH=1` or delete the block.
+
 ### The menu bar app
 
 ```bash
@@ -311,6 +337,8 @@ It **writes** only these:
 - a CPU-sample cache, in `$TMPDIR`
 - `~/.claude/settings.json`, but only when you run `install-hooks` or
   `install-statusline` and confirm the change
+- your shell's startup file, but only when you run `install-reattach` and
+  confirm the change
 
 [SECURITY.md](SECURITY.md) has the full list.
 

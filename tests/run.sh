@@ -130,7 +130,7 @@ case "$(uname -s)" in
   *)                    _host_platform=macos ;;
 esac
 
-TALLY_FLOOR=597
+TALLY_FLOOR=621
 TALLY_FLOOR_NODE=306
 # ⚠️ Windows refuses send/kill/peers/revive outright -- they need POSIX
 # signals and the per-session Unix socket -- so those four sections cannot run
@@ -141,7 +141,10 @@ TALLY_FLOOR_NODE=306
 # 12 send + 59 revive + 7 peers + 16 kill, plus the 5 inside `serve` and
 # `collectors` that those same refusals take with them, plus the 2 app-win
 # assertions that only exist on a host that has BUILT it -- CI has not, and a
-# floor has to assume the case with FEWER assertions. Measured from real runs,
+# floor has to assume the case with FEWER assertions, plus the 5
+# install-reattach assertions (it refuses on Windows: no boot time). The 4
+# reattach pty assertions are in neither floor, because any host that will not
+# open a pty skips them, a sandbox included. Measured from real runs,
 # not estimated, each time it moved.
 #
 # The last 2 are an ALLOWANCE, and deliberately so. A handful of skips here are
@@ -151,7 +154,7 @@ TALLY_FLOOR_NODE=306
 # encodes one machine's configuration" rule 14 forbids; the floor exists to
 # catch assertions running UNCOUNTED, which is a regression of dozens, not of
 # one.
-TALLY_FLOOR_POSIX=103
+TALLY_FLOOR_POSIX=108
 
 # wait_until <seconds> <command...> — poll until the command succeeds, or the
 # deadline passes. Returns 0 if it succeeded.
@@ -4533,6 +4536,8 @@ CCWATCH_FAKE_PS="$WORK/ps-none" CCWATCH_FAKE_BOOT="$_st_boot" st_once
 assert_eq "$(jq -r '[.sessions[].sid] | sort | join(",")' "$SH/roster.before-restart.json" 2>/dev/null)" \
   "eeeeeeee-0000-0000-0000-0000000000aa,eeeeeeee-0000-0000-0000-0000000000bb" \
   "a refresh after a restart sets the roster from before it aside instead of overwriting it"
+assert_eq "$(cat "$SH/roster.before-restart.json.boot" 2>/dev/null)" "$_st_boot" \
+  "and records which boot it was set aside for, so reattach can tell this restart from an earlier one"
 _st=$(cat "$SH/sessions.txt" 2>/dev/null)
 assert_contains "$_st" "== Running now: none ==" "the sessions file then says nothing is running now"
 assert_contains "$_st" "before the restart" "and lists what was running before the restart"
@@ -4566,6 +4571,180 @@ CCWATCH_FAKE_PS="$WORK/ps-none" CCWATCH_FAKE_BOOT=none st_once
 rm -f "$FH/sessions/9205.json" "$FH/sessions/9206.json" \
       "$FH/projects/-fake-repo/eeeeeeee-0000-0000-0000-0000000000bb.jsonl"
 : >"$_st_tr"
+
+# ============================================================== reattach =====
+printf '\nreattach\n'
+
+# A terminal Zed restored after a restart reopens the session it was running.
+# Zed restores the tab in the session's own cwd and runs a plain shell, and the
+# rc block evals what `reattach --hook` prints. So what is under test is: which
+# directory gets which session, that two tabs never get the same one, that a
+# session already running again is left alone, and that every way of not
+# knowing (no boot time, no snapshot, a roster from another restart) prints
+# nothing to eval.
+RAH="$WORK/reattach-home"; mkdir -p "$RAH" "$WORK/ra-a" "$WORK/ra-b" "$WORK/ra-c" "$WORK/ra-d"
+RA_BOOT=$(( $(date '+%s') - 300 ))
+_ra_a1=aaaaaaaa-1111-0000-0000-000000000001
+_ra_a2=aaaaaaaa-1111-0000-0000-000000000002
+_ra_a3=aaaaaaaa-1111-0000-0000-000000000003
+_ra_b1=bbbbbbbb-1111-0000-0000-000000000001
+_ra_d1=dddddddd-1111-0000-0000-000000000001
+ra_roster() { # ra_roster <file> <at>: three sessions in ra-a, one in ra-b, one bad id in ra-c,
+  # and one in ra-d recorded with a doubled and a trailing slash
+  jq -n --argjson at "$2" --arg a "$WORK/ra-a" --arg b "$WORK/ra-b" --arg c "$WORK/ra-c" \
+     --arg a1 "$_ra_a1" --arg a2 "$_ra_a2" --arg a3 "$_ra_a3" --arg b1 "$_ra_b1" \
+     --arg dd "$WORK//ra-d/" --arg d1 "$_ra_d1" '
+    {at: $at, sessions: [
+      {sid: $a2, name: "ra-a-2", title: "Second in a", cwd: $a},
+      {sid: $a1, name: "ra-a-1", title: "First in a",  cwd: $a},
+      {sid: $a3, name: "ra-a-3", title: "Running again", cwd: $a},
+      {sid: $b1, name: "ra-b-1", title: null, cwd: $b},
+      {sid: "$(touch pwned)", name: "ra-c-1", cwd: $c},
+      {sid: $d1, name: "ra-d-1", cwd: $dd} ]}' >"$1"
+}
+ra_roster "$RAH/roster.json" $((RA_BOOT - 60))
+# ra-a-3 has been reopened since the restart: live in the registry and in ps.
+mksess 9301 "$_ra_a3" ra-a-3 "$WORK/ra-a" idle cli
+mkps 9301 "0:01.00" > "$WORK/ps-ra"
+ra() { # ra <dir> [args...]: reattach run from <dir>, stdout only; stderr to ra-err
+  local d="$1"; shift
+  ( cd "$d" && CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$RAH" CCWATCH_FAKE_PS="${RA_PS:-$WORK/ps-ra}" \
+      CCWATCH_FAKE_BOOT="${RA_BOOTV:-$RA_BOOT}" NO_COLOR=1 "$CCWATCH" reattach "$@" 2>"$WORK/ra-err" )
+}
+_ra1=$(ra "$WORK/ra-a" --hook); _ra2=$(ra "$WORK/ra-a" --hook); _ra3=$(ra "$WORK/ra-a" --hook; echo "rc=$?")
+assert_eq "$_ra1" "claude --resume $_ra_a1" \
+  "a restored terminal is handed the resume command for a session that was running in its directory"
+assert_eq "$_ra2" "claude --resume $_ra_a2" "and a second terminal in that directory gets a different one"
+assert_eq "$_ra3" "rc=1" \
+  "and a third gets nothing, because the last one is running again already"
+assert_eq "$(ra "$WORK/ra-b" --hook)" "claude --resume $_ra_b1" "a terminal in another directory gets that directory's session"
+assert_eq "$(ra "$WORK/ra-c" --hook)" "" "a session id that is not a UUID is never printed for the shell to eval"
+assert_eq "$(ra "$WORK/ra-d" --hook)" "claude --resume $_ra_d1" \
+  "a cwd recorded with a doubled or trailing slash still matches the directory"
+_ram=$(ra "$WORK/ra-a")
+assert_contains "$_ram" "taken    First in a" "run by hand, it lists what other terminals have claimed"
+assert_contains "$_ram" "running  Running again" "and what is running again, by title"
+printf 'my-claude --flag\n' > "$RAH/resume-command"
+rm -rf "$RAH/reattach"
+assert_eq "$(ra "$WORK/ra-b" --hook)" "my-claude --flag --resume $_ra_b1" "the command is built from resume-command"
+rm -f "$RAH/resume-command"
+
+# Every way of not knowing prints nothing to eval, and the failures say why.
+rm -rf "$RAH/reattach"
+# ⚠️ The roster predates THAT boot, so the window is the only thing that can
+# refuse it. With the usual roster (five minutes old) this passed with the
+# window check deleted, because the roster was simply newer than the boot.
+_ra_old=$(( $(date '+%s') - 7200 ))
+ra_roster "$RAH/roster.json" $((_ra_old - 60))
+assert_eq "$(RA_BOOTV=$_ra_old ra "$WORK/ra-b" --hook)" "" \
+  "two hours after boot, a new terminal is a plain shell"
+ra_roster "$RAH/roster.json" $((RA_BOOT - 60))
+assert_eq "$(RA_BOOTV=none ra "$WORK/ra-b" --hook)" "" "with no boot time it does nothing"
+assert_contains "$(cat "$WORK/ra-err")" "cannot tell when this host booted" "and says so, from the hook too"
+assert_eq "$(CCWATCH_NO_REATTACH=1 ra "$WORK/ra-b" --hook)" "" "CCWATCH_NO_REATTACH turns it off"
+_realjq=$(command -v jq)
+if [ -n "$_realjq" ]; then
+  mkdir -p "$WORK/shim"
+  { printf '#!/bin/sh\n'
+    printf 'for a in "$@"; do [ "$a" = "swap_warn" ] && exit 1; done\n'
+    printf 'exec %s "$@"\n' "$_realjq"; } > "$WORK/shim/jq"
+  chmod +x "$WORK/shim/jq"
+  assert_eq "$(PATH="$WORK/shim:$PATH" ra "$WORK/ra-b" --hook)" "" \
+    "when the snapshot fails it does nothing, rather than risk opening a running session twice"
+  assert_contains "$(cat "$WORK/ra-err")" "could not read which sessions are running now" "and says so"
+  rm -rf "$WORK/shim"
+else
+  t_skip "when the snapshot fails it does nothing" "no jq on PATH to shim"
+fi
+# A roster written since the boot is not a record of what the restart stopped.
+ra_roster "$RAH/roster.json" $((RA_BOOT + 60))
+assert_eq "$(ra "$WORK/ra-b" --hook)" "" "a roster written after the boot is not offered"
+# The set-aside roster counts only if it was set aside for THIS boot.
+ra_roster "$RAH/roster.before-restart.json" $((RA_BOOT - 60))
+printf '%s\n' $((RA_BOOT - 86400)) > "$RAH/roster.before-restart.json.boot"
+assert_eq "$(ra "$WORK/ra-b" --hook)" "" "a roster set aside at an earlier restart is not offered"
+printf '%s\n' $((RA_BOOT + 2)) > "$RAH/roster.before-restart.json.boot"
+assert_eq "$(ra "$WORK/ra-b" --hook)" "claude --resume $_ra_b1" \
+  "one set aside for this boot is, allowing for the boot time moving by a clock correction"
+
+# ⚠️ Not on Windows: Python there has no pty module, and install-reattach
+# refuses by design (no boot time). Nine assertions, counted in
+# TALLY_FLOOR_POSIX.
+if [ "$_host_platform" = windows ]; then
+  t_skip "the wait before reopening, and install-reattach" "no pty on Windows, and install-reattach refuses there"
+else
+# The way out: on a terminal it waits, and a key leaves a plain shell and hands
+# the session back. Driven through a real pty, because that is the only place
+# the wait happens.
+# A sandbox can refuse to hand out a pty at all ("out of pty devices"), and
+# that is this host, not a defect: probed by opening one, not by guessing.
+if ! python3 -c "import os; a, b = os.openpty(); os.close(a); os.close(b)" 2>/dev/null; then
+  t_skip "the wait before reopening, driven through a pty" "this host will not open a pty"
+else
+rm -rf "$RAH/reattach"
+_ra_pty=$(cd "$WORK/ra-b" && CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$RAH" CCWATCH_FAKE_PS="$WORK/ps-ra" \
+  CCWATCH_FAKE_BOOT="$RA_BOOT" CCWATCH_REATTACH_WAIT=5 NO_COLOR=1 python3 -c '
+import os, pty, select, signal, sys, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(sys.argv[1], [sys.argv[1], "reattach", "--hook"])
+# select with a hard deadline, never a bare read: on macOS a read of the pty
+# master can block after the child has exited, which hung the suite here.
+out, sent, deadline, status = b"", False, time.time() + 10, None
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.2)
+    if r:
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+        if not sent and b"Press any key" in out:
+            os.write(fd, b"x"); sent = True
+    done, st = os.waitpid(pid, os.WNOHANG)
+    if done:
+        status = st
+        break
+if status is None:
+    if time.time() >= deadline:
+        os.kill(pid, signal.SIGKILL)
+    _, status = os.waitpid(pid, 0)
+try:
+    while select.select([fd], [], [], 0.2)[0]:
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            break
+        out += chunk
+except OSError:
+    pass
+sys.stdout.write(out.decode("utf-8", "replace") + "\nrc=%d\n" % os.waitstatus_to_exitcode(status))
+' "$CCWATCH" 2>&1)
+assert_contains "$_ra_pty" "reopening ra-b-1. Press any key within 5s" "on a terminal it says what it is about to reopen and waits"
+assert_contains "$_ra_pty" "left as a plain shell" "a key leaves a plain shell"
+assert_not_contains "$_ra_pty" "--resume $_ra_b1" "and prints no command for the shell to run"
+assert_eq "$(ra "$WORK/ra-b" --hook)" "claude --resume $_ra_b1" "and the session is handed back for another terminal"
+fi
+
+# install-reattach: shown and asked, appended once, and the block it writes
+# really does reopen the session when a Zed shell starts.
+_ra_rc="$WORK/ra-zshrc"; printf 'export KEEP=1\n' > "$_ra_rc"
+printf 'n\n' | NO_COLOR=1 "$CCWATCH" install-reattach --rc "$_ra_rc" >/dev/null 2>&1
+assert_eq "$(cat "$_ra_rc")" "export KEEP=1" "install-reattach changes nothing unless you say yes"
+printf 'y\n' | NO_COLOR=1 "$CCWATCH" install-reattach --rc "$_ra_rc" >/dev/null 2>&1
+printf 'y\n' | NO_COLOR=1 "$CCWATCH" install-reattach --rc "$_ra_rc" >/dev/null 2>&1
+assert_eq "$(grep -c 'reattach --hook' "$_ra_rc")" "1" "and installs the block once, however often it is run"
+assert_eq "$(head -1 "$_ra_rc")" "export KEEP=1" "after what was already there"
+rm -rf "$RAH/reattach"
+printf 'echo REOPENED\n' > "$RAH/resume-command"
+_ra_src() { ( cd "$WORK/ra-b" && CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$RAH" CCWATCH_FAKE_PS="$WORK/ps-ra" \
+              CCWATCH_FAKE_BOOT="$RA_BOOT" bash -c '. "$1"' _ "$_ra_rc" 2>/dev/null ) </dev/null; }
+assert_eq "$(ZED_TERM='' _ra_src)" "" "the block does nothing outside a Zed terminal"
+assert_eq "$(ZED_TERM=true _ra_src)" "REOPENED --resume $_ra_b1" \
+  "and in a Zed terminal the shell runs the resume command reattach printed"
+fi
+rm -f "$RAH/resume-command" "$FH/sessions/9301.json"
 
 # ========================================================== pending asks =====
 printf '\npending questions\n'

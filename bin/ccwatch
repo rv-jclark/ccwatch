@@ -2206,7 +2206,12 @@ write_roster() { # write_roster <snapshot-json>
   if [ -f "$ROSTER" ] && boot=$(probe_boot) && [ -n "$boot" ]; then
     at=$(jq -r '.at // 0' "$ROSTER" 2>/dev/null) || at=""
     if [ -n "$at" ] && [ "$at" -lt "$boot" ]; then
-      mv "$ROSTER" "$ROSTER_PREV" 2>/dev/null
+      # Which boot it was set aside for, so `reattach` can tell the roster
+      # this restart interrupted from one left over from an earlier restart.
+      # The roster's own `at` cannot say: it is the last write before a
+      # shutdown, which can be any length of time before the boot after it.
+      mv "$ROSTER" "$ROSTER_PREV" 2>/dev/null \
+        && printf '%s\n' "$boot" >"$ROSTER_PREV.boot" 2>/dev/null
     fi
   fi
   # A title the tail could not find this time keeps the last one read, so a
@@ -3054,6 +3059,263 @@ cmd_resume() {
     say "${_c_dim}Nothing resumable in the last $CCWATCH_RESUME_DAYS days.${_c_reset}"
     say "${_c_dim}Widen the window with ${_c_reset}ccwatch resume --all${_c_dim}.${_c_reset}"
   fi
+}
+
+# reattach — give a terminal that Zed restored after a restart back the session
+# it was running.
+#
+# ⚠️ Why it lives in the shell's startup and not in a Zed task (docs/DESIGN.md,
+# "Zed restores the terminals"): Zed reopens each terminal tab in the cwd of
+# whatever ran in it, Claude Code's own, and starts a plain shell there. A task
+# never runs in a tab you opened, so generating tasks would put a duplicate
+# next to every restored terminal. The restored shell is the only thing that
+# runs in the right tab, so it does the reattaching.
+#
+# `--hook` is what the rc block runs, and its stdout is eval'd by your shell,
+# so nothing reaches stdout but the one command, built from a session id that
+# has been checked to be a UUID. The rc block evals it, rather than ccwatch
+# exec-ing it, because the resume command can be a shell alias, and an alias
+# exists only in your shell.
+#
+# What keeps it from doing something you did not want:
+# - It only acts in the first CCWATCH_REATTACH_WINDOW seconds after boot (an
+#   hour). A terminal you open next week in ~/code/agents stays a plain shell.
+# - It only offers sessions from the roster this boot interrupted. The roster
+#   is checked against the boot time, never just its presence: a leftover
+#   roster.before-restart.json from last month's restart is not this restart.
+# - A session that is running again is skipped, judged by the same snapshot
+#   the table draws. If the snapshot cannot be taken, it does nothing, because
+#   "could not tell what is running" must not become "resume it a second
+#   time".
+# - Several tabs in one directory split that directory's sessions between
+#   them. Each claims one with mkdir, which is atomic, so two shells starting
+#   in the same instant cannot both take the same session.
+# - It waits CCWATCH_REATTACH_WAIT seconds, and any key gives you the plain
+#   shell instead and hands the session back for another terminal.
+CCWATCH_REATTACH_WINDOW="${CCWATCH_REATTACH_WINDOW:-3600}"
+CCWATCH_REATTACH_WAIT="${CCWATCH_REATTACH_WAIT:-3}"
+_UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+
+# _reattach_roster <boot> — the roster this boot interrupted, or nothing.
+# Either the live roster still predates the boot (no refresh has happened
+# since login: Zed can open before the menu bar app's first one), or it was set
+# aside by write_roster for THIS boot. The boot comparison has 60s of slack
+# because kern.boottime moves when the clock is corrected after boot.
+_reattach_roster() {
+  local boot="$1" at mark
+  if [ -f "$ROSTER" ]; then
+    at=$(jq -r '.at // empty' "$ROSTER" 2>/dev/null) || at=""
+    case "$at" in ''|*[!0-9]*) ;; *)
+      if [ "$at" -lt "$boot" ]; then printf '%s' "$ROSTER"; return 0; fi ;;
+    esac
+  fi
+  if [ -f "$ROSTER_PREV" ] && [ -f "$ROSTER_PREV.boot" ]; then
+    IFS= read -r mark <"$ROSTER_PREV.boot" || mark=""
+    case "$mark" in ''|*[!0-9]*) return 1;; esac
+    local d=$((mark - boot))
+    [ "$d" -lt 0 ] && d=$((-d))
+    if [ "$d" -le 60 ]; then printf '%s' "$ROSTER_PREV"; return 0; fi
+  fi
+  return 1
+}
+
+cmd_reattach() {
+  local hook=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --hook) hook=1; shift;;
+      *) die "reattach: unrecognised argument '$1'" "usage: ccwatch reattach [--hook]";;
+    esac
+  done
+
+  if [ -n "${CCWATCH_NO_REATTACH:-}" ]; then
+    [ "$hook" -eq 1 ] && return 1
+    say "CCWATCH_NO_REATTACH is set, so restored terminals are left as plain shells."
+    return 0
+  fi
+
+  local boot now
+  if ! boot=$(probe_boot) || [ -z "$boot" ]; then
+    # A failure, so it is said even from the hook: staying silent would make
+    # "could not measure" look the same as "nothing to reattach" (rule 4).
+    err "reattach: cannot tell when this host booted, so cannot tell a restart from a new terminal. Doing nothing."
+    return 1
+  fi
+  now=$(date '+%s')
+  if [ $((now - boot)) -gt "$CCWATCH_REATTACH_WINDOW" ]; then
+    [ "$hook" -eq 1 ] && return 1
+    say "This host booted $(( (now - boot) / 60 ))m ago. reattach only acts in the first $((CCWATCH_REATTACH_WINDOW / 60))m after a restart, so a terminal opened later stays a plain shell."
+    return 0
+  fi
+
+  local roster
+  if ! roster=$(_reattach_roster "$boot"); then
+    [ "$hook" -eq 1 ] && return 1
+    say "There is no record of what was running before this restart."
+    return 0
+  fi
+
+  # Both spellings of here. Zed restores the cwd the process had, which is
+  # the physical path, and the shell's $PWD can be a logical one through a
+  # symlink.
+  local here herep cands tab
+  here="$PWD"
+  herep=$(pwd -P 2>/dev/null) || herep="$PWD"
+  tab=$(printf '\t')
+  # Compared with repeated and trailing slashes collapsed on both sides: the
+  # shell's $PWD never has them, and a recorded cwd can ("$TMPDIR" ends in a
+  # slash on macOS, so "$TMPDIR/x" is ".../T//x", which is how the suite found
+  # it).
+  cands=$(jq -r --arg a "$here" --arg b "$herep" --arg re "$_UUID_RE" '
+      def norm: gsub("/+"; "/") | if length > 1 then sub("/$"; "") else . end;
+      ($a | norm) as $a | ($b | norm) as $b
+      | .sessions[]?
+      | select(((.cwd // "") | norm) as $c | $c == $a or $c == $b)
+      | select((.sid // "") | test($re))
+      | [.sid, (.name // ""), (.title // "")] | @tsv' "$roster" 2>/dev/null \
+    | sort -t "$tab" -k2,2)
+  if [ -z "$cands" ]; then
+    [ "$hook" -eq 1 ] && return 1
+    say "$(jq -r '.sessions | length' "$roster" 2>/dev/null || printf '?') session(s) were running before the restart, none of them in $here."
+    return 0
+  fi
+
+  local snap running
+  if ! snap=$(snapshot); then
+    err "reattach: could not read which sessions are running now, so cannot tell which of these were already reopened. Doing nothing."
+    return 1
+  fi
+  running=$(printf '%s' "$snap" | jq -r '.sessions[].sid' 2>/dev/null)
+
+  # Claims are keyed by the interrupted roster's own `at`, which does not move,
+  # rather than by the boot time, which can. Older keys are swept: each is one
+  # restart's worth of empty directories.
+  local key claims d
+  key=$(jq -r '.at // 0' "$roster" 2>/dev/null) || key=0
+  claims="$CCWATCH_HOME/reattach/$key"
+  mkdir -p "$claims" 2>/dev/null || { err "reattach: cannot create $claims. Doing nothing."; return 1; }
+  for d in "$CCWATCH_HOME"/reattach/*; do
+    [ -d "$d" ] && [ "$d" != "$claims" ] && rm -rf "$d"
+  done
+
+  local cmd sid name title label
+  cmd=$(resume_command)
+  if [ "$hook" -eq 0 ]; then
+    say "${_c_bold}REATTACH${_c_reset} ${_c_dim}$here, sessions from before the restart${_c_reset}"
+    say ""
+  fi
+  exec 3<&0
+  while IFS="$tab" read -r sid name title; do
+    label="${title:-$name}"
+    if printf '%s\n' "$running" | grep -qxF "$sid"; then
+      [ "$hook" -eq 0 ] && say "  ${_c_dim}running${_c_reset}  $label ${_c_dim}(already reopened)${_c_reset}"
+      continue
+    fi
+    if [ "$hook" -eq 0 ]; then
+      if [ -d "$claims/$sid" ]; then
+        say "  ${_c_dim}taken${_c_reset}    $label ${_c_dim}(claimed by another terminal)${_c_reset}"
+      else
+        say "  ${_c_green}free${_c_reset}     $label"
+        say "           ${_c_cyan}$cmd --resume $sid${_c_reset}"
+      fi
+      continue
+    fi
+    mkdir "$claims/$sid" 2>/dev/null || continue
+
+    # Ours. Offer the way out before acting, on the terminal itself, and only
+    # when there is a terminal to offer it on.
+    # ⚠️ fd 3, not stdin: inside this loop stdin is the heredoc of candidates.
+    # The first version tested `-t 0` here, which was never true, so the way
+    # out was never offered, and found only by driving it through a real pty.
+    if [ "$CCWATCH_REATTACH_WAIT" -gt 0 ] && [ -t 3 ] && [ -t 2 ]; then
+      # shellcheck disable=SC2064 # the claim path is fixed now, on purpose
+      trap "rmdir '$claims/$sid' 2>/dev/null; exit 130" INT TERM
+      printf '%sccwatch:%s reopening %s%s%s. Press any key within %ss for a plain shell.\n' \
+        "$_c_dim" "$_c_reset" "$_c_bold" "$label" "$_c_reset" "$CCWATCH_REATTACH_WAIT" >&2
+      local _k
+      if IFS= read -r -s -n 1 -t "$CCWATCH_REATTACH_WAIT" _k <&3; then
+        rmdir "$claims/$sid" 2>/dev/null
+        printf '%sccwatch: left as a plain shell. `ccwatch reattach` lists what is still free here.%s\n' \
+          "$_c_dim" "$_c_reset" >&2
+        return 1
+      fi
+      trap - INT TERM
+    fi
+    printf '%s --resume %s\n' "$cmd" "$sid"
+    return 0
+  done <<EOF
+$cands
+EOF
+  [ "$hook" -eq 1 ] && return 1
+  say ""
+  say "${_c_dim}A restored Zed terminal here takes the first free one (${_c_reset}ccwatch install-reattach${_c_dim} sets that up).${_c_reset}"
+  return 0
+}
+
+# install-reattach — append the rc block that runs `reattach --hook`, after
+# showing it and asking, as install-statusline does.
+REATTACH_BEGIN='# >>> ccwatch reattach >>>'
+REATTACH_END='# <<< ccwatch reattach <<<'
+cmd_install_reattach() {
+  local rc=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --rc) rc="${2:-}"; shift 2 || die "install-reattach: --rc needs a file";;
+      *) die "install-reattach: unrecognised argument '$1'" "usage: ccwatch install-reattach [--rc FILE]";;
+    esac
+  done
+  [ "$CCWATCH_PLATFORM" = windows ] && die "install-reattach: not available on Windows" \
+    "it decides 'this is a restart' from the boot time, which ccwatch does not measure on Windows"
+  if [ -z "$rc" ]; then
+    case "$(basename -- "${SHELL:-}")" in
+      zsh)  rc="${ZDOTDIR:-$HOME}/.zshrc";;
+      bash) rc="$HOME/.bashrc";;
+      *)    die "install-reattach: do not know the startup file for shell '${SHELL:-?}'" \
+                "pass it with --rc FILE";;
+    esac
+  fi
+  local self
+  self=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")
+  case "$self" in *"'"*) die "install-reattach: ccwatch's path contains a single quote" "$self";; esac
+
+  if [ -f "$rc" ] && grep -qxF "$REATTACH_BEGIN" "$rc"; then
+    say "Already installed in $rc. Delete the block between"
+    say "  ${_c_dim}$REATTACH_BEGIN${_c_reset} and ${_c_dim}$REATTACH_END${_c_reset} to remove it."
+    return 0
+  fi
+
+  local block
+  block="$REATTACH_BEGIN
+# In a Zed terminal restored after a restart, reopen the Claude Code session it
+# was running. \`ccwatch reattach\` shows what it would do in a directory. Delete
+# this block, or set CCWATCH_NO_REATTACH=1, to turn it off. Keep it LAST: it
+# needs your PATH, and the session runs before the rest of this file would.
+if [ \"\${ZED_TERM:-}\" = true ] && [ -x '$self' ]; then
+  _ccwatch_reattach=\$('$self' reattach --hook) && eval \"\$_ccwatch_reattach\"
+  unset _ccwatch_reattach
+fi
+$REATTACH_END"
+
+  say "${_c_bold}This will append to${_c_reset} $rc${_c_bold}:${_c_reset}"
+  say ""
+  printf '%s\n' "$block" | sed 's/^/  /'
+  say ""
+  printf 'Apply? [y/N] '
+  local reply=""
+  read -r reply
+  case "$reply" in
+    y|Y|yes|YES) ;;
+    *) say "Nothing changed."; return 0;;
+  esac
+
+  local backup=""
+  if [ -f "$rc" ]; then
+    backup="$rc.ccwatch-backup.$(date '+%Y%m%d%H%M%S')"
+    cp "$rc" "$backup" || die "could not back up $rc"
+  fi
+  printf '\n%s\n' "$block" >>"$rc" || die "could not write $rc" "${backup:+your original is at $backup}"
+  say "${_c_green}Installed.${_c_reset}${backup:+ Previous file saved to $backup}"
+  say "${_c_dim}Terminals Zed restores after the next restart will reopen their sessions.${_c_reset}"
 }
 
 # ============================================================== events ======
@@ -7706,8 +7968,15 @@ USAGE
                            last known roster of what was live
         --cd               print a `cd <dir> && claude --resume` you can paste
         --all              ignore the recency window
+  ccwatch reattach           in this directory, which sessions from before the
+                           restart a restored terminal would reopen
+        --hook             (run by the rc block) claim one and print its
+                           resume command for the shell to eval
+  ccwatch install-reattach   add that rc block, so Zed terminals restored after
+                           a restart reopen their sessions. Shows it and asks.
+        --rc FILE          the startup file (default ~/.zshrc or ~/.bashrc)
 
-  ccwatch deploys            deploy runs in flight, and concluded in the last 24h
+  ccwatch deploys           deploy runs in flight, and concluded in the last 24h
   ccwatch subscribe <wf>     (run BY an agent, in its own session) tell me when
                            a matching deploy finishes
   ccwatch unsubscribe <wf>   the reverse
@@ -7773,6 +8042,12 @@ ENVIRONMENT
                      how recent an unfinished run must be to appear in the
                      live table (default 24) — older ones are counted, and
                      listed by `ccwatch resume`
+  CCWATCH_REATTACH_WINDOW
+                     how long after boot `reattach --hook` acts, in seconds
+                     (default 3600)
+  CCWATCH_REATTACH_WAIT
+                     seconds it waits for a key before reopening (default 3)
+  CCWATCH_NO_REATTACH  set to leave restored terminals as plain shells
   CCWATCH_HOME         where the event log lives (default ~/.claude/ccwatch)
   CLAUDE_CONFIG_DIR  which Claude Code config directory to read
   NO_COLOR           set to disable colour
@@ -8034,6 +8309,8 @@ fi
     once)            render "$(snapshot)";;
     --json)          snapshot;;
     resume)          shift; cmd_resume "$@";;
+    reattach)        shift; cmd_reattach "$@";;
+    install-reattach) shift; cmd_install_reattach "$@";;
     hook)            shift; cmd_hook "$@";;
     log)             shift; cmd_log "${1:-30}";;
     setup)           shift; cmd_setup "$@";;

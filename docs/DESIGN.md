@@ -1737,6 +1737,63 @@ So the only place a restored tab can be reattached is that tab's own shell
 startup, from state kept outside Zed. Tabs that share a directory have to
 divide that directory's sessions among themselves.
 
+**`reattach` is that shell startup.** `install-reattach` appends a block to
+`~/.zshrc`, after showing it and asking, as `install-statusline` does. In a
+Zed terminal (`ZED_TERM=true`) the block runs `ccwatch reattach --hook` and
+evals the one line it prints. It evals rather than letting ccwatch exec,
+because the resume command can be an alias, and an alias exists only in your
+shell. Every "no" below prints nothing, so the shell evals nothing:
+
+- **Only the first hour after boot** (`CCWATCH_REATTACH_WINDOW`). Past it,
+  `--hook` returns after one `sysctl`, so an ordinary new terminal pays
+  nothing and never gets a session it did not ask for.
+- **Only the roster this boot interrupted.** That is either a `roster.json`
+  older than the boot (Zed can open before the menu bar app's first refresh),
+  or a `roster.before-restart.json` whose new `.boot` marker names this boot.
+  The roster's own `at` cannot settle it: it is the last write before a
+  shutdown, which can be any length of time before the next boot, so a
+  set-aside roster from last month's restart would otherwise look like this
+  one. The marker is matched with 60s of slack because `kern.boottime` moves
+  when the clock is corrected after boot.
+- **Only sessions whose cwd is this directory**, compared with repeated and
+  trailing slashes collapsed on both sides. A Claude Code worktree session
+  ran in the worktree, so Zed restores its tab there, and a plain `--resume`
+  from inside the worktree is correct (its transcript is filed under the
+  worktree's own path).
+- **Not a session that is running again**, judged by `snapshot`, the same one
+  the table draws (principle XI). A snapshot that fails means nothing
+  happens, and the hook says why on stderr: "could not tell what is running"
+  must not become "open it a second time".
+- **One tab per session.** Each claims with `mkdir
+  reattach/<roster at>/<sid>`, which is atomic, so tabs starting in the same
+  instant cannot take the same session. The key is the interrupted roster's
+  `at`, which does not move; keys from earlier restarts are swept.
+- **A way out.** On a terminal it names the session and waits 3s, and any key
+  leaves a plain shell and releases the claim.
+- **Only a UUID reaches the eval.** The roster is ccwatch's own file, but the
+  line is about to be executed, so the id is checked anyway.
+
+Which tab gets which session within one directory is first come, first
+served, ordered by session name. Zed keeps no per-tab identity a shell could
+read, so tab order is not something this can promise.
+
+Two bugs in the first version, both invisible to the suite until the right
+fixture existed:
+
+- **The way out was never offered.** The candidates are read in a `while
+  read` loop fed by a heredoc, so inside the loop stdin *is* the heredoc.
+  `[ -t 0 ]` was never true, the wait was skipped, and had it run, its key
+  `read` would have eaten a candidate line. The terminal is now saved on fd 3
+  before the loop. Every non-tty assertion passed throughout. The bug showed
+  up only when the hook was driven through a real pty (`pty.fork`). Even then
+  the harness hung the suite at first: on macOS a read of the pty master can
+  block after the child exits, so it now uses `select` with a deadline.
+- **A recorded cwd with a doubled slash matched nothing.** Outside the sandbox,
+  macOS's `$TMPDIR` ends in `/`, so the fixture's `$TMPDIR/x` was `…/T//x`,
+  while the shell's `$PWD` collapses it. Every reattach assertion failed
+  outside the sandbox and passed inside it. Comparing normalised paths fixes
+  the real case as well as the fixture's.
+
 Two bugs found here worth knowing about, because both produced output that
 looked fine:
 
@@ -2260,6 +2317,20 @@ implementation broken in the specific way it describes:
 | `sessions.txt`: leave out the title line | 3 |
 | `sessions.txt`: print a `# ` title line for a session that has no title | 1 |
 | `resume`: leave the title out of the last-known-roster rows | 1 |
+| `reattach`: offer a session that is running again | 2 |
+| `reattach`: claim with `mkdir -p`, so two terminals can take one session | 2 |
+| `reattach`: act at any time after boot, not only in the window | 1 |
+| `reattach`: accept a set-aside roster whatever boot its marker names | 2 |
+| `reattach`: carry on with an empty list when the snapshot fails | 2 |
+| `reattach`: print a session id without checking it is a UUID | 1 |
+| `reattach`: test `-t 0` for the wait, inside the heredoc-fed loop | 4 |
+| `reattach`: keep the claim when a key declines it | 1 |
+| `reattach`: compare cwds without collapsing slashes | 13 |
+| `write_roster`: set the roster aside without writing its `.boot` marker | 1 |
+| `reattach`: accept a live roster written after the boot | 2 |
+| `reattach`: say nothing when there is no boot time | 1 |
+| `install-reattach`: append the block again when it is already there | 1 |
+| `install-reattach`: write a block that runs outside Zed terminals too | 2 |
 | `revive`: stop recognising the previous wording of the ask | 1 |
 | `revive`: drop the agent's answer from its row | 1, and 1 (verify-ui) |
 | `revive`: ask about the first unfinished roadmap in the directory, not the session's own | 1 |
