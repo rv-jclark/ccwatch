@@ -156,7 +156,8 @@ ccwatch ask                  # what each blocked session is asking, with its opt
 ccwatch convo <who>          # the recent conversation of one session
 ccwatch resume               # what to reopen after a crash or reboot
 ccwatch resume --cd          #   ...as `cd <dir> && claude --resume <id>` lines to paste
-open ~/.claude/ccwatch/sessions.txt   # the same list as a file, kept current
+open ~/.claude/ccwatch/sessions.txt   # the same list as a file, kept current,
+                                      #   each command under the conversation's title
 ccwatch send <who> "<msg>"   # message a session that is already running
 ccwatch revive               # nudge agents that stopped too early (see below)
 ccwatch kill <who>           # stop a session; refuses when that would lose work

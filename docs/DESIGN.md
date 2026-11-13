@@ -1684,6 +1684,38 @@ The menu bar app is what refreshes most, and launchd starts it without your
 shell's environment. With only the variable, the file would flip between your
 wrapper and plain `claude` depending on which process wrote it last.
 
+**Each line carries the conversation's title.** Five sessions in one directory
+were five UUIDs that looked the same, and the only way to tell them apart was
+to open each one. Claude Code writes an `ai-title` record (`{"type":"ai-title",
+"aiTitle":"…"}`) into the transcript. It is the label its own `/resume` picker
+shows, and it is rewritten next to every `last-prompt` (2569 of them against
+3222 across 40 real transcripts). `collect_transcripts` already opens every
+live session's transcript directory, so it reads the newest `ai-title` in a
+256KB tail in the same python pass, with no extra process.
+
+```
+agents  (~/code/agents)
+# Pricing page copy review
+claude --resume 4fb92dd3-0000-0000-0000-000000000000
+```
+
+- The title is on its own line **above** the command, for the
+  `interactivecomments` reason above.
+- It is reduced to letters, digits, spaces and `. , _ - : /`, and cut to 80
+  characters. The title is model output derived from the transcript, and the
+  file gets pasted into a shell. Pasted in zsh, a title line has to come out
+  as a harmless `command not found: #`, never as `$(…)` or `;` running
+  something.
+- A tail that no longer reaches the record, after a burst of large tool output,
+  yields null. `write_roster` then keeps the previous roster's title, so the
+  label does not drop out of the file you read after a restart. That is also
+  why `sessions.txt` is now written from the roster just saved rather than from
+  the snapshot. The snapshot has no memory, and the first version of this
+  printed the title only while it was within the tail.
+- Only `ai-title` is read. A `/rename` title would be the better label, but I
+  have not seen the record it writes in a real transcript, and guessing its
+  shape would be rule 5's invented reading.
+
 Two bugs found here worth knowing about, because both produced output that
 looked fine:
 
@@ -2201,6 +2233,12 @@ implementation broken in the specific way it describes:
 | `roster`: set it aside when the boot time could not be read | 1 |
 | `sessions.txt`: group a worktree under its own path, without `--worktree` | 3 |
 | `sessions.txt`: ignore `resume-command` | 1 |
+| `sessions.txt`: pass the title through without stripping shell metacharacters | 4 |
+| `sessions.txt`: take the oldest `ai-title` in the tail instead of the newest | 5 |
+| `sessions.txt`: drop the title when the tail no longer reaches it, instead of keeping the roster's | 3 |
+| `sessions.txt`: leave out the title line | 3 |
+| `sessions.txt`: print a `# ` title line for a session that has no title | 1 |
+| `resume`: leave the title out of the last-known-roster rows | 1 |
 | `revive`: stop recognising the previous wording of the ask | 1 |
 | `revive`: drop the agent's answer from its row | 1, and 1 (verify-ui) |
 | `revive`: ask about the first unfinished roadmap in the directory, not the session's own | 1 |

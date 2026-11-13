@@ -1261,11 +1261,47 @@ collect_transcripts() { # collect_transcripts <sid>...
   # Session transcripts sit at depth 2. Subagent sidechains live deeper and are
   # deliberately out of scope: they are not sessions and have no registry entry.
   out=$(printf '%s\n' "$@" | $CCWATCH_PY -c '
-import json, os, sys
+import json, os, re, sys
 
 proj = sys.argv[1]
 wanted = {line.strip() for line in sys.stdin if line.strip()}
 out = []
+TAIL = 262144
+
+# The newest `ai-title` record in a bounded tail: the label Claude Code`s own
+# /resume picker shows, and the only thing that tells five sessions in one
+# directory apart in the sessions file. Claude Code re-writes it alongside
+# every `last-prompt` (2569 of them against 3222 across 40 real transcripts),
+# so 256KB from the end finds it on any session that has one; a miss is null,
+# and write_roster keeps the previous reading rather than dropping the label.
+#
+# Reduced here to letters, digits, spaces and . , _ - : / and cut to 80 chars,
+# because the sessions file is pasted into a shell and the title is model
+# output derived from the transcript: a title line must be inert when pasted.
+def title_of(path):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - TAIL))
+            data = f.read()
+    except OSError:
+        return None
+    for line in reversed(data.split(b"\n")):
+        if b"\"ai-title\"" not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        t = rec.get("aiTitle") if rec.get("type") == "ai-title" else None
+        if not isinstance(t, str):
+            continue
+        t = re.sub(r"[^A-Za-z0-9 .,_:/-]+", " ", t)
+        t = " ".join(t.split())[:80].strip()
+        return t or None
+    return None
+
 try:
     for project in os.scandir(proj):
         if not project.is_dir():
@@ -1282,7 +1318,8 @@ try:
                 if sid not in wanted:
                     continue
                 try:
-                    out.append({"sid": sid, "mtime": int(e.stat().st_mtime)})
+                    out.append({"sid": sid, "mtime": int(e.stat().st_mtime),
+                                "title": title_of(e.path)})
                 except OSError:
                     continue
 except OSError:
@@ -1914,6 +1951,7 @@ snapshot() {
         else ((cwd // "?") | split("/") | last | if . == "" then "/" else . end)
         end;
     ( $t | map({ key: .sid, value: .mtime }) | from_entries ) as $T
+    | ( $t | map({ key: .sid, value: .title }) | from_entries ) as $TT
     # One entry per session id that spec-run recorded, so a phase can be
     # attached to the session that actually ran it. `crashed` is decided once,
     # here, against the live runner pids.
@@ -2022,6 +2060,9 @@ snapshot() {
         | { sid: $sid,
             pid: $s.pid,
             name: ($s.name // ""),
+            # The label Claude Code gives the conversation, from the transcript
+            # (collect_transcripts). null when there is none to read.
+            title: ($TT[$sid] // null),
             cwd:  ($s.cwd // "?"),
             # The basename of a worktree is the branch, useless without
             # the repo it belongs to — show both.
@@ -2168,16 +2209,37 @@ write_roster() { # write_roster <snapshot-json>
       mv "$ROSTER" "$ROSTER_PREV" 2>/dev/null
     fi
   fi
-  printf '%s' "$1" | jq -c --argjson at "$(date '+%s')" '
-    { at: $at,
+  # A title the tail could not find this time keeps the last one read, so a
+  # burst of large tool output does not strip a session of its label in the
+  # file you will be reading after a restart.
+  # Read in the same jq pass (--slurpfile), not a jq of its own: this runs on
+  # every refresh, and a process on Windows costs ~62ms.
+  # A roster that will not parse costs its titles, never the write: --slurpfile
+  # on a corrupt file is fatal to jq, and the roster is what `resume` reads.
+  local old="$ROSTER"
+  [ -f "$old" ] || old=/dev/null
+  # The sessions file is written from the roster just made, not from the
+  # snapshot, because only the roster carries a title forward.
+  if { _roster_json "$1" "$old" >"$ROSTER.tmp" 2>/dev/null \
+         || _roster_json "$1" /dev/null >"$ROSTER.tmp" 2>/dev/null; } \
+     && mv "$ROSTER.tmp" "$ROSTER" 2>/dev/null; then
+    write_resume_file "$ROSTER"
+  fi
+  return 0
+}
+
+_roster_json() { # _roster_json <snapshot-json> <previous-roster-file>
+  printf '%s' "$1" | jq -c --argjson at "$(date '+%s')" --slurpfile old "$2" '
+    ( [ $old[0].sessions[]? | select(.title != null) | {key: .sid, value: .title} ]
+      | from_entries ) as $was
+    | { at: $at,
       sessions: [ .sessions[]
-                  | { sid, name, project, repo, branch, cwd, token, note,
+                  | .title = (.title // $was[.sid])
+                  | { sid, name, title, project, repo, branch, cwd, token, note,
                       sev, age, cost: (.context.cost_usd // null),
                       pipeline: (if .pipeline == null then null
                                  else {feature: .pipeline.feature, phase: .pipeline.phase,
-                                       status: .pipeline.status, cost: .pipeline.cost} end) } ] }'     >"$ROSTER.tmp" 2>/dev/null && mv "$ROSTER.tmp" "$ROSTER" 2>/dev/null
-  write_resume_file "$1"
-  return 0
+                                       status: .pipeline.status, cost: .pipeline.cost} end) } ] }'
 }
 
 # resume_command — the word each line of the sessions file starts with.
@@ -2198,7 +2260,7 @@ resume_command() {
 # running before the last restart and is not running now, one pasteable
 # `<cmd> [--worktree W] --resume <id>` per session, grouped by the project
 # directory each line has to be run from.
-write_resume_file() {
+write_resume_file() { # write_resume_file <roster-file>
   local prev="null"
   [ -f "$ROSTER_PREV" ] && prev=$(cat "$ROSTER_PREV" 2>/dev/null)
   jq -r --argjson prev "${prev:-null}" --arg cmd "$(resume_command)" \
@@ -2217,8 +2279,14 @@ write_resume_file() {
         else {root: $c, wt: null} end;
     def block: map(. + place) | group_by(.root)
       | map( "\(.[0].root | sub("^.*/"; ""))  (\(.[0].root | tilde))",
+             # The title goes on a line of its own ABOVE the command, not as a
+             # trailing `# ...`: zsh treats `#` as a comment only under
+             # `setopt interactivecomments`, so a pasted line would have handed
+             # the title to claude as arguments. collect_transcripts has
+             # already reduced it to characters that are inert in a shell.
              ( sort_by([.wt != null, .wt // "", .name // ""])[]
-               | $cmd + (if .wt then " --worktree \(.wt | q)" else "" end) + " --resume \(.sid)" ),
+               | ( if (.title // "") != "" then "# \(.title)" else empty end ),
+                 ( $cmd + (if .wt then " --worktree \(.wt | q)" else "" end) + " --resume \(.sid)" ) ),
              "" )
       | .[];
     ([.sessions[].sid]) as $live
@@ -2233,7 +2301,7 @@ write_resume_file() {
       ( if ($gone | length) == 0 or $prev_age > $days * 86400 then empty
         else "== Running before the restart \($prev_age | ago) ago, not running now (\($gone | length)) ==",
              "", ($gone | block) end )
-  ' <<<"$1" >"$CCWATCH_RESUME_FILE.tmp" 2>/dev/null \
+  ' "$1" >"$CCWATCH_RESUME_FILE.tmp" 2>/dev/null \
     && mv "$CCWATCH_RESUME_FILE.tmp" "$CCWATCH_RESUME_FILE" 2>/dev/null
   return 0
 }
@@ -2879,6 +2947,7 @@ cmd_resume() {
             + (if .pipeline != null then
                  " \($d)· \(.pipeline.feature) \(.pipeline.phase)/\(.pipeline.status)\($z)"
                else "" end)
+            + (if (.title // "") != "" then "\n      \(.title)" else "" end)
             + "
       \($c)claude --resume \(.sid)\($z)  \($d)(\(.cwd))\($z)"'
         say ""

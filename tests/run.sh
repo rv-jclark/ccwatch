@@ -130,7 +130,7 @@ case "$(uname -s)" in
   *)                    _host_platform=macos ;;
 esac
 
-TALLY_FLOOR=591
+TALLY_FLOOR=597
 TALLY_FLOOR_NODE=306
 # ⚠️ Windows refuses send/kill/peers/revive outright -- they need POSIX
 # signals and the per-session Unix socket -- so those four sections cannot run
@@ -4496,6 +4496,30 @@ assert_contains "$(cat "$SH/sessions.txt")" "env-claude --resume eeeeeeee-0000-0
   "and CCWATCH_RESUME_CMD overrides it"
 rm -f "$SH/resume-command"
 
+# Each command carries Claude Code's own title for the conversation, on a line
+# above it: five sessions in one directory are five identical-looking UUIDs
+# without it. The NEWEST ai-title wins, and the title is reduced to characters
+# that are inert when the file is pasted into a shell.
+_st_tr="$FH/projects/-fake-repo/eeeeeeee-0000-0000-0000-0000000000aa.jsonl"
+{ printf '%s\n' '{"type":"ai-title","aiTitle":"Old pricing title","sessionId":"eeeeeeee-0000-0000-0000-0000000000aa"}'
+  printf '%s\n' '{"type":"last-prompt","lastPrompt":"go on"}'
+  printf '%s\n' '{"type":"ai-title","aiTitle":"Fix checkout $(touch pwned); deploy `id`","sessionId":"eeeeeeee-0000-0000-0000-0000000000aa"}'
+} >"$_st_tr"
+CCWATCH_FAKE_PS="$WORK/ps-st" CCWATCH_FAKE_BOOT=1 st_once
+_st=$(cat "$SH/sessions.txt" 2>/dev/null)
+assert_eq "$(grep -B1 -F -- '--resume eeeeeeee-0000-0000-0000-0000000000aa' "$SH/sessions.txt" | head -1)" \
+  "# Fix checkout touch pwned deploy id" \
+  "each command has the session's newest title on the line above it, stripped of shell metacharacters"
+assert_not_contains "$_st" "Old pricing title" "an older title in the same transcript is not used"
+# A title that has scrolled out of the 256KB tail keeps the last one read.
+head -c 300000 /dev/zero | tr '\0' 'x' | sed 's/^/{"type":"user","pad":"/; s/$/"}/' >>"$_st_tr"
+CCWATCH_FAKE_PS="$WORK/ps-st" CCWATCH_FAKE_BOOT=1 st_once
+assert_contains "$(cat "$SH/sessions.txt")" "# Fix checkout touch pwned deploy id" \
+  "and a title pushed out of the bounded tail keeps the one read before"
+# A session with no title gets no title line, rather than an empty "# ".
+assert_eq "$(grep -B1 -F -- '--resume eeeeeeee-0000-0000-0000-0000000000bb' "$SH/sessions.txt" | head -1 | cut -c1-2)" \
+  "wt" "and a session with no title gets no title line"
+
 # The restart. The first refresh after boot sees nothing live, and must set the
 # old roster aside before writing the empty one over it - which is exactly
 # what the menu bar app did, ten seconds after login, before this existed.
@@ -4514,6 +4538,11 @@ assert_contains "$_st" "== Running now: none ==" "the sessions file then says no
 assert_contains "$_st" "before the restart" "and lists what was running before the restart"
 assert_contains "$_st" "claude --worktree feat-x --resume eeeeeeee-0000-0000-0000-0000000000bb" \
   "with the same commands to reopen it"
+assert_contains "$_st" "# Fix checkout touch pwned deploy id" \
+  "and the titles they had before the restart"
+assert_contains "$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-none" CCWATCH_HOME="$SH" \
+                   CCWATCH_FAKE_BOOT="$_st_boot" NO_COLOR=1 "$CCWATCH" resume -n 0 2>&1)" \
+  "Fix checkout touch pwned deploy id" "and ccwatch resume shows the title too"
 # A second refresh in the same boot must not set aside the (empty) roster the
 # first one wrote, or the list would be gone a refresh later.
 CCWATCH_FAKE_PS="$WORK/ps-none" CCWATCH_FAKE_BOOT="$_st_boot" st_once
@@ -4536,6 +4565,7 @@ CCWATCH_FAKE_PS="$WORK/ps-none" CCWATCH_FAKE_BOOT=none st_once
   || t_fail "a host that cannot say when it booted never sets a roster aside" "roster.before-restart.json exists"
 rm -f "$FH/sessions/9205.json" "$FH/sessions/9206.json" \
       "$FH/projects/-fake-repo/eeeeeeee-0000-0000-0000-0000000000bb.jsonl"
+: >"$_st_tr"
 
 # ========================================================== pending asks =====
 printf '\npending questions\n'
