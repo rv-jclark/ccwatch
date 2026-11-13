@@ -100,8 +100,12 @@ What happens in each restored Zed terminal:
 - It says which one first, and waits 3 seconds. Press any key to keep a plain
   shell instead.
 - It skips anything you have already reopened yourself.
-- It only acts in the first hour after boot. A terminal you open later is a
-  plain shell.
+- Zed starts a restored terminal's shell only when you first click it, so
+  each one reattaches as you click through them.
+- It only acts in the first hour after boot, so click through them within the
+  hour. A terminal you open or first click later is a plain shell. To allow
+  longer, add `export CCWATCH_REATTACH_WINDOW=14400` (seconds) to `~/.zshrc`
+  above the block.
 - It uses the same command word as `sessions.txt` (`resume-command`, or
   `CCWATCH_RESUME_CMD`).
 

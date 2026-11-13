@@ -1733,8 +1733,22 @@ Zed's source (`terminal_view/src/persistence.rs`, `terminal_view.rs`,
   restored shell gets the same environment (`ZED_TERM=true`,
   `TERM_PROGRAM=zed`) and no per-tab id.
 
+- **Measured, and different from that reading: a restored terminal's shell
+  starts when the terminal is first opened, not when Zed starts.** On one
+  restart (boot 12:08:06, Zed up at 12:12:55, 2026-11-12) Zed had no shell at
+  all until 12:15:20. The rest started one at a time over the next two
+  minutes, each when it was clicked, and none in the burst an eager restore
+  would make. The source read above was the bottom terminal panel. These
+  terminals are the agent sidebar's terminal threads (the
+  `sidebar_terminal_threads` table, holding `working_directory` per thread),
+  which take a different path. Opening a workspace with
+  `cli -n` brought back no terminals either, so closing and reopening a
+  window cannot stand in for a restart when testing this.
+
 So the only place a restored tab can be reattached is that tab's own shell
-startup, from state kept outside Zed. Tabs that share a directory have to
+startup, from state kept outside Zed. That startup runs on the first click,
+which is why the window below counts from boot and is an hour rather than a
+few seconds. Tabs that share a directory have to
 divide that directory's sessions among themselves.
 
 **`reattach` is that shell startup.** `install-reattach` appends a block to
