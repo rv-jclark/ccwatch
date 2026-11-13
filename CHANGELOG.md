@@ -8,6 +8,43 @@ subject is the changelog entry, which is why the subject line is expected to
 describe the user-visible change rather than the diff. The 1.0.0 entry predates
 that and is written by hand.
 
+## [2.2.0](https://github.com/rv-jclark/ccwatch/compare/v2.1.0...v2.2.0) (2026-11-13)
+
+
+### Features
+
+* have revive's ask say what to do, sign it, and show the answer ([4035ea0](https://github.com/rv-jclark/ccwatch/commit/4035ea0ccba2b8a6cfa90380444262494c12aac2))
+* keep a sessions file to reopen everything after a restart ([9a84d38](https://github.com/rv-jclark/ccwatch/commit/9a84d387bcb6b55b07c8ca3be35335787bc50597))
+* label each line of the sessions file with the conversation's title ([948fea5](https://github.com/rv-jclark/ccwatch/commit/948fea546852136e966fb4dfcf66b4ee6d8c0869))
+* reopen each restored Zed terminal's session after a restart ([3651248](https://github.com/rv-jclark/ccwatch/commit/365124800ed75bf5e72cfe9799ec21a17ec746be))
+
+
+### Bug Fixes
+
+* give every PowerShell probe the same three attempts ([551a420](https://github.com/rv-jclark/ccwatch/commit/551a420b78d987b7070fd50870171ab1310e599a))
+* let a Zed terminal reattach while the old roster is being set aside ([5f4b1c9](https://github.com/rv-jclark/ccwatch/commit/5f4b1c9e956598795aed4a6bc4ae74cb60aa22c2))
+
+
+### Performance
+
+* cache the clock's chosen formatter, and have doctor measure anyway ([5c837b2](https://github.com/rv-jclark/ccwatch/commit/5c837b20065e3f34730eee187735b968878fb565))
+* cache the platform facts that cost a second to establish on Windows ([7dc1c88](https://github.com/rv-jclark/ccwatch/commit/7dc1c88e35263a3acc9bd7690017686c93ef9980))
+* shred the statusline payload in one jq pass, not seven processes ([002590e](https://github.com/rv-jclark/ccwatch/commit/002590e3a2201a0c4c8c462a3ba8f9e4b4f92900))
+
+
+### Documentation
+
+* note in SECURITY.md that pasted session titles are made inert ([89f0c64](https://github.com/rv-jclark/ccwatch/commit/89f0c64fe5dcba3a51697a7d3f84bf13d254f8a0))
+* record what a process costs on Windows, and how to measure it ([f7f69a4](https://github.com/rv-jclark/ccwatch/commit/f7f69a4e2b2d83c1ceca615736d273d3a137aa18))
+* record why Zed tasks cannot reattach restored terminals ([3f1d6db](https://github.com/rv-jclark/ccwatch/commit/3f1d6dbf31fb0cddf0dda60ee47a5bf41b02e130))
+* say a restored Zed terminal reattaches on its first click ([9e64066](https://github.com/rv-jclark/ccwatch/commit/9e64066c9a6eacbf9fcb17c7db74b89497a8dc2f))
+* show how to keep the sessions file somewhere Finder shows it ([1c92435](https://github.com/rv-jclark/ccwatch/commit/1c924354242e810df86ed472aefbe21e027a36ba))
+
+
+### Tests
+
+* compute the reset clock's time zone instead of asserting EDT ([efa86b5](https://github.com/rv-jclark/ccwatch/commit/efa86b541a02a6dfaac2666a7e6f75be7b36ad24))
+
 ## [2.1.0](https://github.com/rv-jclark/ccwatch/compare/v2.0.0...v2.1.0) (2026-10-12)
 
 
