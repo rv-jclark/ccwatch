@@ -99,6 +99,11 @@ CCWATCH_BUSY_STALE="${CCWATCH_BUSY_STALE:-600}"
 CCWATCH_SDK_STALE="${CCWATCH_SDK_STALE:-900}"
 CCWATCH_REFRESH="${CCWATCH_REFRESH:-2}"
 CCWATCH_RESUME_DAYS="${CCWATCH_RESUME_DAYS:-14}"
+# How many sessions have to stop between two refreshes for write_roster to
+# treat it as an interruption (Zed quitting) rather than sessions closed one
+# by one, and set the roster aside. Two, because closing two by hand inside one
+# refresh is rare, and a Zed with only two terminals open is not.
+CCWATCH_ENDED_TOGETHER="${CCWATCH_ENDED_TOGETHER:-2}"
 # How recent an unfinished run has to be to earn a place in the live table. The
 # first version had no window and listed 24 runs going back a fortnight, which
 # buried the two from the last hour that actually mattered. Older wreckage is
@@ -1050,6 +1055,37 @@ probe_boot() {
     *) probe_note boot none failed "not measured on this platform (uname: $CCWATCH_UNAME)"
        return 1 ;;
   esac
+}
+
+# probe_zed_start — when the Zed this shell is running under started, in epoch
+# seconds, or nothing when there is no Zed among this process's ancestors (or
+# `ps` is refused). It is what tells "Zed relaunched" apart from "a new
+# terminal", the way probe_boot does for a restart: a Zed quit, crash or update
+# ends every session in its terminals and leaves kern.boottime where it was.
+# One `ps` for the whole table rather than one per hop, then the walk in awk.
+# CCWATCH_FAKE_ZED_START is honoured first; `none` poses no Zed. The suite sets
+# it to `none` throughout, because the suite itself is usually run from a Zed
+# terminal and must not read the developer's own Zed.
+probe_zed_start() {
+  case "${CCWATCH_FAKE_ZED_START:-}" in
+    none) return 1 ;;
+    ?*)   printf '%s' "$CCWATCH_FAKE_ZED_START"; return 0 ;;
+  esac
+  [ "$CCWATCH_PLATFORM" = macos ] || return 1
+  local lstart
+  # `pid ppid Dow Mon DD HH:MM:SS YYYY command...`; the command can contain
+  # spaces ("Zed Preview.app"), so it is everything from field 8 on.
+  lstart=$(ps -axo pid=,ppid=,lstart=,comm= 2>/dev/null | awk -v me="$$" '
+    { par[$1] = $2; st[$1] = $3 " " $4 " " $5 " " $6 " " $7
+      c = $8; for (i = 9; i <= NF; i++) c = c " " $i
+      n = split(c, parts, "/"); base[$1] = tolower(parts[n]) }
+    END { p = par[me]
+          for (hop = 0; hop < 32 && p > 1; hop++) {
+            if (base[p] == "zed") { print st[p]; exit }
+            p = par[p] } }')
+  [ -n "$lstart" ] || return 1
+  # lstart is local time, and so is date -j -f: the two agree.
+  date -j -f '%a %b %d %T %Y' "$lstart" '+%s' 2>/dev/null
 }
 
 # probe_native_path / probe_posix_path — identity on macOS, cygpath on
@@ -2241,9 +2277,37 @@ write_roster() { # write_roster <snapshot-json>
   [ -f "$old" ] || old=/dev/null
   # The sessions file is written from the roster just made, not from the
   # snapshot, because only the roster carries a title forward.
-  if { _roster_json "$1" "$old" >"$ROSTER.tmp" 2>/dev/null \
-         || _roster_json "$1" /dev/null >"$ROSTER.tmp" 2>/dev/null; } \
-     && mv "$ROSTER.tmp" "$ROSTER" 2>/dev/null; then
+  if ! { _roster_json "$1" "$old" >"$ROSTER.tmp" 2>/dev/null \
+         || _roster_json "$1" /dev/null >"$ROSTER.tmp" 2>/dev/null; }; then
+    return 0
+  fi
+  # ⚠️ Sessions that stop TOGETHER are an interruption too, with no reboot.
+  # Zed quitting, crashing or updating ends every session in its terminals and
+  # leaves kern.boottime alone, so the boot check above never fired, and the
+  # next refresh wrote the one session still live over the roster of sixteen
+  # that had just stopped: the list you would reopen them from was replaced by
+  # one that said nothing was missing (rule 4). So when this refresh finds
+  # CCWATCH_ENDED_TOGETHER or more of the roster's sessions gone at once, the
+  # roster is set aside as a reboot's is, marked with when that was noticed.
+  # Same order as above: marked copy renamed into place before roster.json is
+  # replaced, so a reader never sees neither.
+  # Not again within 120s of the last time: Zed can take its terminals down
+  # over a few seconds, and a refresh in the middle would otherwise set the
+  # first half aside and then replace it with the second.
+  local ended now pat
+  ended=$(jq -r '.ended_since_last // 0' "$ROSTER.tmp" 2>/dev/null) || ended=0
+  case "$ended" in ''|*[!0-9]*) ended=0;; esac
+  if [ "$ended" -ge "$CCWATCH_ENDED_TOGETHER" ] && [ -f "$ROSTER" ]; then
+    now=$(date '+%s')
+    pat=0
+    [ -f "$ROSTER_PREV" ] && pat=$(jq -r '.ended_by // .set_aside_for_boot // 0' "$ROSTER_PREV" 2>/dev/null)
+    case "$pat" in ''|*[!0-9]*) pat=0;; esac
+    if [ $((now - pat)) -gt 120 ]; then
+      jq -c --argjson n "$now" '.ended_by = $n' "$ROSTER" >"$ROSTER_PREV.tmp" 2>/dev/null \
+        && mv "$ROSTER_PREV.tmp" "$ROSTER_PREV" 2>/dev/null || rm -f "$ROSTER_PREV.tmp"
+    fi
+  fi
+  if mv "$ROSTER.tmp" "$ROSTER" 2>/dev/null; then
     write_resume_file "$ROSTER"
   fi
   return 0
@@ -2254,6 +2318,9 @@ _roster_json() { # _roster_json <snapshot-json> <previous-roster-file>
     ( [ $old[0].sessions[]? | select(.title != null) | {key: .sid, value: .title} ]
       | from_entries ) as $was
     | { at: $at,
+      # How many of the last roster are not live now: what write_roster reads
+      # to tell sessions stopping together from one being closed.
+      ended_since_last: ([ $old[0].sessions[]?.sid ] - [ .sessions[].sid ] | length),
       sessions: [ .sessions[]
                   | .title = (.title // $was[.sid])
                   | { sid, name, title, project, repo, branch, cwd, token, note,
@@ -2320,6 +2387,9 @@ write_resume_file() { # write_resume_file <roster-file>
       ( if (.sessions | length) == 0 then "== Running now: none ==", ""
         else "== Running now (\(.sessions | length)) ==", "", (.sessions | block) end ),
       ( if ($gone | length) == 0 or $prev_age > $days * 86400 then empty
+        elif $prev.ended_by != null then
+             "== Stopped together \($prev_age | ago) ago (Zed quit, or similar), not running now (\($gone | length)) ==",
+             "", ($gone | block)
         else "== Running before the restart \($prev_age | ago) ago, not running now (\($gone | length)) ==",
              "", ($gone | block) end )
   ' "$1" >"$CCWATCH_RESUME_FILE.tmp" 2>/dev/null \
@@ -2936,7 +3006,10 @@ cmd_resume() {
   for _rf in "$ROSTER_PREV" "$ROSTER"; do
   [ -f "$_rf" ] || continue
   _rlabel="were live"
-  [ "$_rf" = "$ROSTER_PREV" ] && _rlabel="were live before the restart,"
+  if [ "$_rf" = "$ROSTER_PREV" ]; then
+    _rlabel="were live before the restart,"
+    jq -e '.ended_by != null' "$_rf" >/dev/null 2>&1 && _rlabel="were live before they stopped together,"
+  fi
     rage=$(jq -r --argjson now "$(date '+%s')" '($now - (.at // 0))' "$_rf" 2>/dev/null) || rage=""
     rn=$(jq -r '.sessions | length' "$_rf" 2>/dev/null) || rn=0
     if [ -n "$rage" ] && [ "${rn:-0}" -gt 0 ]; then
@@ -3094,11 +3167,14 @@ cmd_resume() {
 # exists only in your shell.
 #
 # What keeps it from doing something you did not want:
-# - It only acts in the first CCWATCH_REATTACH_WINDOW seconds after boot (an
-#   hour). A terminal you open next week in ~/code/agents stays a plain shell.
-# - It only offers sessions from the roster this boot interrupted. The roster
-#   is checked against the boot time, never just its presence: a leftover
-#   roster.before-restart.json from last month's restart is not this restart.
+# - It only acts in the first CCWATCH_REATTACH_WINDOW seconds (an hour) after
+#   boot, or after the Zed it runs under started. A terminal you open next week
+#   in ~/code/agents stays a plain shell.
+# - It only offers sessions from the roster this boot or this Zed launch
+#   interrupted. The roster is checked against that time, never just its
+#   presence: a leftover roster.before-restart.json from last month's restart
+#   is not this restart. Outside the boot window this costs one `ps`, one awk
+#   and one `date` per new Zed terminal, to find Zed's start.
 # - A session that is running again is skipped, judged by the same snapshot
 #   the table draws. If the snapshot cannot be taken, it does nothing, because
 #   "could not tell what is running" must not become "resume it a second
@@ -3139,6 +3215,35 @@ _reattach_roster() {
   return 1
 }
 
+# _reattach_roster_zed <zed-start> — the CONTENT of the roster a Zed relaunch
+# interrupted, or nothing. The reboot rule, with Zed's own start in place of the
+# boot: either roster.json was last written in the
+# CCWATCH_REATTACH_RELAUNCH_GAP before this Zed started (no refresh since), or
+# write_roster set one aside as ended together, last seen whole before this Zed
+# started and noticed gone no more than the gap after. Bounded on both sides:
+# a roster from before last night's quit is not what this morning's Zed
+# interrupted.
+CCWATCH_REATTACH_RELAUNCH_GAP="${CCWATCH_REATTACH_RELAUNCH_GAP:-300}"
+_reattach_roster_zed() {
+  local z="$1" gap="$CCWATCH_REATTACH_RELAUNCH_GAP" doc at by
+  if doc=$(cat "$ROSTER" 2>/dev/null) && [ -n "$doc" ]; then
+    at=$(printf '%s' "$doc" | jq -r '.at // empty' 2>/dev/null) || at=""
+    case "$at" in ''|*[!0-9]*) ;; *)
+      if [ "$at" -le "$z" ] && [ $((z - at)) -le "$gap" ]; then printf '%s' "$doc"; return 0; fi ;;
+    esac
+  fi
+  if doc=$(cat "$ROSTER_PREV" 2>/dev/null) && [ -n "$doc" ]; then
+    at=$(printf '%s' "$doc" | jq -r '"\(.at // "") \(.ended_by // "")"' 2>/dev/null) || at=""
+    read -r at by <<<"$at"
+    case "$at" in ''|*[!0-9]*) return 1;; esac
+    case "$by" in ''|*[!0-9]*) return 1;; esac
+    if [ "$at" -le "$z" ] && [ $((z - gap)) -le "$by" ] && [ "$by" -le $((z + gap)) ]; then
+      printf '%s' "$doc"; return 0
+    fi
+  fi
+  return 1
+}
+
 cmd_reattach() {
   local hook=0
   while [ $# -gt 0 ]; do
@@ -3162,16 +3267,26 @@ cmd_reattach() {
     return 1
   fi
   now=$(date '+%s')
-  if [ $((now - boot)) -gt "$CCWATCH_REATTACH_WINDOW" ]; then
-    [ "$hook" -eq 1 ] && return 1
-    say "This host booted $(( (now - boot) / 60 ))m ago. reattach only acts in the first $((CCWATCH_REATTACH_WINDOW / 60))m after a restart, so a terminal opened later stays a plain shell."
-    return 0
+  # Two kinds of interruption, each inside its own window: a reboot, and a
+  # Zed relaunch with no reboot (quit, crash, update). The second was missed
+  # entirely at first: nine days after boot a Zed relaunch was "too long after
+  # boot", and nothing reattached.
+  local roster="" zed=""
+  if [ $((now - boot)) -le "$CCWATCH_REATTACH_WINDOW" ]; then
+    roster=$(_reattach_roster "$boot") || roster=""
   fi
-
-  local roster
-  if ! roster=$(_reattach_roster "$boot"); then
+  if [ -z "$roster" ] && zed=$(probe_zed_start) && [ -n "$zed" ] \
+     && [ $((now - zed)) -le "$CCWATCH_REATTACH_WINDOW" ]; then
+    roster=$(_reattach_roster_zed "$zed") || roster=""
+  fi
+  if [ -z "$roster" ]; then
     [ "$hook" -eq 1 ] && return 1
-    say "There is no record of what was running before this restart."
+    if [ $((now - boot)) -gt "$CCWATCH_REATTACH_WINDOW" ] \
+       && { [ -z "$zed" ] || [ $((now - zed)) -gt "$CCWATCH_REATTACH_WINDOW" ]; }; then
+      say "This host booted $(( (now - boot) / 60 ))m ago$([ -n "$zed" ] && printf ' and Zed started %sm ago' $(( (now - zed) / 60 ))). reattach only acts in the first $((CCWATCH_REATTACH_WINDOW / 60))m after a restart or a Zed relaunch, so a terminal opened later stays a plain shell."
+    else
+      say "There is no record of what was running before this restart."
+    fi
     return 0
   fi
 
@@ -8063,8 +8178,11 @@ ENVIRONMENT
                      live table (default 24) — older ones are counted, and
                      listed by `ccwatch resume`
   CCWATCH_REATTACH_WINDOW
-                     how long after boot `reattach --hook` acts, in seconds
-                     (default 3600)
+                     how long after boot, or after Zed relaunched, `reattach
+                     --hook` acts, in seconds (default 3600)
+  CCWATCH_ENDED_TOGETHER
+                     sessions stopping in one refresh that count as an
+                     interruption and set the roster aside (default 2)
   CCWATCH_REATTACH_WAIT
                      seconds it waits for a key before reopening (default 3)
   CCWATCH_NO_REATTACH  set to leave restored terminals as plain shells

@@ -1822,6 +1822,56 @@ fixture existed:
   outside the sandbox and passed inside it. Comparing normalised paths fixes
   the real case as well as the fixture's.
 
+**A Zed relaunch is a restart too, and the first version did not know it.**
+Zed quit and relaunched with no reboot: the host had been up nine days.
+Every session in its terminals ended, and two things went wrong at once:
+
+- Nothing reattached. The only interruption reattach recognised was a boot,
+  and nine days after boot it was outside the window.
+- Worse, the list was destroyed. The boot check in `write_roster` never
+  fired, so the first refresh after the relaunch wrote the one session still
+  live over the roster of sixteen that had just stopped. `sessions.txt` then
+  said one session was running and listed nothing as missing: a failure
+  presented as an absence (rule 4). Those sixteen had to be rebuilt by hand
+  from transcript mtimes.
+
+Two changes, which together mirror the reboot path:
+
+- **Sessions that stop together are set aside.** `_roster_json` counts how
+  many of the last roster are not live now (`ended_since_last`). At
+  `CCWATCH_ENDED_TOGETHER` or more (default 2) in one refresh, the last roster
+  is set aside as `roster.before-restart.json`, marked `ended_by` (when it
+  was noticed). The order is the reboot path's: marked copy renamed into place
+  before `roster.json` is replaced. It is not set aside again within 120s,
+  because Zed can take its terminals down over a few seconds, and a refresh in
+  the middle would otherwise replace the first half with the second. The
+  sessions file lists the set-aside sessions under "Stopped together". The
+  threshold is two because closing two sessions by hand inside one refresh is
+  rare, and a Zed with only two terminals is not. One closed on its own never
+  sets anything aside.
+- **reattach also accepts the Zed it runs under.** `probe_zed_start` walks
+  this shell's ancestors in one `ps -axo` table to the first `zed` and reads
+  its `lstart`. With that start Z, a roster is offered if it was written in
+  the `CCWATCH_REATTACH_RELAUNCH_GAP` (300s) before Z with no refresh since,
+  or if it was set aside as ended together, last seen whole before Z and
+  noticed within the gap either side of Z (the refresh that notices can land
+  after the new Zed is up). The hour's window then counts from Z. Every other
+  safeguard is shared: the snapshot running check, the atomic claims keyed by
+  the roster's `at`, the UUID check and the way out. Outside the boot window
+  this costs one `ps`, one `awk` and one `date` per new Zed terminal.
+
+The suite poses Zed with `CCWATCH_FAKE_ZED_START` and sets it to `none` for
+the whole reattach section, because the suite is usually run from a Zed
+terminal and would otherwise read the developer's own Zed's start. What the
+suite cannot pose is a real Zed relaunch: the walk to the `zed` ancestor was
+checked by hand, from a Zed terminal, against `ps`.
+
+What this does not cover: after a relaunch, closing two sessions together
+more than 120s later replaces the set-aside roster, and any of the earlier
+sixteen not yet reopened drop off the sessions file. Merging the two rosters
+would keep them, but would also offer sessions from an older interruption to
+the next relaunch, so this stays simple until that case is seen.
+
 Two bugs found here worth knowing about, because both produced output that
 looked fine:
 
@@ -2360,6 +2410,18 @@ implementation broken in the specific way it describes:
 | `reattach`: say nothing when there is no boot time | 1 |
 | `install-reattach`: append the block again when it is already there | 1 |
 | `install-reattach`: write a block that runs outside Zed terminals too | 2 |
+| `write_roster`: never set aside sessions that stopped together | 7 |
+| `write_roster`: treat one session closed on its own as stopping together | 2 |
+| `write_roster`: set aside again in the middle of a staggered shutdown | 2 |
+| `write_roster`: set aside without the `ended_by` marker | 5 |
+| sessions file: list sessions that stopped together under the restart heading | 1 |
+| `resume`: label sessions that stopped together as from before a restart | 1 |
+| `reattach`: ignore the Zed it runs under | 3 |
+| `reattach`: act at any time after Zed started, not only in the window | 2 |
+| `reattach`: accept a roster that stopped long before this Zed started | 1 |
+| `reattach`: accept a roster last seen whole after this Zed started | 1 |
+| `reattach`: accept a live roster of any age from before Zed started | 1 |
+| `reattach`: never accept a live roster written just before Zed started | 1 |
 | `revive`: stop recognising the previous wording of the ask | 1 |
 | `revive`: drop the agent's answer from its row | 1, and 1 (verify-ui) |
 | `revive`: ask about the first unfinished roadmap in the directory, not the session's own | 1 |

@@ -130,7 +130,7 @@ case "$(uname -s)" in
   *)                    _host_platform=macos ;;
 esac
 
-TALLY_FLOOR=625
+TALLY_FLOOR=641
 TALLY_FLOOR_NODE=306
 # ⚠️ Windows refuses send/kill/peers/revive outright -- they need POSIX
 # signals and the per-session Unix socket -- so those four sections cannot run
@@ -4562,9 +4562,12 @@ assert_contains "$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-none" CCWAT
                    CCWATCH_FAKE_BOOT="$_st_boot" NO_COLOR=1 "$CCWATCH" resume -n 0 2>&1)" \
   "were live before the restart" "and ccwatch resume reads the roster set aside at the restart"
 # No boot time - Windows, or a sandbox refusing sysctl - is not a restart.
+# CCWATCH_ENDED_TOGETHER is raised out of reach, because both sessions stopping
+# in one refresh is now an interruption of its own (see the reattach section),
+# and what is under test here is only the boot rule.
 rm -rf "$SH"; mkdir -p "$SH"
 CCWATCH_FAKE_PS="$WORK/ps-st" CCWATCH_FAKE_BOOT=1 st_once
-CCWATCH_FAKE_PS="$WORK/ps-none" CCWATCH_FAKE_BOOT=none st_once
+CCWATCH_ENDED_TOGETHER=99 CCWATCH_FAKE_PS="$WORK/ps-none" CCWATCH_FAKE_BOOT=none st_once
 [ ! -e "$SH/roster.before-restart.json" ] \
   && t_pass "a host that cannot say when it booted never sets a roster aside as before a restart" \
   || t_fail "a host that cannot say when it booted never sets a roster aside" "roster.before-restart.json exists"
@@ -4582,6 +4585,9 @@ printf '\nreattach\n'
 # session already running again is left alone, and that every way of not
 # knowing (no boot time, no snapshot, a roster from another restart) prints
 # nothing to eval.
+# ⚠️ No Zed, unless a test poses one: the suite is usually run from a Zed
+# terminal, and reattach would otherwise read the developer's own Zed's start.
+export CCWATCH_FAKE_ZED_START=none
 RAH="$WORK/reattach-home"; mkdir -p "$RAH" "$WORK/ra-a" "$WORK/ra-b" "$WORK/ra-c" "$WORK/ra-d"
 RA_BOOT=$(( $(date '+%s') - 300 ))
 _ra_a1=aaaaaaaa-1111-0000-0000-000000000001
@@ -4609,7 +4615,8 @@ mkps 9301 "0:01.00" > "$WORK/ps-ra"
 ra() { # ra <dir> [args...]: reattach run from <dir>, stdout only; stderr to ra-err
   local d="$1"; shift
   ( cd "$d" && CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$RAH" CCWATCH_FAKE_PS="${RA_PS:-$WORK/ps-ra}" \
-      CCWATCH_FAKE_BOOT="${RA_BOOTV:-$RA_BOOT}" NO_COLOR=1 "$CCWATCH" reattach "$@" 2>"$WORK/ra-err" )
+      CCWATCH_FAKE_BOOT="${RA_BOOTV:-$RA_BOOT}" CCWATCH_FAKE_ZED_START="${RA_ZED:-none}" \
+      NO_COLOR=1 "$CCWATCH" reattach "$@" 2>"$WORK/ra-err" )
 }
 _ra1=$(ra "$WORK/ra-a" --hook); _ra2=$(ra "$WORK/ra-a" --hook); _ra3=$(ra "$WORK/ra-a" --hook; echo "rc=$?")
 assert_eq "$_ra1" "claude --resume $_ra_a1" \
@@ -4704,6 +4711,95 @@ assert_not_contains "$_ra_seen" "no record of what was running" \
 assert_eq "$(jq -r '.set_aside_for_boot' "$RAH2/roster.before-restart.json" 2>/dev/null)" "$RA_BOOT" \
   "and the roster is set aside, marked, once the write finishes"
 
+# A Zed relaunch with no reboot: Zed quit, crashed or updated, every session in
+# its terminals ended, and kern.boottime did not move. The first version only
+# knew about reboots, so nine days after boot nothing reattached, and the next
+# refresh wrote the one session still live over the roster of all of them.
+#
+# write_roster first: sessions that stop together are set aside.
+EH="$WORK/ended-home"; mkdir -p "$EH" "$WORK/ra-e"
+_re1=eeeeeeee-2222-0000-0000-000000000001
+_re2=eeeeeeee-2222-0000-0000-000000000002
+_re3=eeeeeeee-2222-0000-0000-000000000003
+mksess 9311 "$_re1" ra-e-1 "$WORK/ra-e" idle cli
+mksess 9312 "$_re2" ra-e-2 "$WORK/ra-e" idle cli
+mksess 9313 "$_re3" ra-e-3 "$WORK/ra-e" idle cli
+{ mkps 9311 "0:01.00"; mkps 9312 "0:01.00"; mkps 9313 "0:01.00"; } > "$WORK/ps-e3"
+mkps 9311 "0:01.00" > "$WORK/ps-e1"
+: > "$WORK/ps-e0"
+e_once() { CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$EH" CCWATCH_FAKE_PS="$1" CCWATCH_FAKE_BOOT=1 \
+             NO_COLOR=1 "$CCWATCH" once >/dev/null 2>&1; }
+e_once "$WORK/ps-e3"
+e_once "$WORK/ps-e1"
+assert_eq "$(jq -r '[.sessions[].sid] | sort | join(",")' "$EH/roster.before-restart.json" 2>/dev/null)" \
+  "$_re1,$_re2,$_re3" \
+  "sessions that stop together, with no reboot, set the roster aside instead of being written over"
+case "$(jq -r '.ended_by // empty' "$EH/roster.before-restart.json" 2>/dev/null)" in
+  ''|*[!0-9]*) t_fail "and it records when that was noticed" "no numeric ended_by" ;;
+  *) t_pass "and it records when that was noticed" ;;
+esac
+_es=$(cat "$EH/sessions.txt" 2>/dev/null)
+assert_contains "$_es" "== Stopped together" "the sessions file lists them under their own heading"
+assert_contains "$_es" "claude --resume $_re2" "with the commands to reopen them"
+assert_contains "$(CLAUDE_CONFIG_DIR="$FH" CCWATCH_FAKE_PS="$WORK/ps-e1" CCWATCH_HOME="$EH" \
+                   CCWATCH_FAKE_BOOT=1 NO_COLOR=1 "$CCWATCH" resume -n 0 2>&1)" \
+  "were live before they stopped together" "and ccwatch resume reads that roster too"
+# The rest of a staggered shutdown, a refresh later, does not replace it.
+mksess 9314 "$_ra_d1" ra-e-4 "$WORK/ra-e" idle cli
+{ mkps 9311 "0:01.00"; mkps 9314 "0:01.00"; } > "$WORK/ps-e2"
+e_once "$WORK/ps-e2"
+e_once "$WORK/ps-e0"
+assert_eq "$(jq -r '.sessions | length' "$EH/roster.before-restart.json" 2>/dev/null)" "3" \
+  "and the rest of a staggered shutdown, a refresh later, does not replace it with the remainder"
+# One session closed on its own is not an interruption.
+EH1="$WORK/ended-home-1"; mkdir -p "$EH1"
+{ mkps 9311 "0:01.00"; mkps 9312 "0:01.00"; } > "$WORK/ps-e12"
+CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$EH1" CCWATCH_FAKE_PS="$WORK/ps-e12" CCWATCH_FAKE_BOOT=1 NO_COLOR=1 "$CCWATCH" once >/dev/null 2>&1
+CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$EH1" CCWATCH_FAKE_PS="$WORK/ps-e1" CCWATCH_FAKE_BOOT=1 NO_COLOR=1 "$CCWATCH" once >/dev/null 2>&1
+[ ! -e "$EH1/roster.before-restart.json" ] \
+  && t_pass "one session closed on its own is not set aside as an interruption" \
+  || t_fail "one session closed on its own is not set aside as an interruption" "roster.before-restart.json exists"
+# End to end: the Zed that started just after reattaches what write_roster set aside.
+_ez=$(jq -r '.ended_by' "$EH/roster.before-restart.json" 2>/dev/null)
+_era=$( cd "$WORK/ra-e" && CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$EH" CCWATCH_FAKE_PS="$WORK/ps-e0" \
+          CCWATCH_FAKE_BOOT=$(( $(date '+%s') - 9 * 86400 )) CCWATCH_FAKE_ZED_START="$_ez" NO_COLOR=1 \
+          "$CCWATCH" reattach --hook 2>/dev/null )
+assert_eq "$_era" "claude --resume $_re1" \
+  "nine days after boot, a terminal in the Zed that relaunched gets a session that stopped together"
+rm -f "$FH/sessions/9311.json" "$FH/sessions/9312.json" "$FH/sessions/9313.json" "$FH/sessions/9314.json"
+
+# reattach's own bounds on the Zed case, with the boot nine days back so that
+# only Zed's start can admit a roster.
+_rz_now=$(date '+%s'); _rz=$((_rz_now - 120)); _rz_boot=$((_rz_now - 9 * 86400))
+rz_prev() { # rz_prev <at> <ended_by>: a roster set aside as ended together
+  ra_roster "$RAH/roster.before-restart.json.tmp" "$1"
+  jq -c --argjson e "$2" '.ended_by = $e' "$RAH/roster.before-restart.json.tmp" \
+    > "$RAH/roster.before-restart.json" && rm -f "$RAH/roster.before-restart.json.tmp"
+}
+rz() { rm -rf "$RAH/reattach"; RA_BOOTV=$_rz_boot RA_ZED="${1:-none}" ra "$WORK/ra-b" --hook; }
+ra_roster "$RAH/roster.json" $((_rz + 60))
+rz_prev $((_rz - 30)) $((_rz + 5))
+assert_eq "$(rz $_rz)" "claude --resume $_ra_b1" \
+  "a roster set aside as ended together just before this Zed started is reattached"
+assert_eq "$(rz)" "" "and nothing happens in a terminal with no Zed behind it"
+rz_prev $((_rz - 3630)) $((_rz - 3600))
+assert_eq "$(rz $_rz)" "" "one that stopped an hour before this Zed started is not what it interrupted"
+rz_prev $((_rz + 30)) $((_rz + 40))
+assert_eq "$(rz $_rz)" "" "nor is one last seen whole after this Zed was already running"
+_rz_old=$((_rz_now - 7200))
+rz_prev $((_rz_old - 30)) $((_rz_old + 5))
+assert_eq "$(rz $_rz_old)" "" "and a Zed that started two hours ago is past the window"
+assert_contains "$(RA_BOOTV=$_rz_boot RA_ZED=$_rz_old ra "$WORK/ra-b")" "after a restart or a Zed relaunch" \
+  "run by hand it says why, naming both"
+rm -f "$RAH/roster.before-restart.json"
+ra_roster "$RAH/roster.json" $((_rz - 20))
+assert_eq "$(rz $_rz)" "claude --resume $_ra_b1" \
+  "a live roster written just before this Zed started, with no refresh since, is reattached too"
+ra_roster "$RAH/roster.json" $((_rz - 3600))
+assert_eq "$(rz $_rz)" "" "but not one written an hour before it"
+rm -f "$RAH/roster.json"; rm -rf "$RAH/reattach"
+ra_mark $((RA_BOOT + 2))   # back to the reboot case, for the assertions below
+
 # ⚠️ Not on Windows: Python there has no pty module, and install-reattach
 # refuses by design (no boot time). Nine assertions, counted in
 # TALLY_FLOOR_POSIX.
@@ -4782,6 +4878,7 @@ assert_eq "$(ZED_TERM=true _ra_src)" "REOPENED --resume $_ra_b1" \
   "and in a Zed terminal the shell runs the resume command reattach printed"
 fi
 rm -f "$RAH/resume-command" "$FH/sessions/9301.json"
+unset CCWATCH_FAKE_ZED_START
 
 # ========================================================== pending asks =====
 printf '\npending questions\n'

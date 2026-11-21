@@ -84,9 +84,9 @@ between two refreshes.
 
 ### Optional: reopen sessions in Zed terminals after a restart
 
-When Zed reopens after a restart, each terminal comes back in the directory
-its session was running in, but as a plain shell. This makes those shells
-reopen their sessions:
+When Zed reopens after a restart, or after Zed itself quits, crashes or
+updates, each terminal comes back in the directory its session was running
+in, but as a plain shell. This makes those shells reopen their sessions:
 
 ```bash
 ccwatch install-reattach     # appends a block to ~/.zshrc; shows it and asks first
@@ -102,12 +102,16 @@ What happens in each restored Zed terminal:
 - It skips anything you have already reopened yourself.
 - Zed starts a restored terminal's shell only when you first click it, so
   each one reattaches as you click through them.
-- It only acts in the first hour after boot, so click through them within the
-  hour. A terminal you open or first click later is a plain shell. To allow
+- It only acts in the first hour after boot, or after Zed started again, so
+  click through them within the hour. A terminal you open or first click later is a plain shell. To allow
   longer, add `export CCWATCH_REATTACH_WINDOW=14400` (seconds) to `~/.zshrc`
   above the block.
 - It uses the same command word as `sessions.txt` (`resume-command`, or
   `CCWATCH_RESUME_CMD`).
+
+When Zed stops without a reboot, `sessions.txt` lists the sessions that ended
+under **Stopped together** (as it lists them under **before the restart**
+after a reboot), so you can reopen them even without the block.
 
 `ccwatch reattach`, run in a directory, lists what a terminal there would
 reopen. To turn it off, set `CCWATCH_NO_REATTACH=1` or delete the block.
