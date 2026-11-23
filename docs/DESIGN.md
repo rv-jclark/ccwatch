@@ -1866,11 +1866,32 @@ terminal and would otherwise read the developer's own Zed's start. What the
 suite cannot pose is a real Zed relaunch: the walk to the `zed` ancestor was
 checked by hand, from a Zed terminal, against `ps`.
 
-What this does not cover: after a relaunch, closing two sessions together
-more than 120s later replaces the set-aside roster, and any of the earlier
-sixteen not yet reopened drop off the sessions file. Merging the two rosters
-would keep them, but would also offer sessions from an older interruption to
-the next relaunch, so this stays simple until that case is seen.
+**The first real reboot after this shipped lost all twenty sessions anyway.**
+A shutdown quits Zed before the machine goes down, so the last refresh of the
+old boot saw every session stop together. It set them aside correctly, marked
+`ended_by`, and wrote a `roster.json` with nothing in it. The first refresh
+after the boot then took the reboot path: `roster.json` predated the boot, so
+it was set aside, and it replaced the twenty with none. The two set-asides
+share one file, and each path had been tested alone, with the other's file
+absent. The suite now poses the whole sequence: three sessions stop together,
+the boot moves, and the next refresh runs.
+
+So the reboot path checks what it is about to replace. If the set-aside has
+an `ended_by` within `CCWATCH_REATTACH_RELAUNCH_GAP` of `roster.json`'s last
+write, it is what this boot interrupted. The two are merged by sid (a session
+still live at that last write is kept too), marked for this boot, and
+`ended_by` is not carried over, so the sessions file says "before the restart". The match
+is on `ended_by` alone, not on the file being unmarked: a set-aside an
+earlier boot marked and a later Zed quit merged into carries both. An
+`ended_by` an hour before the last write is history, and is replaced as before.
+
+The same merge closes the gap the first version left open. After a relaunch,
+two sessions closing together more than 120s later used to replace the
+set-aside roster, dropping any not yet reopened from the sessions file. Now a
+set-aside whose marker is inside `CCWATCH_REATTACH_WINDOW` is merged with the
+new batch, and only one older than the window is replaced. Sessions running
+again are still filtered out by the sessions file and by reattach's running
+check, so merging keeps nothing that would be opened twice.
 
 Two bugs found here worth knowing about, because both produced output that
 looked fine:
@@ -2414,6 +2435,11 @@ implementation broken in the specific way it describes:
 | `write_roster`: treat one session closed on its own as stopping together | 2 |
 | `write_roster`: set aside again in the middle of a staggered shutdown | 2 |
 | `write_roster`: set aside without the `ended_by` marker | 5 |
+| `write_roster`: on the first refresh after a boot, replace a set-aside of sessions that stopped together at shutdown | 4 |
+| `write_roster`: keep a set-aside into the reboot however long before the last write it stopped | 1 |
+| `write_roster`: carry `ended_by` into a reboot's merged set-aside | 1 |
+| `write_roster`: replace a set-aside still inside the window with the next batch that stops together | 1 |
+| `write_roster`: merge set-asides without the earlier one's sessions | 5 |
 | sessions file: list sessions that stopped together under the restart heading | 1 |
 | `resume`: label sessions that stopped together as from before a restart | 1 |
 | `reattach`: ignore the Zed it runs under | 3 |

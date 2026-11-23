@@ -2229,6 +2229,16 @@ reset_clock() { # reset_clock <epoch-seconds>
   probe_clock "$1"
 }
 
+# _ASIDE_UNION — jq, run on a roster with the current set-aside as $p: the
+# roster's sessions plus every set-aside session it does not already have,
+# keeping the set-aside's boot marker (never its ended_by). Used where a new set-aside would otherwise
+# replace one that still holds sessions waiting to be reopened.
+# shellcheck disable=SC2016  # jq program text, expanded by jq, not the shell
+_ASIDE_UNION='($p[0] // {}) as $q
+  | ([ .sessions[]? | {key: (.sid // ""), value: true} ] | from_entries) as $have
+  | .sessions = ([ .sessions[]? ] + [ $q.sessions[]? | select($have[.sid // ""] | not) ])
+  | (if $q.set_aside_for_boot != null then .set_aside_for_boot = $q.set_aside_for_boot else . end)'
+
 # write_roster — remember what was live. Called from the places that take a
 # snapshot for display, not from snapshot() itself, so that a --json consumer
 # reading the state does not rewrite history as a side effect.
@@ -2255,7 +2265,31 @@ write_roster() { # write_roster <snapshot-json>
       # second file, and a Zed shell starting between the two found an
       # unmarked roster and stayed a plain shell. Zed and the menu bar app do
       # start in the same second after login, so that was a real window.
-      if jq -c --argjson b "$boot" '.set_aside_for_boot = $b' "$ROSTER" >"$ROSTER_PREV.tmp" 2>/dev/null \
+      #
+      # ⚠️ A shutdown quits Zed BEFORE the machine goes down, so the last
+      # refresh of the old boot usually sees every session stop together:
+      # it sets that roster aside (ended_by, below) and leaves a roster.json
+      # with nothing in it. Setting THAT aside here replaced twenty sessions
+      # with none, on the first real reboot after the ended-together rule
+      # shipped. So an ended-together set-aside noticed within
+      # CCWATCH_REATTACH_RELAUNCH_GAP of the last pre-boot write is what this
+      # boot interrupted too: it is merged with roster.json by sid and the
+      # merge is marked for this boot. The union does not carry ended_by over,
+      # so after a reboot the sessions file says "before the restart".
+      # Matched on ended_by alone, not "unmarked": a set-aside that an earlier
+      # boot marked and a later Zed quit merged into carries both, and the
+      # ended_by within the gap of the last write is what makes it this one.
+      local pby
+      pby=$(jq -r '.ended_by // empty' "$ROSTER_PREV" 2>/dev/null) || pby=""
+      case "$pby" in ''|*[!0-9]*) pby="";; esac
+      if [ -n "$pby" ] \
+         && [ "$pby" -le $((at + CCWATCH_REATTACH_RELAUNCH_GAP)) ] \
+         && [ "$pby" -ge $((at - CCWATCH_REATTACH_RELAUNCH_GAP)) ] \
+         && jq -c --slurpfile p "$ROSTER_PREV" --argjson b "$boot" \
+              "$_ASIDE_UNION"' | .set_aside_for_boot = $b' "$ROSTER" >"$ROSTER_PREV.tmp" 2>/dev/null \
+         && mv "$ROSTER_PREV.tmp" "$ROSTER_PREV" 2>/dev/null; then
+        rm -f "$ROSTER"
+      elif jq -c --argjson b "$boot" '.set_aside_for_boot = $b' "$ROSTER" >"$ROSTER_PREV.tmp" 2>/dev/null \
          && mv "$ROSTER_PREV.tmp" "$ROSTER_PREV" 2>/dev/null; then
         rm -f "$ROSTER"
       else
@@ -2303,8 +2337,18 @@ write_roster() { # write_roster <snapshot-json>
     [ -f "$ROSTER_PREV" ] && pat=$(jq -r '.ended_by // .set_aside_for_boot // 0' "$ROSTER_PREV" 2>/dev/null)
     case "$pat" in ''|*[!0-9]*) pat=0;; esac
     if [ $((now - pat)) -gt 120 ]; then
-      jq -c --argjson n "$now" '.ended_by = $n' "$ROSTER" >"$ROSTER_PREV.tmp" 2>/dev/null \
-        && mv "$ROSTER_PREV.tmp" "$ROSTER_PREV" 2>/dev/null || rm -f "$ROSTER_PREV.tmp"
+      # A set-aside still inside the reattach window may hold sessions not yet
+      # reopened. Replacing it with this batch dropped them from the sessions
+      # file, so the two are merged by sid. One older than the window is
+      # replaced: it is history, not something waiting to be reopened.
+      if [ "$pat" -gt 0 ] && [ $((now - pat)) -le "$CCWATCH_REATTACH_WINDOW" ] \
+         && jq -c --slurpfile p "$ROSTER_PREV" --argjson n "$now" \
+              "$_ASIDE_UNION"' | .ended_by = $n' "$ROSTER" >"$ROSTER_PREV.tmp" 2>/dev/null; then
+        mv "$ROSTER_PREV.tmp" "$ROSTER_PREV" 2>/dev/null || rm -f "$ROSTER_PREV.tmp"
+      else
+        jq -c --argjson n "$now" '.ended_by = $n' "$ROSTER" >"$ROSTER_PREV.tmp" 2>/dev/null \
+          && mv "$ROSTER_PREV.tmp" "$ROSTER_PREV" 2>/dev/null || rm -f "$ROSTER_PREV.tmp"
+      fi
     fi
   fi
   if mv "$ROSTER.tmp" "$ROSTER" 2>/dev/null; then

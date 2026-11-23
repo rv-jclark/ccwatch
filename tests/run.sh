@@ -130,7 +130,7 @@ case "$(uname -s)" in
   *)                    _host_platform=macos ;;
 esac
 
-TALLY_FLOOR=641
+TALLY_FLOOR=648
 TALLY_FLOOR_NODE=306
 # ⚠️ Windows refuses send/kill/peers/revive outright -- they need POSIX
 # signals and the per-session Unix socket -- so those four sections cannot run
@@ -4766,6 +4766,61 @@ _era=$( cd "$WORK/ra-e" && CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$EH" CCWATCH_FA
           "$CCWATCH" reattach --hook 2>/dev/null )
 assert_eq "$_era" "claude --resume $_re1" \
   "nine days after boot, a terminal in the Zed that relaunched gets a session that stopped together"
+
+# A reboot whose shutdown quit Zed first. The last refresh of the old boot saw
+# every session stop together, set them aside, and left an EMPTY roster.json;
+# the first refresh after the boot then set that empty roster aside over them.
+# Measured on a real reboot: twenty sessions became none, and nothing
+# reattached.
+EB="$WORK/ended-boot-home"; mkdir -p "$EB"
+eb_once() { CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$EB" CCWATCH_FAKE_PS="$1" CCWATCH_FAKE_BOOT="$2" \
+              NO_COLOR=1 "$CCWATCH" once >/dev/null 2>&1; }
+eb_once "$WORK/ps-e3" 1
+eb_once "$WORK/ps-e0" 1          # Zed quits on the way down: all three stop together
+# Moved a minute into the past, so the boot can fall between the shutdown and
+# now without the refreshes after it looking like they came before it.
+for _f in roster.json roster.before-restart.json; do
+  jq -c '.at -= 60 | if .ended_by then .ended_by -= 60 else . end' "$EB/$_f" > "$EB/$_f.tmp" \
+    && mv "$EB/$_f.tmp" "$EB/$_f"
+done
+_eb_boot=$(( $(jq -r '.at' "$EB/roster.json" 2>/dev/null) + 30 ))
+eb_once "$WORK/ps-e0" "$_eb_boot" # the first refresh after the boot
+assert_eq "$(jq -r '[.sessions[].sid] | sort | join(",")' "$EB/roster.before-restart.json" 2>/dev/null)" \
+  "$_re1,$_re2,$_re3" \
+  "a reboot after a shutdown that stopped every session keeps them, not the empty roster after"
+assert_eq "$(jq -r '.set_aside_for_boot' "$EB/roster.before-restart.json" 2>/dev/null)" "$_eb_boot" \
+  "and marks them for this boot"
+_ebs=$(cat "$EB/sessions.txt" 2>/dev/null)
+assert_contains "$_ebs" "== Running before the restart" "the sessions file calls them the restart's"
+assert_contains "$_ebs" "claude --resume $_re2" "and lists them"
+_ebr=$( cd "$WORK/ra-e" && CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$EB" CCWATCH_FAKE_PS="$WORK/ps-e0" \
+          CCWATCH_FAKE_BOOT="$_eb_boot" NO_COLOR=1 "$CCWATCH" reattach --hook 2>/dev/null )
+assert_eq "$_ebr" "claude --resume $_re1" "and a restored terminal after the reboot reattaches one"
+# Bounded: sessions that stopped together long before the last write are not
+# what the reboot interrupted, and the reboot's own roster replaces them.
+EB2="$WORK/ended-boot-home-2"; mkdir -p "$EB2"
+CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$EB2" CCWATCH_FAKE_PS="$WORK/ps-e1" CCWATCH_FAKE_BOOT=1 \
+  NO_COLOR=1 "$CCWATCH" once >/dev/null 2>&1
+_eb2_at=$(jq -r '.at' "$EB2/roster.json" 2>/dev/null)
+jq -c --argjson e $((_eb2_at - 4000)) '.ended_by = $e | .sessions[0].sid = "'"$_re3"'"' "$EB2/roster.json" \
+  > "$EB2/roster.before-restart.json"
+CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$EB2" CCWATCH_FAKE_PS="$WORK/ps-e1" CCWATCH_FAKE_BOOT=$((_eb2_at + 2)) \
+  NO_COLOR=1 "$CCWATCH" once >/dev/null 2>&1
+assert_eq "$(jq -r '[.sessions[].sid] | join(",")' "$EB2/roster.before-restart.json" 2>/dev/null)" "$_re1" \
+  "but sessions that stopped together an hour before the last write are not kept into the reboot"
+# A second batch stopping together while the first is still waiting to be
+# reopened is added to it, not swapped for it.
+EB3="$WORK/ended-boot-home-3"; mkdir -p "$EB3"
+CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$EB3" CCWATCH_FAKE_PS="$WORK/ps-e12" CCWATCH_FAKE_BOOT=1 \
+  NO_COLOR=1 "$CCWATCH" once >/dev/null 2>&1
+_eb3_at=$(jq -r '.at' "$EB3/roster.json" 2>/dev/null)
+jq -c --argjson e $((_eb3_at - 600)) '.ended_by = $e | .sessions = [.sessions[0] | .sid = "'"$_re3"'"]' \
+  "$EB3/roster.json" > "$EB3/roster.before-restart.json"
+CLAUDE_CONFIG_DIR="$FH" CCWATCH_HOME="$EB3" CCWATCH_FAKE_PS="$WORK/ps-e0" CCWATCH_FAKE_BOOT=1 \
+  NO_COLOR=1 "$CCWATCH" once >/dev/null 2>&1
+assert_eq "$(jq -r '[.sessions[].sid] | sort | join(",")' "$EB3/roster.before-restart.json" 2>/dev/null)" \
+  "$_re1,$_re2,$_re3" \
+  "a second batch stopping together inside the window is added to the first, not swapped for it"
 rm -f "$FH/sessions/9311.json" "$FH/sessions/9312.json" "$FH/sessions/9313.json" "$FH/sessions/9314.json"
 
 # reattach's own bounds on the Zed case, with the boot nine days back so that
